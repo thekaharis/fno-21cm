@@ -1,0 +1,22 @@
+# --- Large / external content (never upload) ---------------------------------
+# 21cmFAST lightcone HDF5 files (~13 GB)
+data/
+
+# Local neuraloperator checkout — third-party library with its own git history.
+# Install via conda/pip, or clone https://github.com/neuraloperator/neuraloperator
+# into ./neuraloperator/ to use the vendored source path.
+neuraloperator/
+
+# Trained model artifacts (regenerable by re-running training)
+checkpoints/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+env/
+
+# --- OS / editor -------------------------------------------------------------
+.DS_Store
