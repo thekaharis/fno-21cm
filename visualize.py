@@ -10,11 +10,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# ---- Use the local neuraloperator checkout (./neuraloperator/neuralop) ----
-# Prepend the in-repo copy so it shadows any pip-installed `neuralop`.
-_LOCAL_NEURALOP = Path(__file__).resolve().parent / "neuraloperator"
-if _LOCAL_NEURALOP.is_dir():
-    sys.path.insert(0, str(_LOCAL_NEURALOP))
+# ---- Prefer a vendored neuralop next to this script ------------------------
+# Accept either layout and skip any location whose package is incomplete:
+#   ./neuraloperator/neuralop/   (a full neuraloperator checkout), or
+#   ./neuralop/                  (the package dropped straight into the repo).
+# If neither has a valid __init__.py, fall back to an installed `neuralop`.
+_HERE = Path(__file__).resolve().parent
+for _cand in (_HERE / "neuraloperator", _HERE):
+    if (_cand / "neuralop" / "__init__.py").is_file():
+        sys.path.insert(0, str(_cand))
+        break
 # ---------------------------------------------------------------------------
 
 import numpy as np
@@ -25,16 +30,11 @@ from matplotlib.gridspec import GridSpec
 
 from neuralop.models import FNO
 
-# If the local checkout is present, confirm we actually picked it up (not an
-# installed copy).  If it is absent (e.g. a fresh clone without the vendored
-# library), fall back silently to whatever ``neuralop`` is installed.
+# Log which neuralop was actually used.
 import neuralop as _neuralop
-if _LOCAL_NEURALOP.is_dir():
-    assert Path(_neuralop.__file__).resolve().is_relative_to(_LOCAL_NEURALOP), (
-        f"Expected local neuralop from {_LOCAL_NEURALOP}, got {_neuralop.__file__}"
-    )
+print(f"[visualize] using neuralop from {_neuralop.__file__}")
 
-from dataset import LightconeSliceDataset, split_by_file
+from dataset import LightconeSliceDataset, split_by_file, make_file_split
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints/model_state_dict.pt"
@@ -183,9 +183,9 @@ def main():
     h5_files = sorted(DATA_DIR.glob("*.h5"))
     ds = LightconeSliceDataset(h5_files, n_z=N_Z, z_min=Z_MIN,
                                 z_max=Z_MAX, preload=True)
-    train_ds, val_ds, test_ds = split_by_file(ds,
-                                               list(range(0, 7)),
-                                               list(range(7, 9)), [9])
+    # Same seeded split as training, so val/test here are the held-out files.
+    train_files, val_files, test_files = make_file_split(len(h5_files), seed=42)
+    train_ds, val_ds, test_ds = split_by_file(ds, train_files, val_files, test_files)
 
     z_grid = ds.target_z
     print(f"Dataset: {len(ds)} slices, z-grid [{z_grid[0]:.2f}, {z_grid[-1]:.2f}]")

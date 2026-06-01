@@ -144,6 +144,34 @@ def split_by_file(
     return _subset(train_files), _subset(val_files), _subset(test_files)
 
 
+def make_file_split(
+    n_files: int,
+    seed: int = 42,
+    val_frac: float = 0.1,
+    test_frac: float = 0.1,
+) -> tuple[list[int], list[int], list[int]]:
+    """Deterministic shuffled split of file *indices* into train/val/test.
+
+    The lightcone files come from a space-filling parameter design, so a
+    seeded random partition gives val/test sets that are representative of
+    the full parameter space.  Using a fixed *seed* makes the split identical
+    across training and evaluation runs.
+
+    Returns sorted index lists ``(train, val, test)``.  Val and test each get
+    at least one file.
+    """
+    import random
+
+    perm = list(range(n_files))
+    random.Random(seed).shuffle(perm)
+    n_test = max(1, round(test_frac * n_files))
+    n_val = max(1, round(val_frac * n_files))
+    test = sorted(perm[:n_test])
+    val = sorted(perm[n_test:n_test + n_val])
+    train = sorted(perm[n_test + n_val:])
+    return train, val, test
+
+
 def build_dataloaders(
     dataset: LightconeSliceDataset,
     train_idx: Sequence[int],

@@ -13,11 +13,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# ---- Use the local neuraloperator checkout (./neuraloperator/neuralop) ----
-# Prepend the in-repo copy so it shadows any pip-installed `neuralop`.
-_LOCAL_NEURALOP = Path(__file__).resolve().parent / "neuraloperator"
-if _LOCAL_NEURALOP.is_dir():
-    sys.path.insert(0, str(_LOCAL_NEURALOP))
+# ---- Prefer a vendored neuralop next to this script ------------------------
+# Accept either layout and skip any location whose package is incomplete:
+#   ./neuraloperator/neuralop/   (a full neuraloperator checkout), or
+#   ./neuralop/                  (the package dropped straight into the repo).
+# If neither has a valid __init__.py, fall back to an installed `neuralop`.
+_HERE = Path(__file__).resolve().parent
+for _cand in (_HERE / "neuraloperator", _HERE):
+    if (_cand / "neuralop" / "__init__.py").is_file():
+        sys.path.insert(0, str(_cand))
+        break
 # ---------------------------------------------------------------------------
 
 import torch
@@ -29,16 +34,11 @@ from neuralop import Trainer
 from neuralop import LpLoss, H1Loss
 from neuralop.utils import count_model_params
 
-# If the local checkout is present, confirm we actually picked it up (not an
-# installed copy).  If it is absent (e.g. a fresh clone without the vendored
-# library), fall back silently to whatever ``neuralop`` is installed.
+# Log which neuralop was actually used (handy when reading the SLURM job log).
 import neuralop as _neuralop
-if _LOCAL_NEURALOP.is_dir():
-    assert Path(_neuralop.__file__).resolve().is_relative_to(_LOCAL_NEURALOP), (
-        f"Expected local neuralop from {_LOCAL_NEURALOP}, got {_neuralop.__file__}"
-    )
+print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
-from dataset import LightconeSliceDataset, split_by_file
+from dataset import LightconeSliceDataset, split_by_file, make_file_split
 
 
 # ------------------------------------------------------------------ config
@@ -58,10 +58,11 @@ N_EPOCHS = 100
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-# Train / val / test split by file index (10 files total)
-TRAIN_FILES = list(range(0, 7))
-VAL_FILES = list(range(7, 9))
-TEST_FILES = [9]
+# Train / val / test split: seeded shuffle over ALL discovered files
+# (~80 / 10 / 10).  See dataset.make_file_split.
+SPLIT_SEED = 42
+VAL_FRACTION = 0.1
+TEST_FRACTION = 0.1
 
 
 # ------------------------------------------------------------------ wrapper
@@ -156,12 +157,16 @@ def main():
     print(f"Total slices: {len(ds)}  ({len(h5_files)} files x {N_Z} z-bins)")
 
     # ------------------------------------------------- 3. split
-    train_ds, val_ds, test_ds = split_by_file(
-        ds, TRAIN_FILES, VAL_FILES, TEST_FILES,
+    train_files, val_files, test_files = make_file_split(
+        len(h5_files), seed=SPLIT_SEED,
+        val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
     )
-    print(f"Train: {len(train_ds)} slices ({len(TRAIN_FILES)} files)")
-    print(f"Val:   {len(val_ds)} slices ({len(VAL_FILES)} files)")
-    print(f"Test:  {len(test_ds)} slices ({len(TEST_FILES)} files)")
+    train_ds, val_ds, test_ds = split_by_file(
+        ds, train_files, val_files, test_files,
+    )
+    print(f"Train: {len(train_ds)} slices ({len(train_files)} files)")
+    print(f"Val:   {len(val_ds)} slices ({len(val_files)} files)")
+    print(f"Test:  {len(test_ds)} slices ({len(test_files)} files)")
 
     # ------------------------------------------------- 4. dataloaders
     dl_kwargs = dict(batch_size=BATCH_SIZE, num_workers=0, pin_memory=(DEVICE != "cpu"))
@@ -189,16 +194,18 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_EPOCHS)
 
     # ------------------------------------------------- 7. losses
-    # Train on a relative-L2 + absolute-H1 blend: the relative L2 normalizes
-    # per sample (so near-constant x_HI maps no longer dominate the loss), and
-    # the H1 term penalizes gradient mismatch -> sharper ionization-bubble edges.
+    # Both terms ABSOLUTE.  x_HI spans [0, 1] and is *zero* over fully-ionized
+    # regions, so a relative L2 (which divides by ||y||) blows up to millions on
+    # those slices and wrecks training.  Absolute L2 is well scaled here; the
+    # absolute H1 term adds gradient sensitivity -> sharper bubble edges and
+    # discourages the model from collapsing to a constant prediction.
     l2_loss = LpLoss(d=2, p=2)
     h1_loss = H1Loss(d=2)
     train_loss_fn = WeightedSumLoss(
-        (0.5, RelLoss(l2_loss)),
+        (0.5, AbsLoss(l2_loss)),
         (0.5, AbsLoss(h1_loss)),
     )
-    eval_losses = {"l2": RelLoss(l2_loss), "h1": AbsLoss(h1_loss)}
+    eval_losses = {"l2": AbsLoss(l2_loss), "h1": AbsLoss(h1_loss)}
 
     # ------------------------------------------------- 8. trainer
     trainer = Trainer(
@@ -216,7 +223,7 @@ def main():
     print(f"Batch size: {BATCH_SIZE}, LR: {LEARNING_RATE}")
     print(f"Epochs: {N_EPOCHS}")
     print(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
-    print(f"Loss: 0.5*relL2 + 0.5*absH1")
+    print(f"Loss: 0.5*absL2 + 0.5*absH1")
     print(f"Normalization: density / 10 (physics-based, fixed)")
 
     # ------------------------------------------------- 9. train

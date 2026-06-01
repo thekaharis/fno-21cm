@@ -39,7 +39,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:a30:1
 #SBATCH --mem=16G
-#SBATCH --time=02:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=logs/fno-%j.out
 #SBATCH --error=logs/fno-%j.err
 
@@ -61,6 +61,10 @@ conda activate "$ENV_NAME"
 # --- Thread hygiene ---------------------------------------------------------
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+
+# Stream Python stdout/stderr to the log immediately instead of block-buffering
+# it (so progress shows up in real time under `tail -f`, not in 8 KB chunks).
+export PYTHONUNBUFFERED=1
 
 # --- Diagnostics (captured in the .out log) ---------------------------------
 echo "================ job environment ================"
