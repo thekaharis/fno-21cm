@@ -48,12 +48,12 @@ Z_MIN, Z_MAX = 5.0, 25.0
 INPUT_FIELD = "density"
 TARGET_FIELD = "neutral_fraction"
 
-N_MODES = (16, 16)
-HIDDEN_CHANNELS = 32
+N_MODES = (32, 32)
+HIDDEN_CHANNELS = 64
 N_LAYERS = 4
-BATCH_SIZE = 16
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 1e-4
+BATCH_SIZE = 32
+LEARNING_RATE = 5e-4
+WEIGHT_DECAY = 1e-5
 N_EPOCHS = 100
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -75,6 +75,29 @@ class AbsLoss:
 
     def __call__(self, out, y, **kwargs):
         return self.loss.abs(out, y)
+
+
+class RelLoss:
+    """Wrap a neuralop loss to call its ``.rel()`` (relative) and swallow
+    extra kwargs from the Trainer.  Relative losses normalize per sample, so
+    near-constant target maps no longer dominate the objective.
+    """
+
+    def __init__(self, loss):
+        self.loss = loss
+
+    def __call__(self, out, y, **kwargs):
+        return self.loss.rel(out, y)
+
+
+class WeightedSumLoss:
+    """Weighted sum of ``(weight, loss)`` terms; passes kwargs through."""
+
+    def __init__(self, *terms):
+        self.terms = terms  # iterable of (float weight, callable loss)
+
+    def __call__(self, out, y, **kwargs):
+        return sum(w * loss(out, y, **kwargs) for w, loss in self.terms)
 
 
 class SilentFNO(nn.Module):
@@ -155,7 +178,7 @@ def main():
         out_channels=1,
         n_layers=N_LAYERS,
         projection_channel_ratio=2,
-        positional_embedding=None,
+        positional_embedding="grid",
     )
     model = SilentFNO(fno).to(DEVICE)
     print(f"Model: {count_model_params(model.fno):,} parameters")
@@ -165,11 +188,17 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_EPOCHS)
 
-    # ------------------------------------------------- 7. losses (absolute)
+    # ------------------------------------------------- 7. losses
+    # Train on a relative-L2 + absolute-H1 blend: the relative L2 normalizes
+    # per sample (so near-constant x_HI maps no longer dominate the loss), and
+    # the H1 term penalizes gradient mismatch -> sharper ionization-bubble edges.
     l2_loss = LpLoss(d=2, p=2)
     h1_loss = H1Loss(d=2)
-    train_loss_fn = AbsLoss(l2_loss)
-    eval_losses = {"h1": AbsLoss(h1_loss), "l2": AbsLoss(l2_loss)}
+    train_loss_fn = WeightedSumLoss(
+        (0.5, RelLoss(l2_loss)),
+        (0.5, AbsLoss(h1_loss)),
+    )
+    eval_losses = {"l2": RelLoss(l2_loss), "h1": AbsLoss(h1_loss)}
 
     # ------------------------------------------------- 8. trainer
     trainer = Trainer(
@@ -186,6 +215,8 @@ def main():
     print(f"\nDevice: {DEVICE}")
     print(f"Batch size: {BATCH_SIZE}, LR: {LEARNING_RATE}")
     print(f"Epochs: {N_EPOCHS}")
+    print(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
+    print(f"Loss: 0.5*relL2 + 0.5*absH1")
     print(f"Normalization: density / 10 (physics-based, fixed)")
 
     # ------------------------------------------------- 9. train

@@ -7,8 +7,9 @@
 #
 #     sbatch train.sbatch
 #
-# Before the first run, confirm ENV_NAME (below) matches the server env:
-#     conda env list
+# Prerequisites in that directory: the data/ folder of lightcone .h5 files,
+# and a resolvable `neuralop` (the conda env below, or a ./neuraloperator/
+# checkout). Conda env and module are configured for this cluster below.
 # =============================================================================
 
 # NOTE: do NOT add trailing "# ..." comments on #SBATCH lines — some SLURM
@@ -49,11 +50,11 @@ cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p logs
 
 # --- Activate the conda environment -----------------------------------------
-# Robust activation in a non-interactive shell. If `conda` is not on PATH in
-# batch jobs on your cluster, either load it first (e.g. `module load anaconda3`)
-# or source it by absolute path, e.g.:
-#     source "$HOME/miniforge3/etc/profile.d/conda.sh"
-ENV_NAME="FNO_env"                   # TODO: change if the server env has another name
+# This cluster provides conda through an environment module, which must be
+# loaded before `conda` is available. Sourcing conda.sh then enables
+# `conda activate` in this non-interactive batch shell.
+module load devel/miniforge
+ENV_NAME="fno-env"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 

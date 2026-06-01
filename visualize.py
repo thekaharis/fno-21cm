@@ -67,8 +67,11 @@ class SilentFNO(nn.Module):
 def load_model() -> nn.Module:
     sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
     sd = {f"fno.{k}": v for k, v in sd.items() if k != "_metadata"}
-    fno = FNO(n_modes=(16, 16), hidden_channels=32, in_channels=1,
-               out_channels=1, n_layers=4, positional_embedding=None)
+    # NOTE: must match the architecture in fno_21cm.py exactly, or the
+    # checkpoint will not load correctly.
+    fno = FNO(n_modes=(32, 32), hidden_channels=64, in_channels=1,
+               out_channels=1, n_layers=4, projection_channel_ratio=2,
+               positional_embedding="grid")
     model = SilentFNO(fno)
     model.load_state_dict(sd, strict=False)
     return model.to(DEVICE).eval()
