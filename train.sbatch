@@ -7,34 +7,37 @@
 #
 #     sbatch train.sbatch
 #
-# Edit the lines marked  # TODO  for your cluster before the first run.
-# Discover the values with:
-#     sinfo -s                                   # partition names + state
-#     sinfo -o "%P %G"                           # partitions and their GPU gres
-#     sacctmgr -n show assoc user=$USER \
-#              format=account,partition          # account(s) you may use
-#     conda env list                             # env names on the server
+# Before the first run, confirm ENV_NAME (below) matches the server env:
+#     conda env list
 # =============================================================================
 
 # NOTE: do NOT add trailing "# ..." comments on #SBATCH lines — some SLURM
 # versions parse them as part of the option value and reject the job.
 #
-#   partition  : TODO set to your GPU partition (see `sinfo -s`)
-#   account    : TODO uncomment the line below if your cluster requires one
-#   cpus       : cores used for data interpolation / loading
-#   gres=gpu:1 : 1 GPU — the training code is single-GPU (no DDP)
-#   mem        : generous; the model is small — lower if you are quota-limited
-#   time       : walltime HH:MM:SS — raise if you increase N_EPOCHS
-#   %j         : expands to the job id in the log filenames
+# GPU allocation on this cluster (per the `gpu` queue docs):
+#   - nodes hold 2 or 4 NVIDIA A30 / A100 / H200 GPUs
+#   - you MUST request GPUs explicitly with a TYPED gres: gpu:<type>:<count>
+#         gpu:a30:1   -> one A30      gpu:a100:1 -> one A100   gpu:h200:1 -> one H200
+#   - this job is single-process / single-GPU (no DDP), so it requests ONE.
+#     An A30 is plenty for a 21cm FNO; leave the A100/H200 for bigger jobs.
+#     To use a different type, change `a30` below (or try `--gres=gpu:1` for any).
+#
+#   ntasks=1     : ONE process. Do NOT raise this — the training script is a
+#                  single Python process; a higher --ntasks under srun would
+#                  launch duplicate trainers fighting over the GPU/checkpoints.
+#                  (On this cluster --ntasks is the MPI core count; not for us.)
+#   cpus-per-task: cores for data interpolation / loading
+#   mem          : the model is small; raise only if preload OOMs
+#   time         : walltime HH:MM:SS — raise if you increase N_EPOCHS
+#   %j           : expands to the job id in the log filenames
 #
 #SBATCH --job-name=fno-21cm
 #SBATCH --partition=gpu
-##SBATCH --account=my_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
-#SBATCH --mem=32G
+#SBATCH --gres=gpu:a30:1
+#SBATCH --mem=16G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/fno-%j.out
 #SBATCH --error=logs/fno-%j.err
@@ -71,4 +74,6 @@ python -c "import torch; print('torch', torch.__version__, '| cuda:', torch.cuda
 echo "================================================="
 
 # --- Train ------------------------------------------------------------------
-srun python fno_21cm.py
+# Plain `python` (no `srun`): this is a single-process job, and launching it
+# under srun would spawn one trainer per task if --ntasks is ever raised.
+python fno_21cm.py
