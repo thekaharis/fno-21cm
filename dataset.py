@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -170,6 +171,84 @@ def make_file_split(
     val = sorted(perm[n_test:n_test + n_val])
     train = sorted(perm[n_test + n_val:])
     return train, val, test
+
+
+# ===================================================================== cache
+# The classes below consume the compact ``trainset.h5`` produced by the
+# one-time ``build_trainset.py`` pass (few slices per cone, many cones).  They
+# replace the on-the-fly ``LightconeSliceDataset`` for large datasets that
+# cannot be preloaded from raw lightcones.
+
+
+class SliceCache(Dataset):
+    """In-memory dataset of pre-extracted 2-D slices.
+
+    Reads the compact HDF5 cache written by ``build_trainset.py`` (datasets
+    ``x``, ``y``, ``z``, ``xHI_mean``, ``cone_id``, ``params``) fully into RAM.
+    Each item is one slice ``{"x": density / scale, "y": x_HI}`` of shape
+    ``(1, 140, 140)`` -- the same interface ``LightconeSliceDataset`` exposed,
+    so the model / trainer code is unchanged.
+
+    Parameters
+    ----------
+    cache_path : path-like
+        Path to ``trainset.h5``.
+    density_scale : float
+        Fixed divisor applied to the density input (default 10.0), matching
+        the normalization used everywhere else.
+    """
+
+    def __init__(self, cache_path: str | Path, density_scale: float = 10.0):
+        self.cache_path = Path(cache_path)
+        self.density_scale = float(density_scale)
+        with h5py.File(self.cache_path, "r") as f:
+            self.x = f["x"][:].astype(np.float32)          # (N, 140, 140)
+            self.y = f["y"][:].astype(np.float32)
+            self.cone_id = f["cone_id"][:].astype(np.int64)
+            self.z = f["z"][:].astype(np.float32)
+            self.xHI_mean = f["xHI_mean"][:].astype(np.float32)
+            self.params = (f["params"][:].astype(np.float32)
+                           if "params" in f else None)
+
+    def __len__(self) -> int:
+        return self.x.shape[0]
+
+    def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
+        return {
+            "x": torch.from_numpy(self.x[i][None] / self.density_scale),
+            "y": torch.from_numpy(self.y[i][None]),
+        }
+
+
+def split_by_cone(
+    cache: SliceCache,
+    val_frac: float = 0.1,
+    test_frac: float = 0.1,
+    seed: int = 42,
+) -> tuple[Subset, Subset, Subset]:
+    """Split a :class:`SliceCache` into train/val/test by **cone**.
+
+    Splitting on ``cone_id`` (not on individual slices) guarantees that no cone
+    contributes slices to more than one split -- otherwise correlated slices
+    from the same lightcone leak between train and val, inflating the score.
+
+    Returns ``(train, val, test)`` as ``Subset`` views over *cache*.
+    """
+    cones = np.unique(cache.cone_id)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(cones)
+    n = len(cones)
+    n_test = max(1, round(test_frac * n))
+    n_val = max(1, round(val_frac * n))
+    test_c = set(cones[:n_test].tolist())
+    val_c = set(cones[n_test:n_test + n_val].tolist())
+    train_c = set(cones[n_test + n_val:].tolist())
+
+    def _subset(cone_set: set[int]) -> Subset:
+        idx = np.where(np.isin(cache.cone_id, list(cone_set)))[0]
+        return Subset(cache, idx.tolist())
+
+    return _subset(train_c), _subset(val_c), _subset(test_c)
 
 
 def build_dataloaders(

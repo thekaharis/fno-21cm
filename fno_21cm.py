@@ -25,6 +25,7 @@ for _cand in (_HERE / "neuraloperator", _HERE):
         break
 # ---------------------------------------------------------------------------
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -38,15 +39,14 @@ from neuralop.utils import count_model_params
 import neuralop as _neuralop
 print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
-from dataset import LightconeSliceDataset, split_by_file, make_file_split
+from dataset import SliceCache, split_by_cone
 
 
 # ------------------------------------------------------------------ config
-DATA_DIR = Path("data")
-N_Z = 256
-Z_MIN, Z_MAX = 5.0, 25.0
-INPUT_FIELD = "density"
-TARGET_FIELD = "neutral_fraction"
+# Pre-extracted slice cache from build_trainset.py (few slices per cone, many
+# cones).  Run `python build_trainset.py --data <lightcones> --out trainset.h5`
+# once before training.
+CACHE_FILE = Path("trainset.h5")
 
 N_MODES = (32, 32)
 HIDDEN_CHANNELS = 64
@@ -58,8 +58,9 @@ N_EPOCHS = 100
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-# Train / val / test split: seeded shuffle over ALL discovered files
-# (~80 / 10 / 10).  See dataset.make_file_split.
+# Train / val / test split: seeded shuffle over cones (~80 / 10 / 10).
+# Splitting by cone (not by slice) prevents correlated slices from the same
+# lightcone leaking across splits.  See dataset.split_by_cone.
 SPLIT_SEED = 42
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
@@ -136,37 +137,27 @@ class SilentFNO(nn.Module):
 
 # ------------------------------------------------------------------ main
 def main():
-    # ------------------------------------------------- 1. discover files
-    h5_files = sorted(DATA_DIR.glob("*.h5"))
-    if not h5_files:
-        print(f"No .h5 files found in {DATA_DIR.resolve()}", file=sys.stderr)
+    # ------------------------------------------------- 1. load slice cache
+    if not CACHE_FILE.exists():
+        print(f"Slice cache {CACHE_FILE} not found. "
+              f"Run build_trainset.py first.", file=sys.stderr)
         sys.exit(1)
-    print(f"Found {len(h5_files)} lightcone files")
+    print(f"Loading slice cache {CACHE_FILE} ...")
+    cache = SliceCache(CACHE_FILE)
+    n_cones = len(np.unique(cache.cone_id))
+    print(f"Total slices: {len(cache)}  ({n_cones} cones)")
 
-    # ------------------------------------------------- 2. build dataset
-    print("Loading dataset (interpolating to common redshift grid) ...")
-    ds = LightconeSliceDataset(
-        file_paths=h5_files,
-        n_z=N_Z,
-        z_min=Z_MIN,
-        z_max=Z_MAX,
-        input_field=INPUT_FIELD,
-        target_field=TARGET_FIELD,
-        preload=True,
+    # ------------------------------------------------- 2. split by cone
+    train_ds, val_ds, test_ds = split_by_cone(
+        cache, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
-    print(f"Total slices: {len(ds)}  ({len(h5_files)} files x {N_Z} z-bins)")
 
-    # ------------------------------------------------- 3. split
-    train_files, val_files, test_files = make_file_split(
-        len(h5_files), seed=SPLIT_SEED,
-        val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
-    )
-    train_ds, val_ds, test_ds = split_by_file(
-        ds, train_files, val_files, test_files,
-    )
-    print(f"Train: {len(train_ds)} slices ({len(train_files)} files)")
-    print(f"Val:   {len(val_ds)} slices ({len(val_files)} files)")
-    print(f"Test:  {len(test_ds)} slices ({len(test_files)} files)")
+    def _n_cones(ds):
+        return len(np.unique(cache.cone_id[ds.indices]))
+
+    print(f"Train: {len(train_ds)} slices ({_n_cones(train_ds)} cones)")
+    print(f"Val:   {len(val_ds)} slices ({_n_cones(val_ds)} cones)")
+    print(f"Test:  {len(test_ds)} slices ({_n_cones(test_ds)} cones)")
 
     # ------------------------------------------------- 4. dataloaders
     dl_kwargs = dict(batch_size=BATCH_SIZE, num_workers=0, pin_memory=(DEVICE != "cpu"))

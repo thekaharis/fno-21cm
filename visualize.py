@@ -34,14 +34,17 @@ from neuralop.models import FNO
 import neuralop as _neuralop
 print(f"[visualize] using neuralop from {_neuralop.__file__}")
 
-from dataset import LightconeSliceDataset, split_by_file, make_file_split
+from dataset import SliceCache, split_by_cone
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints/model_state_dict.pt"
-DATA_DIR = Path("data")
-N_Z = 256
-Z_MIN, Z_MAX = 5.0, 25.0
+CACHE_FILE = Path("trainset.h5")
 N_SLICES_PER_SPLIT = 4
+
+# Must match fno_21cm.py so val/test here are the same held-out cones.
+SPLIT_SEED = 42
+VAL_FRACTION = 0.1
+TEST_FRACTION = 0.1
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -179,16 +182,16 @@ def main():
     model = load_model()
     print("Model loaded.")
 
-    # Gather data
-    h5_files = sorted(DATA_DIR.glob("*.h5"))
-    ds = LightconeSliceDataset(h5_files, n_z=N_Z, z_min=Z_MIN,
-                                z_max=Z_MAX, preload=True)
-    # Same seeded split as training, so val/test here are the held-out files.
-    train_files, val_files, test_files = make_file_split(len(h5_files), seed=42)
-    train_ds, val_ds, test_ds = split_by_file(ds, train_files, val_files, test_files)
-
-    z_grid = ds.target_z
-    print(f"Dataset: {len(ds)} slices, z-grid [{z_grid[0]:.2f}, {z_grid[-1]:.2f}]")
+    # Gather data from the same slice cache + cone split used for training.
+    if not CACHE_FILE.exists():
+        print(f"Slice cache {CACHE_FILE} not found. Run build_trainset.py first.",
+              file=sys.stderr)
+        sys.exit(1)
+    cache = SliceCache(CACHE_FILE)
+    _, val_ds, test_ds = split_by_cone(
+        cache, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
+    )
+    print(f"Cache: {len(cache)} slices, {len(np.unique(cache.cone_id))} cones")
 
     for split_ds, name in [(val_ds, "Validation"), (test_ds, "Test")]:
         n = len(split_ds)
@@ -200,10 +203,10 @@ def main():
         samples = [split_ds[i] for i in idxs]
         truths, preds, inputs = predict_batch(model, samples)
 
+        # cache.z / cache.cone_id carry the redshift and source cone per slice.
         global_idxs = [split_ds.indices[i] for i in idxs]
-        all_file_ids = ds.file_ids()
-        meta = [{"z": float(z_grid[gi % N_Z]),
-                 "file_id": all_file_ids[gi],
+        meta = [{"z": float(cache.z[gi]),
+                 "file_id": int(cache.cone_id[gi]),
                  "split": name}
                 for gi in global_idxs]
 
