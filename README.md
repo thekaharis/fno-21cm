@@ -61,10 +61,18 @@ conda install -c conda-forge pytorch numpy scipy h5py matplotlib \
 ### Providing `neuralop`
 
 The training and visualization scripts prefer a **local checkout** of the
-library at `./neuraloperator/` if present, and otherwise fall back to an
-installed `neuralop`. To use the vendored-source path:
+library if one is present. They search, in order:
+
+1. `./neuraloperator/` — checkout vendored inside the repo
+2. `../neuraloperator/` — checkout sibling to the repo (the
+   `project/{data, neuraloperator, fno-21cm}` layout)
+3. `./` — `neuralop` dropped straight into the repo root
+
+If none is found, the scripts fall back to an installed `neuralop`. To
+use a local checkout next to the repo:
 
 ```bash
+cd ..                                                    # parent project folder
 git clone https://github.com/neuraloperator/neuraloperator
 ```
 

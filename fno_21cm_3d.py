@@ -18,9 +18,17 @@ import os
 import sys
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop next to this script ------------------------
+# ---- Prefer a vendored neuralop checkout if one is available ---------------
+# Search order:
+#   ./neuraloperator/         (checkout vendored inside the repo)
+#   ../neuraloperator/        (checkout sibling to the repo: project/{data,
+#                              neuraloperator, fno-21cm} layout)
+#   ./                        (neuralop dropped straight into the repo)
+# If none has a valid __init__.py, fall back to an installed `neuralop`.
 _HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator", _HERE):
+for _cand in (_HERE / "neuraloperator",
+              _HERE.parent / "neuraloperator",
+              _HERE):
     if (_cand / "neuralop" / "__init__.py").is_file():
         sys.path.insert(0, str(_cand))
         break

@@ -10,13 +10,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop next to this script ------------------------
-# Accept either layout and skip any location whose package is incomplete:
-#   ./neuraloperator/neuralop/   (a full neuraloperator checkout), or
-#   ./neuralop/                  (the package dropped straight into the repo).
-# If neither has a valid __init__.py, fall back to an installed `neuralop`.
+# ---- Prefer a vendored neuralop checkout if one is available ---------------
+# Accept any of these layouts and skip locations whose package is incomplete:
+#   ./neuraloperator/neuralop/    (checkout vendored inside the repo)
+#   ../neuraloperator/neuralop/   (checkout sibling to the repo: project/{data,
+#                                  neuraloperator, fno-21cm} layout)
+#   ./neuralop/                   (the package dropped straight into the repo)
+# If none has a valid __init__.py, fall back to an installed `neuralop`.
 _HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator", _HERE):
+for _cand in (_HERE / "neuraloperator",
+              _HERE.parent / "neuraloperator",
+              _HERE):
     if (_cand / "neuralop" / "__init__.py").is_file():
         sys.path.insert(0, str(_cand))
         break
