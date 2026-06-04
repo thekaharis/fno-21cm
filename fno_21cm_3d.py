@@ -147,6 +147,12 @@ class ProgressLoader:
     def __len__(self):
         return len(self.loader)
 
+    def __getattr__(self, name):
+        # Delegate anything not on the wrapper (e.g. .dataset, .sampler,
+        # .batch_size) to the underlying DataLoader.  The neuralop Trainer
+        # reads train_loader.dataset for its startup banner.
+        return getattr(self.loader, name)
+
     def __iter__(self):
         import time
         n = len(self.loader)
