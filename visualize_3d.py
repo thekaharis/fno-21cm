@@ -9,6 +9,7 @@ For each held-out cone:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -35,7 +36,11 @@ from dataset_3d import LightconeCubeDataset, split_cubes
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints_3d/model_state_dict.pt"
-DATA_DIR = Path("data")
+# Lightcone directory: env var LIGHTCONE_DIR overrides; falls back to ./data.
+# Must point at the same files used during training (the split is reproduced
+# from len(dataset) + SPLIT_SEED, so a different file list breaks held-out
+# evaluation).
+DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 
 N_Z = 256

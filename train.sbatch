@@ -66,6 +66,11 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 # it (so progress shows up in real time under `tail -f`, not in 8 KB chunks).
 export PYTHONUNBUFFERED=1
 
+# Lightcone directory (read by fno_21cm_3d.py / visualize_3d.py). Keep this in
+# sync with DATA_DIR in build.sbatch. The 2-D pipeline ignores this -- it reads
+# the pre-built trainset.h5 from the submission directory.
+export LIGHTCONE_DIR=/pfs/10/project/bw24d007/hk/lightcones
+
 # --- Diagnostics (captured in the .out log) ---------------------------------
 echo "================ job environment ================"
 echo "Host:               $(hostname)"

@@ -76,7 +76,11 @@ package) and the code will use the installed copy automatically.
 ### 3-D (full lightcone, current focus)
 
 ```bash
-# Train: streams ./data/21cmfast_11d_sample*.h5 directly — no precompute step
+# Optional: point at lightcones outside ./data (default fallback).
+# train.sbatch already exports this for the cluster.
+export LIGHTCONE_DIR=/path/to/21cmfast_11d_sample_h5_files
+
+# Train: streams the .h5 files directly — no precompute step
 python fno_21cm_3d.py
 
 # Visualize predictions from the latest 3-D checkpoint

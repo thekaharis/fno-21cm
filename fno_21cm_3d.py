@@ -14,6 +14,7 @@ LOS cells are uniform in comoving distance.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -41,7 +42,9 @@ from dataset_3d import LightconeCubeDataset, split_cubes
 
 
 # ------------------------------------------------------------------ config
-DATA_DIR = Path("data")
+# Lightcone directory: env var LIGHTCONE_DIR overrides; falls back to ./data
+# so the SLURM sbatch can set the cluster path once without editing this file.
+DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 
 N_Z = 256                           # LOS resolution after interpolation
