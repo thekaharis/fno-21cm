@@ -66,6 +66,15 @@ LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-5
 N_EPOCHS = 100
 
+# DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
+# the throughput bottleneck on cluster filesystems; parallelizing across the
+# allocated CPUs gets the GPU fed.  Defaults to SLURM_CPUS_PER_TASK on the
+# cluster and 0 locally.
+NUM_WORKERS = int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+
+# Per-step progress logging cadence (set to 0 to disable).
+LOG_EVERY = 25
+
 DEVICE = ("cuda" if torch.cuda.is_available()
           else "mps" if torch.backends.mps.is_available()
           else "cpu")
@@ -120,6 +129,39 @@ class SilentFNO(nn.Module):
         return getattr(self._modules["fno"], name)
 
 
+class ProgressLoader:
+    """Wrap a DataLoader to print throughput every ``log_every`` steps.
+
+    The neuralop Trainer only logs per-epoch summaries, so on long epochs
+    (5k+ samples) you get no signal at all until the first epoch completes.
+    This wrapper preserves the DataLoader interface (length + iter) and
+    prints ``[step k/N] r samples/s, ETA M:SS`` lines so the SLURM log
+    shows life.
+    """
+
+    def __init__(self, loader, log_every: int = 25, tag: str = "train"):
+        self.loader = loader
+        self.log_every = int(log_every)
+        self.tag = tag
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        import time
+        n = len(self.loader)
+        t0 = time.time()
+        for i, batch in enumerate(self.loader, start=1):
+            yield batch
+            if self.log_every and (i % self.log_every == 0 or i == n):
+                elapsed = time.time() - t0
+                rate = i / max(elapsed, 1e-6)
+                eta = (n - i) / max(rate, 1e-6)
+                print(f"    [{self.tag} {i}/{n}] {rate:.2f} samples/s  "
+                      f"elapsed {elapsed:6.1f}s  ETA {eta/60:5.1f} min",
+                      flush=True)
+
+
 # ------------------------------------------------------------------ main
 def main():
     # -------------------------------------------- 1. discover lightcones
@@ -151,11 +193,23 @@ def main():
     print(f"Test:  {len(test_ds)} cones {test_idx}")
 
     # -------------------------------------------- 4. dataloaders
-    dl_kwargs = dict(batch_size=BATCH_SIZE, num_workers=0,
-                     pin_memory=(DEVICE != "cpu"))
+    # persistent_workers keeps workers alive across epochs (avoids paying the
+    # fork + scipy import startup cost on every epoch).  Only meaningful when
+    # num_workers > 0.
+    dl_kwargs = dict(
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        pin_memory=(DEVICE != "cpu"),
+        persistent_workers=(NUM_WORKERS > 0),
+    )
     train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **dl_kwargs)
     test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
+
+    # Wrap the train loader in a per-step progress reporter so the SLURM log
+    # shows life within an epoch (the neuralop Trainer logs per-epoch only).
+    train_loader = ProgressLoader(train_loader, log_every=LOG_EVERY,
+                                  tag="train")
     test_loaders = {"val": val_loader, "test": test_loader}
 
     # -------------------------------------------- 5. model
@@ -207,6 +261,8 @@ def main():
     print(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
     print(f"In channels: density/10 + 1/(1+z), Out: x_HI")
     print(f"Loss: 0.5*absL2 + 0.5*absH1 (d=3)")
+    print(f"DataLoader workers: {NUM_WORKERS} "
+          f"(per-step log every {LOG_EVERY} batches)")
 
     # -------------------------------------------- 9. train
     trainer.train(
