@@ -40,14 +40,14 @@ from neuralop.models import FNO
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
-from dataset_3d import LightconeCubeDataset, split_cubes
+from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints_3d/model_state_dict.pt"
-# Lightcone directory: env var LIGHTCONE_DIR overrides; falls back to ./data.
-# Must point at the same files used during training (the split is reproduced
-# from len(dataset) + SPLIT_SEED, so a different file list breaks held-out
-# evaluation).
+# Data source: prefer the pre-built cube cache if it exists, otherwise stream
+# from raw lightcones.  Must match what training used so the deterministic
+# split (driven by len(dataset) + SPLIT_SEED) lines up.
+CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
 DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 
@@ -230,17 +230,22 @@ def main():
         print(f"Checkpoint not found: {CHECKPOINT}", file=sys.stderr)
         sys.exit(1)
 
-    files = sorted(DATA_DIR.glob(FILE_GLOB))
-    if not files:
-        print(f"No lightcone files found under {DATA_DIR}/{FILE_GLOB}",
-              file=sys.stderr)
-        sys.exit(1)
-
-    dataset = LightconeCubeDataset(
-        file_paths=files,
-        n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
-        preload=False,
-    )
+    if CUBES_CACHE.exists():
+        print(f"Using pre-computed cube cache: {CUBES_CACHE}")
+        dataset = LightconeCubeCache(CUBES_CACHE)
+    else:
+        print(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
+              f"from {DATA_DIR}")
+        files = sorted(DATA_DIR.glob(FILE_GLOB))
+        if not files:
+            print(f"No lightcone files found under {DATA_DIR}/{FILE_GLOB}",
+                  file=sys.stderr)
+            sys.exit(1)
+        dataset = LightconeCubeDataset(
+            file_paths=files,
+            n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
+            preload=False,
+        )
     _, val_ds, test_ds, (_, val_idx, test_idx) = split_cubes(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )

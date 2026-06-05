@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Subset
@@ -113,6 +114,95 @@ class LightconeCubeDataset(Dataset):
         return {"x": x, "y": y}
 
 
+# ===================================================================== cache
+# The class below consumes the compact cube cache produced by the one-time
+# ``build_cubes.py`` pass.  It replaces the on-the-fly ``LightconeCubeDataset``
+# for runs where the raw HDF5 reads become the bottleneck (cluster project FS
+# at ~370 MB/cone is the typical case).  Cubes are stored pre-interpolated to
+# the same (Nx, Ny, n_z) grid the model trains on, so each per-sample read is
+# ~10x smaller.
+
+
+class LightconeCubeCache(Dataset):
+    """In-memory or lazy dataset of pre-extracted 3-D cubes.
+
+    Reads the compact HDF5 cache written by ``build_cubes.py`` (datasets
+    ``density``, ``neutral_fraction``, ``cone_id``, ``target_z``, ``params``).
+    Each item is one cube ``{"x": (2, Nx, Ny, Nz), "y": (1, Nx, Ny, Nz)}`` --
+    the same interface as :class:`LightconeCubeDataset`, so the training script
+    can switch backends transparently.
+
+    Parameters
+    ----------
+    cache_path : path-like
+        Path to ``cubes_3d.h5`` (or merged shard).
+    density_scale : float
+        Fixed divisor applied to the density input (default 10.0).  Matches
+        :class:`LightconeCubeDataset` so trained checkpoints are interchangeable.
+    preload : bool
+        If True, load every cube into RAM at construction (~420 GB for a full
+        cluster run -- only sensible on fat-mem nodes or small subsets).  If
+        False (default), each worker opens its own h5py handle lazily on first
+        ``__getitem__`` in that process; suitable for any cache size.
+    """
+
+    def __init__(self, cache_path: str | Path,
+                 density_scale: float = 10.0,
+                 preload: bool = False):
+        self.cache_path = Path(cache_path)
+        self.density_scale = float(density_scale)
+        self.preload = bool(preload)
+
+        with h5py.File(self.cache_path, "r") as f:
+            self.target_z = np.asarray(f["target_z"], dtype=np.float64)
+            self.cone_id = np.asarray(f["cone_id"], dtype=np.int64)
+            self.n_cones, self.n_x, self.n_y, self.n_z = f["density"].shape
+            if "params" in f:
+                self.params = np.asarray(f["params"], dtype=np.float32)
+            else:
+                self.params = None
+            if preload:
+                self._dens = np.asarray(f["density"][...], dtype=np.float32)
+                self._xhi = np.asarray(f["neutral_fraction"][...],
+                                       dtype=np.float32)
+            else:
+                self._dens = None
+                self._xhi = None
+
+        self._z_channel_1d = (1.0 / (1.0 + self.target_z)).astype(np.float32)
+        # Lazy per-process h5py handle (one per DataLoader worker after fork).
+        self._h5: h5py.File | None = None
+
+    def _ensure_open(self) -> h5py.File:
+        if self._h5 is None:
+            self._h5 = h5py.File(self.cache_path, "r")
+        return self._h5
+
+    def __len__(self) -> int:
+        return int(self.n_cones)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        if self._dens is not None:
+            dens = self._dens[idx]
+            xhi = self._xhi[idx]
+        else:
+            f = self._ensure_open()
+            dens = np.asarray(f["density"][idx], dtype=np.float32)
+            xhi = np.asarray(f["neutral_fraction"][idx], dtype=np.float32)
+
+        c_dens = dens / self.density_scale
+        c_z = np.broadcast_to(
+            self._z_channel_1d.reshape(1, 1, self.n_z),
+            (self.n_x, self.n_y, self.n_z),
+        ).astype(np.float32, copy=False)
+        x = np.stack([c_dens, c_z], axis=0)            # (2, Nx, Ny, Nz)
+        y = xhi[None, ...]                             # (1, Nx, Ny, Nz)
+        return {
+            "x": torch.from_numpy(np.ascontiguousarray(x)),
+            "y": torch.from_numpy(np.ascontiguousarray(y)),
+        }
+
+
 # --------------------------------------------------------------------- split
 def make_file_split(
     n_files: int,
@@ -139,12 +229,16 @@ def make_file_split(
 
 
 def split_cubes(
-    dataset: LightconeCubeDataset,
+    dataset: LightconeCubeDataset | LightconeCubeCache,
     val_frac: float = 0.1,
     test_frac: float = 0.1,
     seed: int = 42,
 ) -> tuple[Subset, Subset, Subset, tuple[list[int], list[int], list[int]]]:
-    """Split a :class:`LightconeCubeDataset` into train / val / test subsets.
+    """Split a cube dataset into train / val / test subsets.
+
+    Works with either :class:`LightconeCubeDataset` (raw streaming) or
+    :class:`LightconeCubeCache` (pre-computed cache) -- both expose the same
+    one-cube-per-index interface, so the split is index-level.
 
     Returns ``(train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx))``.
     The raw index lists are returned alongside the ``Subset`` views so the

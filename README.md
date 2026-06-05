@@ -29,8 +29,10 @@ Two pipelines live side by side:
 ### 3-D pipeline (v3)
 | File | Purpose |
 |------|---------|
-| `fno_21cm_3d.py` | 3-D training entry point (full lightcone in / full cube out). |
-| `dataset_3d.py` | `LightconeCubeDataset` — one cube per cone, streamed from raw `.h5`. |
+| `fno_21cm_3d.py` | 3-D training entry point (full lightcone in / full cube out). Auto-detects the cube cache; falls back to streaming. |
+| `dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
+| `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
+| `build_cubes.sbatch` / `build_cubes_merge.sbatch` | SLURM array + merge scripts for the cube precompute on the cluster. |
 | `visualize_3d.py` | Loads a 3-D checkpoint; renders z-slice grid, edge-on xz lightcone strip, and voxel scatter. |
 
 ### Shared
@@ -88,7 +90,15 @@ package) and the code will use the installed copy automatically.
 # train.sbatch already exports this for the cluster.
 export LIGHTCONE_DIR=/path/to/21cmfast_11d_sample_h5_files
 
-# Train: streams the .h5 files directly — no precompute step
+# (Recommended) One-time: pre-interpolate every cube into cubes_3d.h5.
+# Speeds up training reads ~10x.  On the cluster, use the array job:
+#     AID=$(sbatch --parsable build_cubes.sbatch)
+#     sbatch --dependency=afterok:"$AID" build_cubes_merge.sbatch
+# Locally:
+python build_cubes.py --data "$LIGHTCONE_DIR" --out cubes_3d.h5
+
+# If the cache exists at ./cubes_3d.h5 (or $CUBES_CACHE), training and
+# visualization use it automatically; otherwise they stream raw lightcones.
 python fno_21cm_3d.py
 
 # Visualize predictions from the latest 3-D checkpoint
