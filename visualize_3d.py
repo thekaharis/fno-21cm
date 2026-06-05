@@ -88,35 +88,106 @@ class SilentFNO(nn.Module):
         return getattr(self._modules["fno"], name)
 
 
+def _strip_prefix(k: str, prefix: str) -> str:
+    return k[len(prefix):] if k.startswith(prefix) else k
+
+
 # ------------------------------------------------------------------ helpers
 def load_model(in_channels: int = 2) -> nn.Module:
     """Reconstruct the FNO architecture and load the latest checkpoint.
 
+    Robust to multiple checkpoint formats:
+      * single-GPU, raw FNO state dict: keys like ``lifting.fcs.0.weight``
+      * single-GPU, SilentFNO state dict: ``fno.lifting.fcs.0.weight``
+      * DDP-wrapped SilentFNO: ``module.fno.lifting.fcs.0.weight``
+
+    Tries each transform, picks the one that matches the most target keys,
+    and *fails loudly* if no keys match (catches the silent-random-init bug
+    that ``strict=False`` was hiding).
+
     ``in_channels`` must match the cache used at training time -- pass
     ``dataset.in_channels`` from the caller so parameter-conditioned runs
     (where in_channels=13) load the correct lifting layer.
-
-    All other architecture knobs (``n_modes``, ``hidden_channels``,
-    ``n_layers``) are imported from ``fno_21cm_3d`` so the two files stay in
-    sync without manual upkeep.
     """
-    sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
-    sd = {f"fno.{k}": v for k, v in sd.items() if k != "_metadata"}
+    raw_sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
+    raw_sd = {k: v for k, v in raw_sd.items() if k != "_metadata"}
+
     fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,
               in_channels=in_channels, out_channels=1, n_layers=N_LAYERS,
               projection_channel_ratio=2, positional_embedding="grid")
     model = SilentFNO(fno)
-    model.load_state_dict(sd, strict=False)
+    target_keys = set(model.state_dict().keys())
+
+    candidates = [
+        ("as-is",
+            raw_sd),
+        ("add fno.",
+            {f"fno.{k}": v for k, v in raw_sd.items()}),
+        ("strip module.",
+            {_strip_prefix(k, "module."): v for k, v in raw_sd.items()}),
+        ("strip module. + add fno.",
+            {f"fno.{_strip_prefix(k, 'module.')}": v for k, v in raw_sd.items()}),
+    ]
+
+    def _matches(d: dict) -> int:
+        # A key matches only if the name is present AND the tensor shape
+        # agrees with the model's parameter at that key.
+        n = 0
+        target_sd = model.state_dict()
+        for k, v in d.items():
+            if k in target_sd and target_sd[k].shape == v.shape:
+                n += 1
+        return n
+
+    best_name, best_sd = max(candidates, key=lambda c: _matches(c[1]))
+    n_matched = _matches(best_sd)
+    n_target = len(target_keys)
+
+    print(f"[load_model] checkpoint keys: {len(raw_sd)}; "
+          f"best transform: {best_name!r}  "
+          f"matched {n_matched}/{n_target} model params "
+          f"(in_channels={in_channels})")
+
+    if n_matched == 0:
+        raise RuntimeError(
+            f"No checkpoint keys match the model after trying all transforms. "
+            f"Sample raw key: {next(iter(raw_sd))!r}; "
+            f"sample target key: {next(iter(target_keys))!r}. "
+            f"Architecture mismatch -- the model was trained with a different "
+            f"in_channels/N_MODES/HIDDEN_CHANNELS than what viz is constructing."
+        )
+
+    # strict=False here because the checkpoint may contain optimizer/scheduler
+    # state under arbitrary extra keys -- those should be ignored.  But the
+    # n_matched check above guarantees we're not silently loading nothing.
+    missing, unexpected = model.load_state_dict(best_sd, strict=False)
+    if missing:
+        print(f"[load_model] WARNING: {len(missing)} parameters left at random "
+              f"init: {sorted(missing)[:3]}...")
     return model.to(DEVICE).eval()
 
 
 def predict_cube(model, sample) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run the model on one cube.  Returns (input_density, true_xhi, pred_xhi)."""
-    x = sample["x"].unsqueeze(0).to(DEVICE)        # (1, 2, Nx, Ny, Nz)
+    """Run the model on one cube.  Returns (input_density, true_xhi, pred_xhi).
+
+    Also prints per-cube prediction stats so the SLURM log shows at a glance
+    whether the output is sensible (non-constant, in [0, 1]-ish range) without
+    needing to open the PNGs.
+    """
+    x = sample["x"].unsqueeze(0).to(DEVICE)        # (1, C, Nx, Ny, Nz)
     with torch.no_grad():
         pred = model(x=x).cpu().numpy()[0, 0]      # (Nx, Ny, Nz)
     dens = sample["x"][0].numpy()                  # density / 10 channel
     truth = sample["y"][0].numpy()                 # (Nx, Ny, Nz)
+
+    # Quick numerical sanity: a degenerate constant prediction will show as
+    # std ~ 0, while a trained model has std around 0.1-0.5 for x_HI in [0, 1].
+    print(f"  pred   min/mean/max/std = "
+          f"{pred.min():+.3f} / {pred.mean():+.3f} / {pred.max():+.3f} / "
+          f"{pred.std():.3f}")
+    print(f"  truth  min/mean/max/std = "
+          f"{truth.min():+.3f} / {truth.mean():+.3f} / {truth.max():+.3f} / "
+          f"{truth.std():.3f}")
     return dens, truth, pred
 
 
