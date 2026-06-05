@@ -128,30 +128,45 @@ class LightconeCubeCache(Dataset):
 
     Reads the compact HDF5 cache written by ``build_cubes.py`` (datasets
     ``density``, ``neutral_fraction``, ``cone_id``, ``target_z``, ``params``).
-    Each item is one cube ``{"x": (2, Nx, Ny, Nz), "y": (1, Nx, Ny, Nz)}`` --
-    the same interface as :class:`LightconeCubeDataset`, so the training script
-    can switch backends transparently.
+
+    Each item is one cube ``{"x": (C, Nx, Ny, Nz), "y": (1, Nx, Ny, Nz)}``,
+    where ``C = 2`` if ``use_params=False`` (density + 1/(1+z)) or
+    ``C = 2 + n_params = 13`` if ``use_params=True`` (the 11 astrophysical
+    parameters are z-scored against the training distribution and broadcast
+    as constant channels over the entire cube).
 
     Parameters
     ----------
     cache_path : path-like
         Path to ``cubes_3d.h5`` (or merged shard).
     density_scale : float
-        Fixed divisor applied to the density input (default 10.0).  Matches
-        :class:`LightconeCubeDataset` so trained checkpoints are interchangeable.
+        Fixed divisor applied to the density input (default 10.0).
     preload : bool
         If True, load every cube into RAM at construction (~420 GB for a full
-        cluster run -- only sensible on fat-mem nodes or small subsets).  If
-        False (default), each worker opens its own h5py handle lazily on first
-        ``__getitem__`` in that process; suitable for any cache size.
+        cluster run -- only sensible on fat-mem nodes or small subsets).
+    use_params : bool
+        If True (default), include the 11 astrophysical parameters as broadcast
+        input channels.  Provides the model the conditioning it needs to
+        disambiguate reionization histories that produce similar densities --
+        empirically the difference between plateauing at val_l2 ~0.20 and
+        actually learning bubble morphology.
     """
+
+    # Names of the 11 LHS-sampled parameters in the cache, in column order.
+    # Matches build_cubes.PARAMS exactly.
+    PARAM_NAMES = (
+        "F_ESC10", "F_STAR10", "ALPHA_ESC", "ALPHA_STAR", "L_X", "NU_X_THRESH",
+        "M_TURN", "t_STAR", "X_RAY_SPEC_INDEX", "OMm", "SIGMA_8",
+    )
 
     def __init__(self, cache_path: str | Path,
                  density_scale: float = 10.0,
-                 preload: bool = False):
+                 preload: bool = False,
+                 use_params: bool = True):
         self.cache_path = Path(cache_path)
         self.density_scale = float(density_scale)
         self.preload = bool(preload)
+        self.use_params = bool(use_params)
 
         with h5py.File(self.cache_path, "r") as f:
             self.target_z = np.asarray(f["target_z"], dtype=np.float64)
@@ -170,6 +185,42 @@ class LightconeCubeCache(Dataset):
                 self._xhi = None
 
         self._z_channel_1d = (1.0 / (1.0 + self.target_z)).astype(np.float32)
+
+        # Parameter conditioning: z-score against the FULL cache (which is the
+        # training distribution at LHS-sampling time -- the design is
+        # space-filling so the per-split means are essentially the same).
+        # Parameters span very different physical scales (F_ESC10 ~ 0.01-1,
+        # NU_X_THRESH ~ 100-1500), so z-scoring is mandatory; an unnormalized
+        # 1500-eV channel would dominate the lifting layer.
+        if self.use_params:
+            if self.params is None:
+                raise ValueError(
+                    f"use_params=True but {self.cache_path} has no `params` "
+                    "dataset -- rebuild the cache with build_cubes.py.")
+            if np.isnan(self.params).any():
+                # NaNs come from build_cubes.read_params() when a lightcone
+                # has an unexpected param layout; we can't condition on those.
+                bad = np.where(np.isnan(self.params).any(axis=1))[0]
+                raise ValueError(
+                    f"{len(bad)}/{len(self.params)} cones have NaN params in "
+                    f"{self.cache_path} (first bad indices: {bad[:5].tolist()}). "
+                    "Either rebuild the cache or pass use_params=False.")
+            self._params_mean = self.params.mean(axis=0,
+                                                 dtype=np.float64).astype(np.float32)
+            self._params_std = (self.params.std(axis=0, dtype=np.float64)
+                                + 1e-8).astype(np.float32)
+            self._params_normed = ((self.params - self._params_mean)
+                                   / self._params_std).astype(np.float32)
+            self.n_params = self.params.shape[1]
+        else:
+            self._params_normed = None
+            self.n_params = 0
+
+        # Total input channels for the FNO: density (1) + 1/(1+z) (1) + params.
+        # The training script reads this attribute to size the FNO's lifting
+        # layer, so the architecture auto-adjusts.
+        self.in_channels = 2 + self.n_params
+
         # Lazy per-process h5py handle (one per DataLoader worker after fork).
         self._h5: h5py.File | None = None
 
@@ -195,8 +246,22 @@ class LightconeCubeCache(Dataset):
             self._z_channel_1d.reshape(1, 1, self.n_z),
             (self.n_x, self.n_y, self.n_z),
         ).astype(np.float32, copy=False)
-        x = np.stack([c_dens, c_z], axis=0)            # (2, Nx, Ny, Nz)
-        y = xhi[None, ...]                             # (1, Nx, Ny, Nz)
+        channels = [c_dens, c_z]
+
+        # Append the 11 z-scored astrophysical params as constant channels.
+        # Each is a scalar per-cone, broadcast over the (Nx, Ny, Nz) volume so
+        # the lifting layer's 1x1 conv can mix them with the spatial inputs.
+        if self._params_normed is not None:
+            params_normed = self._params_normed[idx]      # (n_params,)
+            for j in range(self.n_params):
+                c_p = np.broadcast_to(
+                    np.float32(params_normed[j]),
+                    (self.n_x, self.n_y, self.n_z),
+                )
+                channels.append(c_p)
+
+        x = np.stack(channels, axis=0)                    # (C, Nx, Ny, Nz)
+        y = xhi[None, ...]                                # (1, Nx, Ny, Nz)
         return {
             "x": torch.from_numpy(np.ascontiguousarray(x)),
             "y": torch.from_numpy(np.ascontiguousarray(y)),

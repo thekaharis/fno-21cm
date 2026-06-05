@@ -432,10 +432,17 @@ def main():
     test_loaders = {"val": val_loader, "test": test_loader}
 
     # -------------------------------------------- 4. model + DDP wrap
+    # in_channels read from the dataset so it auto-adjusts when parameter
+    # conditioning is enabled (2 -> 13 with the 11 LHS params broadcast in).
+    in_channels = getattr(dataset, "in_channels", 2)
+    rprint(f"Input channels: {in_channels} "
+           f"(density + 1/(1+z)"
+           + (f" + {in_channels - 2} astrophysical params" if in_channels > 2 else "")
+           + ")")
     fno = FNO(
         n_modes=N_MODES,
         hidden_channels=HIDDEN_CHANNELS,
-        in_channels=2,                  # density + 1/(1+z)
+        in_channels=in_channels,
         out_channels=1,                 # x_HI
         n_layers=N_LAYERS,
         projection_channel_ratio=2,
@@ -502,7 +509,7 @@ def main():
            f"rule for {world_size} ranks)")
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
-    rprint(f"In channels: density/10 + 1/(1+z), Out: x_HI")
+    rprint(f"Out: x_HI")
     rprint(f"Loss: 0.5*absL2 + 0.5*absH1 (d=3)")
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")

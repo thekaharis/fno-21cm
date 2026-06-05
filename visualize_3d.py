@@ -84,11 +84,17 @@ class SilentFNO(nn.Module):
 
 
 # ------------------------------------------------------------------ helpers
-def load_model() -> nn.Module:
+def load_model(in_channels: int = 2) -> nn.Module:
+    """Reconstruct the FNO architecture and load the latest checkpoint.
+
+    ``in_channels`` must match the cache used at training time -- pass
+    ``dataset.in_channels`` from the caller so parameter-conditioned runs
+    (where in_channels=13) load the correct lifting layer.
+    """
     sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
     sd = {f"fno.{k}": v for k, v in sd.items() if k != "_metadata"}
     # Must match fno_21cm_3d.py architecture exactly.
-    fno = FNO(n_modes=(16, 16, 16), hidden_channels=32, in_channels=2,
+    fno = FNO(n_modes=(16, 16, 16), hidden_channels=32, in_channels=in_channels,
               out_channels=1, n_layers=4, projection_channel_ratio=2,
               positional_embedding="grid")
     model = SilentFNO(fno)
@@ -253,7 +259,7 @@ def main():
     print(f"Val cones: {val_idx}")
     print(f"Test cones: {test_idx}")
 
-    model = load_model()
+    model = load_model(in_channels=getattr(dataset, "in_channels", 2))
     print("Model loaded.")
 
     target_z = dataset.target_z
