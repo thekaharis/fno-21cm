@@ -77,6 +77,17 @@ LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-5
 N_EPOCHS = 100
 
+# Loss term weights.  L2 + H1 alone with weights (0.5, 0.5) is the v2/v3
+# baseline; the trained model under that recipe plateaus with diffuse bubble
+# walls because L2 rewards hedging-to-the-mean on uncertain voxels.  Adding a
+# BCE term explicitly penalises uncertainty and pushes the model toward
+# confident bimodal {0, 1} predictions, which (a) sharpens bubble walls and
+# (b) is physically right (x_HI is essentially binary at the voxel level).
+# Start with a modest BCE weight; bump if predictions remain soft.
+LOSS_L2_WEIGHT = 0.5
+LOSS_H1_WEIGHT = 0.5
+LOSS_BCE_WEIGHT = 0.5
+
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
 # allocated CPUs gets the GPU fed.  Defaults to SLURM_CPUS_PER_TASK on the
@@ -181,6 +192,34 @@ class WeightedSumLoss:
 
     def __call__(self, out, y, **kwargs):
         return sum(w * loss(out, y, **kwargs) for w, loss in self.terms)
+
+
+class BCETerm:
+    """Voxel-mean binary cross-entropy between predicted x_HI and {0, 1} truth.
+
+    Why this exists
+    ---------------
+    x_HI is essentially binary at the voxel level -- either neutral (1) or
+    ionized (0), with narrow transition regions at bubble walls.  L2 + H1
+    alone reward the optimizer for hedging on uncertain voxels (predicting
+    ~0.3 when the truth could be 0 or 1 minimises L2), which leaves bubble
+    interiors too bright and walls too soft.  BCE penalises hedging
+    explicitly: ``-log(p)`` blows up as ``p -> 0`` when truth is 1, so the
+    model is pushed toward confident predictions.
+
+    Predictions are clamped to ``(eps, 1 - eps)`` to avoid ``log(0)``.
+
+    Mirrors the ``AbsLoss`` interface: callable with ``(out, y, **kwargs)``
+    so the neuralop Trainer can use it directly in the training and eval
+    loops.
+    """
+
+    def __init__(self, eps: float = 1e-6):
+        self.eps = float(eps)
+
+    def __call__(self, out, y, **kwargs):
+        p = out.clamp(self.eps, 1.0 - self.eps)
+        return -(y * torch.log(p) + (1.0 - y) * torch.log(1.0 - p)).mean()
 
 
 class SilentFNO(nn.Module):
@@ -478,15 +517,25 @@ def main():
                                                            T_max=N_EPOCHS)
 
     # -------------------------------------------- 6. losses (3-D)
-    # Same recipe as v2: absolute L2 + absolute H1, both d=3.  Relative norms
-    # blow up over the all-ionized late-z portion of the cube where x_HI = 0.
+    # L2 + H1 (both absolute, d=3) are the v2/v3 baseline.  Relative norms
+    # blow up over the all-ionized late-z portion of the cube where x_HI = 0,
+    # so absolute is mandatory here.  BCE is a confidence regulariser that
+    # rewards bimodal {0, 1} predictions -- see BCETerm docstring.
     l2_loss = LpLoss(d=3, p=2)
     h1_loss = H1Loss(d=3)
+    bce_loss = BCETerm()
     train_loss_fn = WeightedSumLoss(
-        (0.5, AbsLoss(l2_loss)),
-        (0.5, AbsLoss(h1_loss)),
+        (LOSS_L2_WEIGHT, AbsLoss(l2_loss)),
+        (LOSS_H1_WEIGHT, AbsLoss(h1_loss)),
+        (LOSS_BCE_WEIGHT, bce_loss),
     )
-    eval_losses = {"l2": AbsLoss(l2_loss), "h1": AbsLoss(h1_loss)}
+    # Eval losses are tracked separately in metrics.jsonl so we can see how
+    # each component evolves.  Keys here become column names in JSONL.
+    eval_losses = {
+        "l2": AbsLoss(l2_loss),
+        "h1": AbsLoss(h1_loss),
+        "bce": bce_loss,
+    }
 
     # -------------------------------------------- 7. trainer
     trainer = LoggingTrainer(
@@ -510,7 +559,8 @@ def main():
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
     rprint(f"Out: x_HI")
-    rprint(f"Loss: 0.5*absL2 + 0.5*absH1 (d=3)")
+    rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
+           f"+ {LOSS_BCE_WEIGHT}*BCE  (d=3)")
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
