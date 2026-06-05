@@ -18,7 +18,7 @@
 # =============================================================================
 
 #SBATCH --job-name=build-cubes
-#SBATCH --partition=cpu
+#SBATCH --partition=compute
 #SBATCH --array=0-32
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

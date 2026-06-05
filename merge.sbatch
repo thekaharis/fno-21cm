@@ -10,7 +10,7 @@
 # =============================================================================
 
 #SBATCH --job-name=merge-trainset
-#SBATCH --partition=cpu
+#SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
