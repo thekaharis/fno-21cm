@@ -20,26 +20,29 @@
 #   - you MUST request GPUs explicitly with a TYPED gres: gpu:<type>:<count>
 #         gpu:a30:1   -> one A30      gpu:a100:1 -> one A100   gpu:h200:1 -> one H200
 #   - this job is single-process / single-GPU (no DDP), so it requests ONE.
-#     An A30 is plenty for a 21cm FNO; leave the A100/H200 for bigger jobs.
-#     To use a different type, change `a30` below (or try `--gres=gpu:1` for any).
+#     For multi-GPU DDP on the same node, use slurm/train_h200_4gpu.sbatch.
 #
-#   ntasks=1     : ONE process. Do NOT raise this — the training script is a
+#   ntasks=1     : ONE process. Do NOT raise this -- the training script is a
 #                  single Python process; a higher --ntasks under srun would
 #                  launch duplicate trainers fighting over the GPU/checkpoints.
 #                  (On this cluster --ntasks is the MPI core count; not for us.)
-#   cpus-per-task: cores for data interpolation / loading
-#   mem          : the model is small; raise only if preload OOMs
-#   time         : walltime HH:MM:SS — raise if you increase N_EPOCHS
+#   cpus-per-task: cores for data loading.  Settings below assume the H200
+#                  node: 128 cores / 4 GPUs = 32 cores per single-GPU job is
+#                  the natural quota.  Bump down to 16 if running on a smaller
+#                  GPU (A30/A100 nodes have fewer cores).
+#   mem          : H200 nodes have 1.5 TB; 128 GB is generous and leaves
+#                  headroom for OS page cache of the 180 GB cube cache.
+#   time         : walltime HH:MM:SS -- raise if you increase N_EPOCHS
 #   %j           : expands to the job id in the log filenames
 #
 #SBATCH --job-name=fno-21cm
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:a30:1
-#SBATCH --mem=16G
-#SBATCH --time=06:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:h200:1
+#SBATCH --mem=128G
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/fno-%j.out
 #SBATCH --error=logs/fno-%j.err
 
@@ -90,7 +93,35 @@ export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
 # If this file exists, fno_21cm_3d.py and visualize_3d.py use it directly --
 # ~10x faster than streaming the raw lightcones.  If it doesn't exist yet,
 # the scripts auto-fall-back to streaming from LIGHTCONE_DIR.
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+
+# Stage cube cache on local NVMe scratch (28 TB on the H200 node) so reads
+# go at ~3 GB/s local instead of through the shared project FS.  One-time
+# copy cost (~5-10 min for 180 GB) is paid back across a multi-hour run.
+# Set LOCAL_SCRATCH=no in the env to skip.
+LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
+if [ "$LOCAL_SCRATCH" = "yes" ]; then
+    SCRATCH_BASE=""
+    for candidate in "${TMPDIR:-}" "/scratch/${SLURM_JOB_ID}" "/local/${SLURM_JOB_ID}"; do
+        if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ]; then
+            SCRATCH_BASE="$candidate"; break
+        fi
+    done
+    if [ -n "$SCRATCH_BASE" ]; then
+        LOCAL_CUBES="$SCRATCH_BASE/cubes_3d.h5"
+        echo "Staging cube cache to local NVMe: $LOCAL_CUBES"
+        t0=$(date +%s)
+        cp --reflink=auto "$PROJECT_CUBES" "$LOCAL_CUBES" || cp "$PROJECT_CUBES" "$LOCAL_CUBES"
+        echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
+        export CUBES_CACHE="$LOCAL_CUBES"
+    else
+        echo "No local scratch detected (TMPDIR/scratch unset); reading cubes from project FS."
+        export CUBES_CACHE="$PROJECT_CUBES"
+    fi
+else
+    echo "LOCAL_SCRATCH=no: reading cubes from project FS."
+    export CUBES_CACHE="$PROJECT_CUBES"
+fi
 
 # --- Diagnostics (captured in the .out log) ---------------------------------
 echo "================ job environment ================"
