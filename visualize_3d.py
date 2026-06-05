@@ -42,6 +42,11 @@ print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
 from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
 
+# Pull the architecture constants from the training script so the two stay in
+# sync automatically -- if you bump HIDDEN_CHANNELS or N_MODES there, viz
+# loads the matching checkpoint without a second edit here.
+from fno_21cm_3d import N_MODES, HIDDEN_CHANNELS, N_LAYERS
+
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints_3d/model_state_dict.pt"
 FIGURES_DIR = Path("figures")
@@ -90,13 +95,16 @@ def load_model(in_channels: int = 2) -> nn.Module:
     ``in_channels`` must match the cache used at training time -- pass
     ``dataset.in_channels`` from the caller so parameter-conditioned runs
     (where in_channels=13) load the correct lifting layer.
+
+    All other architecture knobs (``n_modes``, ``hidden_channels``,
+    ``n_layers``) are imported from ``fno_21cm_3d`` so the two files stay in
+    sync without manual upkeep.
     """
     sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
     sd = {f"fno.{k}": v for k, v in sd.items() if k != "_metadata"}
-    # Must match fno_21cm_3d.py architecture exactly.
-    fno = FNO(n_modes=(16, 16, 16), hidden_channels=32, in_channels=in_channels,
-              out_channels=1, n_layers=4, projection_channel_ratio=2,
-              positional_embedding="grid")
+    fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,
+              in_channels=in_channels, out_channels=1, n_layers=N_LAYERS,
+              projection_channel_ratio=2, positional_embedding="grid")
     model = SilentFNO(fno)
     model.load_state_dict(sd, strict=False)
     return model.to(DEVICE).eval()
