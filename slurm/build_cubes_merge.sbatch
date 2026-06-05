@@ -23,7 +23,14 @@
 set -eo pipefail
 # Run from the project root (sbatch scripts live in slurm/, the Python entry
 # points one level up).  Resolves regardless of submission directory.
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+# Under SLURM, SLURM_SUBMIT_DIR is set to the dir from which sbatch was
+# invoked (the convention is to submit from the project root).  Outside
+# SLURM, fall back to this script's own location -> ../
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+else
+    PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+fi
 cd "$PROJECT_ROOT"
 mkdir -p logs
 

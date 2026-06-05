@@ -50,7 +50,17 @@ set -eo pipefail   # (-u omitted: conda's activate scripts trip on unbound vars)
 # (fno_21cm.py, fno_21cm_3d.py, ...) live one level up.  Resolve the project
 # root from this script's own location so `sbatch slurm/train.sbatch` works
 # regardless of which directory the user submits from.
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+# Under SLURM, SLURM_SUBMIT_DIR is the directory from which `sbatch` was
+# invoked.  The convention here is to submit from the project root, e.g.
+# `sbatch slurm/train.sbatch` from one level up, so this resolves correctly.
+# (BASH_SOURCE[0] is unreliable under SLURM because slurmd copies the script
+# to a non-writable temp path before running it.)
+# Outside SLURM, fall back to this script's own location -> ../
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+else
+    PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+fi
 cd "$PROJECT_ROOT"
 mkdir -p logs
 
