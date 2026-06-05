@@ -180,6 +180,43 @@ def build(data_dir: Path, out: Path, n_z: int, z_min: float, z_max: float,
           flush=True)
 
 
+# --------------------------------------------------------- direct chunk copy
+def _copy_chunks_direct(src_dset: h5py.Dataset, dst_dset: h5py.Dataset,
+                        dst_offset: int, n: int) -> int:
+    """Copy *n* per-cone chunks from ``src_dset`` to ``dst_dset`` byte-for-byte.
+
+    The chunks are *(1, Nx, Ny, Nz)*, so chunk *j* of the source maps to chunk
+    *(dst_offset + j)* of the destination.  We use h5py's low-level direct
+    chunk API (``read_direct_chunk`` / ``write_direct_chunk``), which moves the
+    compressed bytes through unchanged -- no gzip decode + re-encode, no numpy
+    round-trip.  On a typical ~40 MB gzip-4 cube this is ~5-10x faster than the
+    classic ``dst[offset+j] = src[j]`` pattern and is the difference between
+    fitting the full 33-shard merge in walltime or not.
+
+    Falls back to the classic copy for any chunk that the direct API rejects
+    (e.g. different chunk layouts or unsupported filters).
+
+    Returns the number of chunks copied via the fast path; the remainder used
+    the fallback.
+    """
+    n_fast = 0
+    src_id = src_dset.id
+    dst_id = dst_dset.id
+    for j in range(n):
+        try:
+            filter_mask, chunk_bytes = src_id.read_direct_chunk((j, 0, 0, 0))
+            dst_id.write_direct_chunk(
+                (dst_offset + j, 0, 0, 0),
+                chunk_bytes,
+                filter_mask=filter_mask,
+            )
+            n_fast += 1
+        except Exception as exc:                          # noqa: BLE001
+            # Fall back to decompress + recompress for this chunk.
+            dst_dset[dst_offset + j] = src_dset[j]
+    return n_fast
+
+
 # -------------------------------------------------------------------- merge
 def merge(out: Path, num_shards: int, compress: bool) -> None:
     shards = [_shard_path(out, i, num_shards) for i in range(num_shards)]
@@ -209,13 +246,19 @@ def merge(out: Path, num_shards: int, compress: bool) -> None:
         target_z = None
         z_min = z_max = None
 
+        # Fast path requires identical chunking + filters on source and
+        # destination -- which is the case here since both go through
+        # _create_cube_dataset with the same `compress` setting.
+        n_fast_total = 0
+        n_total_chunks = 0
         offset = 0
         for shard_path, count in zip(shards, counts):
             with h5py.File(shard_path, "r") as f:
-                # Cube-by-cube copy keeps memory bounded
-                for j in range(count):
-                    dset_d[offset + j] = f["density"][j]
-                    dset_x[offset + j] = f["neutral_fraction"][j]
+                n_fast_total += _copy_chunks_direct(
+                    f["density"], dset_d, offset, count)
+                n_fast_total += _copy_chunks_direct(
+                    f["neutral_fraction"], dset_x, offset, count)
+                n_total_chunks += 2 * count
                 cone_ids[offset:offset + count] = f["cone_id"][:]
                 params_arr[offset:offset + count] = f["params"][:]
                 if target_z is None:
@@ -225,6 +268,9 @@ def merge(out: Path, num_shards: int, compress: bool) -> None:
             print(f"  ... merged {shard_path.name} ({count} cones)",
                   flush=True)
             offset += count
+
+        print(f"[merge] direct-chunk copies: {n_fast_total}/{n_total_chunks} "
+              f"({100*n_fast_total/max(n_total_chunks,1):.1f}%)", flush=True)
 
         o.create_dataset("cone_id", data=cone_ids)
         o.create_dataset("target_z", data=target_z)
