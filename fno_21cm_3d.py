@@ -36,7 +36,10 @@ for _cand in (_HERE / "neuraloperator",
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from neuralop.models import FNO
 from neuralop import Trainer
@@ -93,6 +96,64 @@ TEST_FRACTION = 0.1
 
 CHECKPOINT_DIR = "./checkpoints_3d"
 METRICS_PATH = f"{CHECKPOINT_DIR}/metrics.jsonl"
+
+# Learning-rate scaling rule for multi-GPU DDP runs.  "sqrt" is conservative
+# and rarely diverges; "linear" extracts more wall-clock speed but may need
+# warmup at large effective batches.
+LR_SCALE_RULE = "sqrt"   # "linear" or "sqrt"
+
+
+# ------------------------------------------------------------------ distributed
+def _setup_distributed() -> tuple[int, int, int]:
+    """Initialize torch.distributed if launched under multi-task SLURM.
+
+    Returns ``(rank, local_rank, world_size)``.  Single-process runs return
+    ``(0, 0, 1)`` and do not call ``init_process_group``.
+
+    Conventions:
+      * Multi-GPU is detected via ``SLURM_NTASKS`` > 1.  Launch with
+        ``srun --ntasks=4 python fno_21cm_3d.py`` from inside the sbatch script.
+      * The master address is taken from the first hostname in
+        ``SLURM_NODELIST``; single-node multi-GPU is the only configuration
+        tested.  Multi-node would need a more careful parse of the nodelist
+        (Slurm range notation like ``gpu[01-04]``).
+      * NCCL backend is used unconditionally -- it's the only backend that
+        actually works for multi-GPU on NVIDIA hardware.
+    """
+    world_size = int(os.environ.get("SLURM_NTASKS", "1"))
+    if world_size <= 1:
+        return 0, 0, 1
+
+    rank = int(os.environ["SLURM_PROCID"])
+    local_rank = int(os.environ["SLURM_LOCALID"])
+
+    nodelist = os.environ.get("SLURM_NODELIST", "localhost")
+    # Single-node case: nodelist is just one hostname.  If we ever go
+    # multi-node, this will need slurm range-expansion handling.
+    master_addr = nodelist.split(",")[0]
+    if "[" in master_addr:
+        # Range notation like gpu[01-04] -- bail rather than guess
+        master_addr = "localhost"
+    os.environ.setdefault("MASTER_ADDR", master_addr)
+    os.environ.setdefault("MASTER_PORT", "29500")
+
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        rank=rank,
+        world_size=world_size,
+    )
+    return rank, local_rank, world_size
+
+
+def _all_reduce_mean(value: float, world_size: int) -> float:
+    """Average a scalar across all DDP ranks (returns the input if not DDP)."""
+    if world_size <= 1 or not dist.is_initialized():
+        return float(value)
+    t = torch.tensor([float(value)], device=f"cuda:{torch.cuda.current_device()}")
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return float(t.item() / world_size)
 
 # How often the Trainer runs val/test evaluation AND prints the per-epoch
 # metrics line.  Set to 1 to see train+val+test losses every epoch (adds the
@@ -159,26 +220,44 @@ class LoggingTrainer(Trainer):
     Read it back with ``pandas.read_json(path, lines=True)``.
     """
 
-    def __init__(self, *args, metrics_path: str | Path | None = None, **kwargs):
+    def __init__(self, *args, metrics_path: str | Path | None = None,
+                 rank: int = 0, world_size: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self.metrics_path = Path(metrics_path) if metrics_path else None
-        if self.metrics_path is not None:
+        # File and directory side effects happen on rank 0 only -- otherwise
+        # all four ranks race to create / append to the same file.
+        self._rank = int(rank)
+        self._world_size = int(world_size)
+        self._is_rank_0 = (self._rank == 0)
+        if self.metrics_path is not None and self._is_rank_0:
             self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
         self._last_train: dict | None = None
 
     def train_one_epoch(self, epoch, train_loader, training_loss):
+        # DistributedSampler must be told the epoch so it reshuffles
+        # consistently across ranks each epoch.
+        sampler = getattr(train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(int(epoch))
+
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, avg_lasso, t = out
+
+        # Under DDP each rank sees only its shard of the train set, so the
+        # per-rank train_err / avg_loss are partial.  Average across ranks
+        # to get a globally meaningful number for the JSONL log.
+        train_err_global = _all_reduce_mean(train_err, self._world_size)
+        avg_loss_global = _all_reduce_mean(avg_loss, self._world_size)
+        avg_lasso_global = (_all_reduce_mean(avg_lasso, self._world_size)
+                            if avg_lasso is not None else 0.0)
+
         self._last_train = dict(
             epoch=int(epoch),
-            train_err=float(train_err),
-            avg_loss=float(avg_loss),
-            # avg_lasso is None when no regularizer is configured.
-            avg_lasso_loss=(float(avg_lasso) if avg_lasso is not None else 0.0),
+            train_err=float(train_err_global),
+            avg_loss=float(avg_loss_global),
+            avg_lasso_loss=float(avg_lasso_global),
             epoch_train_time=float(t),
         )
-        # If this epoch will NOT call evaluate_all, write the row now so we
-        # still capture train metrics on non-eval epochs.
         if self.eval_interval and (epoch % self.eval_interval != 0):
             self._flush_row({})
         return out
@@ -186,11 +265,17 @@ class LoggingTrainer(Trainer):
     def evaluate_all(self, *args, **kwargs):
         eval_metrics = super().evaluate_all(*args, **kwargs)
         # Force floats for clean JSON; eval values are tensors or numpy scalars.
+        # The neuralop Trainer with use_distributed=True is expected to
+        # all-reduce eval metrics internally; if it doesn't, the values logged
+        # below will be per-rank-0 partial means -- still informative as a
+        # trend, just biased.
         clean = {k: float(v) for k, v in eval_metrics.items()}
         self._flush_row(clean)
         return eval_metrics
 
     def _flush_row(self, eval_metrics: dict) -> None:
+        if not self._is_rank_0:
+            return
         if self.metrics_path is None or self._last_train is None:
             return
         import json
@@ -209,10 +294,13 @@ class ProgressLoader:
     shows life.
     """
 
-    def __init__(self, loader, log_every: int = 25, tag: str = "train"):
+    def __init__(self, loader, log_every: int = 25, tag: str = "train",
+                 rank: int = 0):
         self.loader = loader
         self.log_every = int(log_every)
         self.tag = tag
+        # Only rank 0 prints; other ranks iterate silently.
+        self._is_rank_0 = (int(rank) == 0)
 
     def __len__(self):
         return len(self.loader)
@@ -226,79 +314,124 @@ class ProgressLoader:
     def __iter__(self):
         import time
         n = len(self.loader)
+        # batch_size is set on the underlying DataLoader; default to 1 if the
+        # wrapped loader is something exotic that doesn't expose it.
+        bs = int(getattr(self.loader, "batch_size", 1) or 1)
         t0 = time.time()
         for i, batch in enumerate(self.loader, start=1):
             yield batch
-            if self.log_every and (i % self.log_every == 0 or i == n):
+            if (self._is_rank_0 and self.log_every
+                    and (i % self.log_every == 0 or i == n)):
                 elapsed = time.time() - t0
-                rate = i / max(elapsed, 1e-6)
-                eta = (n - i) / max(rate, 1e-6)
-                print(f"    [{self.tag} {i}/{n}] {rate:.2f} samples/s  "
+                batches_per_s = i / max(elapsed, 1e-6)
+                samples_per_s = batches_per_s * bs
+                eta = (n - i) / max(batches_per_s, 1e-6)
+                print(f"    [{self.tag} {i}/{n}] "
+                      f"{samples_per_s:.2f} samples/s "
+                      f"({batches_per_s:.2f} batches/s, bs={bs})  "
                       f"elapsed {elapsed:6.1f}s  ETA {eta/60:5.1f} min",
                       flush=True)
 
 
 # ------------------------------------------------------------------ main
 def main():
+    # -------------------------------------------- 0. distributed setup
+    rank, local_rank, world_size = _setup_distributed()
+    is_rank_0 = (rank == 0)
+    is_distributed = (world_size > 1)
+
+    # Per-rank device.  Under DDP each rank pins to its own GPU; in single-GPU
+    # mode this is just the module-level DEVICE.
+    device = (f"cuda:{local_rank}" if torch.cuda.is_available()
+              else DEVICE)
+
+    def rprint(*args, **kwargs):
+        """Print only on rank 0 (silent on other ranks)."""
+        if is_rank_0:
+            print(*args, **kwargs)
+
+    rprint(f"\n[ddp] world_size={world_size}  rank={rank}  "
+           f"local_rank={local_rank}  device={device}")
+
     # -------------------------------------------- 1. dataset (cache or stream)
     # Prefer the pre-built cube cache when it exists: ~10x faster reads per
     # sample, no scipy interpolation in the hot path.
     if CUBES_CACHE.exists():
-        print(f"Using pre-computed cube cache: {CUBES_CACHE}")
+        rprint(f"Using pre-computed cube cache: {CUBES_CACHE}")
         dataset = LightconeCubeCache(CUBES_CACHE)
-        print(f"Dataset: {len(dataset)} cubes  "
-              f"({dataset.n_x} x {dataset.n_y} x {dataset.n_z}, "
-              f"z in [{dataset.target_z[0]:.2f}, {dataset.target_z[-1]:.2f}])")
+        rprint(f"Dataset: {len(dataset)} cubes  "
+               f"({dataset.n_x} x {dataset.n_y} x {dataset.n_z}, "
+               f"z in [{dataset.target_z[0]:.2f}, {dataset.target_z[-1]:.2f}])")
     else:
-        print(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
-              f"from {DATA_DIR}. Run build_cubes.py to precompute and speed "
-              f"up training ~10x.")
+        rprint(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
+               f"from {DATA_DIR}. Run build_cubes.py to precompute and speed "
+               f"up training ~10x.")
         files = sorted(DATA_DIR.glob(FILE_GLOB))
         if not files:
-            print(f"No lightcone files found under {DATA_DIR}/{FILE_GLOB}",
-                  file=sys.stderr)
+            rprint(f"No lightcone files found under {DATA_DIR}/{FILE_GLOB}",
+                   file=sys.stderr)
             sys.exit(1)
-        print(f"Found {len(files)} lightcone files in {DATA_DIR}")
+        rprint(f"Found {len(files)} lightcone files in {DATA_DIR}")
         dataset = LightconeCubeDataset(
             file_paths=files,
             n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
             preload=False,
         )
-        print(f"Dataset: {len(dataset)} cubes  ({N_Z} LOS cells each, "
-              f"z in [{Z_MIN}, {Z_MAX}])")
+        rprint(f"Dataset: {len(dataset)} cubes  ({N_Z} LOS cells each, "
+               f"z in [{Z_MIN}, {Z_MAX}])")
 
-    # -------------------------------------------- 3. split by cone
+    # -------------------------------------------- 2. split by cone
     train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx) = split_cubes(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
     overlap = set(train_idx) & set(val_idx) | set(train_idx) & set(test_idx) \
               | set(val_idx) & set(test_idx)
     assert not overlap, f"Split leakage: {overlap}"
-    print(f"Train: {len(train_ds)} cones {train_idx}")
-    print(f"Val:   {len(val_ds)} cones {val_idx}")
-    print(f"Test:  {len(test_ds)} cones {test_idx}")
+    rprint(f"Train: {len(train_ds)} cones {train_idx}")
+    rprint(f"Val:   {len(val_ds)} cones {val_idx}")
+    rprint(f"Test:  {len(test_ds)} cones {test_idx}")
 
-    # -------------------------------------------- 4. dataloaders
-    # persistent_workers keeps workers alive across epochs (avoids paying the
-    # fork + scipy import startup cost on every epoch).  Only meaningful when
-    # num_workers > 0.
+    # -------------------------------------------- 3. dataloaders
+    # Under DDP each rank consumes a disjoint shard of each split.  The
+    # DistributedSampler pads to be divisible by world_size if needed.
+    if is_distributed:
+        train_sampler = DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank,
+            shuffle=True, drop_last=False,
+        )
+        val_sampler = DistributedSampler(
+            val_ds, num_replicas=world_size, rank=rank,
+            shuffle=False, drop_last=False,
+        )
+        test_sampler = DistributedSampler(
+            test_ds, num_replicas=world_size, rank=rank,
+            shuffle=False, drop_last=False,
+        )
+        train_shuffle = None  # mutually exclusive with sampler
+    else:
+        train_sampler = val_sampler = test_sampler = None
+        train_shuffle = True
+
     dl_kwargs = dict(
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
-        pin_memory=(DEVICE != "cpu"),
+        pin_memory=torch.cuda.is_available(),
         persistent_workers=(NUM_WORKERS > 0),
     )
-    train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
-    val_loader = DataLoader(val_ds, shuffle=False, **dl_kwargs)
-    test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
+    train_loader = DataLoader(train_ds, shuffle=train_shuffle,
+                              sampler=train_sampler, **dl_kwargs)
+    val_loader = DataLoader(val_ds, shuffle=False,
+                            sampler=val_sampler, **dl_kwargs)
+    test_loader = DataLoader(test_ds, shuffle=False,
+                             sampler=test_sampler, **dl_kwargs)
 
     # Wrap the train loader in a per-step progress reporter so the SLURM log
     # shows life within an epoch (the neuralop Trainer logs per-epoch only).
     train_loader = ProgressLoader(train_loader, log_every=LOG_EVERY,
-                                  tag="train")
+                                  tag="train", rank=rank)
     test_loaders = {"val": val_loader, "test": test_loader}
 
-    # -------------------------------------------- 5. model
+    # -------------------------------------------- 4. model + DDP wrap
     fno = FNO(
         n_modes=N_MODES,
         hidden_channels=HIDDEN_CHANNELS,
@@ -308,17 +441,36 @@ def main():
         projection_channel_ratio=2,
         positional_embedding="grid",    # injects normalized (x, y, z) coords
     )
-    model = SilentFNO(fno).to(DEVICE)
-    print(f"Model: {count_model_params(model.fno):,} parameters")
-    print(model)
+    # Count params BEFORE the DDP wrap (DDP nests model under .module which
+    # would confuse count_model_params).
+    n_params = count_model_params(fno)
+    model = SilentFNO(fno).to(device)
+    if is_distributed:
+        # find_unused_parameters=False is the fast path; flip to True only if
+        # DDP barks about unused params (FNO with positional_embedding="grid"
+        # uses every parameter every step, so this should be fine).
+        model = DDP(model, device_ids=[local_rank],
+                    output_device=local_rank,
+                    find_unused_parameters=False)
+    rprint(f"Model: {n_params:,} parameters")
 
-    # -------------------------------------------- 6. optimizer / scheduler
+    # -------------------------------------------- 5. optimizer / scheduler
+    # LR scaling rule for the effective global batch (BATCH_SIZE * world_size).
+    if is_distributed:
+        global_bs = BATCH_SIZE * world_size
+        if LR_SCALE_RULE == "linear":
+            scaled_lr = LEARNING_RATE * world_size
+        else:  # sqrt
+            scaled_lr = LEARNING_RATE * (world_size ** 0.5)
+    else:
+        global_bs = BATCH_SIZE
+        scaled_lr = LEARNING_RATE
     optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+                                 lr=scaled_lr, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                            T_max=N_EPOCHS)
 
-    # -------------------------------------------- 7. losses (3-D)
+    # -------------------------------------------- 6. losses (3-D)
     # Same recipe as v2: absolute L2 + absolute H1, both d=3.  Relative norms
     # blow up over the all-ionized late-z portion of the cube where x_HI = 0.
     l2_loss = LpLoss(d=3, p=2)
@@ -329,42 +481,50 @@ def main():
     )
     eval_losses = {"l2": AbsLoss(l2_loss), "h1": AbsLoss(h1_loss)}
 
-    # -------------------------------------------- 8. trainer
+    # -------------------------------------------- 7. trainer
     trainer = LoggingTrainer(
         model=model,
         n_epochs=N_EPOCHS,
-        device=DEVICE,
+        device=device,
         data_processor=None,
         wandb_log=False,
         eval_interval=EVAL_INTERVAL,
-        use_distributed=False,
-        verbose=True,
+        use_distributed=is_distributed,
+        verbose=is_rank_0,                 # silence non-rank-0 Trainer prints
         metrics_path=METRICS_PATH,
+        rank=rank,
+        world_size=world_size,
     )
 
-    print(f"\nDevice: {DEVICE}")
-    print(f"Batch size: {BATCH_SIZE}, LR: {LEARNING_RATE}")
-    print(f"Epochs: {N_EPOCHS}")
-    print(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
-    print(f"In channels: density/10 + 1/(1+z), Out: x_HI")
-    print(f"Loss: 0.5*absL2 + 0.5*absH1 (d=3)")
-    print(f"DataLoader workers: {NUM_WORKERS} "
-          f"(per-step log every {LOG_EVERY} batches)")
-    print(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
-    print(f"Metrics JSONL: {METRICS_PATH}")
+    rprint(f"\nDevice: {device}")
+    rprint(f"Batch size (per rank): {BATCH_SIZE}  global: {global_bs}")
+    rprint(f"LR: {scaled_lr:g}  (scaled from {LEARNING_RATE:g} by {LR_SCALE_RULE} "
+           f"rule for {world_size} ranks)")
+    rprint(f"Epochs: {N_EPOCHS}")
+    rprint(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
+    rprint(f"In channels: density/10 + 1/(1+z), Out: x_HI")
+    rprint(f"Loss: 0.5*absL2 + 0.5*absH1 (d=3)")
+    rprint(f"DataLoader workers: {NUM_WORKERS} "
+           f"(per-step log every {LOG_EVERY} batches)")
+    rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
+    rprint(f"Metrics JSONL: {METRICS_PATH}")
 
-    # -------------------------------------------- 9. train
-    trainer.train(
-        train_loader=train_loader,
-        test_loaders=test_loaders,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        regularizer=False,
-        training_loss=train_loss_fn,
-        eval_losses=eval_losses,
-        save_every=10,
-        save_dir=CHECKPOINT_DIR,
-    )
+    # -------------------------------------------- 8. train
+    try:
+        trainer.train(
+            train_loader=train_loader,
+            test_loaders=test_loaders,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            regularizer=False,
+            training_loss=train_loss_fn,
+            eval_losses=eval_losses,
+            save_every=10,
+            save_dir=CHECKPOINT_DIR,
+        )
+    finally:
+        if is_distributed and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

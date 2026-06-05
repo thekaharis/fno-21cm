@@ -54,7 +54,8 @@ Two pipelines live side by side:
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
 |------|---------|
-| `slurm/train.sbatch` | GPU training (default: `fno_21cm.py`; switch the last line for 3-D). |
+| `slurm/train.sbatch` | Single-GPU training (A30 default; just change `--gres` for A100/H200). |
+| `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
 | `slurm/build.sbatch`, `slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
 | `slurm/build_cubes.sbatch`, `slurm/build_cubes_merge.sbatch` | v3 cube cache build + merge. |
 
