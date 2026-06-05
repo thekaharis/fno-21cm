@@ -7,8 +7,8 @@
 # trainset.shardNNN.h5.  After the array finishes, merge.sbatch combines them.
 # Submit both as a dependency chain so the merge runs automatically:
 #
-#     AID=$(sbatch --parsable build.sbatch)
-#     sbatch --dependency=afterok:"$AID" merge.sbatch
+#     AID=$(sbatch --parsable slurm/build.sbatch)
+#     sbatch --dependency=afterok:"$AID" slurm/merge.sbatch
 #
 # IMPORTANT: NUM_SHARDS (below) MUST equal the array width.
 #   --array=0-32  -> 33 tasks -> NUM_SHARDS=33
@@ -28,7 +28,10 @@
 #SBATCH --error=logs/build-%A_%a.err
 
 set -eo pipefail
-cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
+# Run from the project root (sbatch scripts live in slurm/, the Python entry
+# points one level up).  Resolves regardless of submission directory.
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 mkdir -p logs
 
 module load devel/miniforge

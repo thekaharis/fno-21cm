@@ -3,8 +3,8 @@
 # Combine the shard caches from build.sbatch into a single trainset.h5.
 # Run after the build array completes (chain it with a dependency):
 #
-#     AID=$(sbatch --parsable build.sbatch)
-#     sbatch --dependency=afterok:"$AID" merge.sbatch
+#     AID=$(sbatch --parsable slurm/build.sbatch)
+#     sbatch --dependency=afterok:"$AID" slurm/merge.sbatch
 #
 # NUM_SHARDS must match the value used in build.sbatch.
 # =============================================================================
@@ -20,7 +20,10 @@
 #SBATCH --error=logs/merge-%j.err
 
 set -eo pipefail
-cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
+# Run from the project root (sbatch scripts live in slurm/, the Python entry
+# points one level up).  Resolves regardless of submission directory.
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 mkdir -p logs
 
 module load devel/miniforge

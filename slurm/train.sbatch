@@ -5,7 +5,7 @@
 # Submit from the project directory (the one containing fno_21cm.py AND the
 # data/ folder of lightcone .h5 files):
 #
-#     sbatch train.sbatch
+#     sbatch slurm/train.sbatch
 #
 # Prerequisites in that directory: the data/ folder of lightcone .h5 files,
 # and a resolvable `neuralop` (the conda env below, or a ./neuraloperator/
@@ -45,8 +45,13 @@
 
 set -eo pipefail   # (-u omitted: conda's activate scripts trip on unbound vars)
 
-# --- Run from the submission directory --------------------------------------
-cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
+# --- Run from the project root ----------------------------------------------
+# The sbatch scripts live in slurm/, but the Python entry points
+# (fno_21cm.py, fno_21cm_3d.py, ...) live one level up.  Resolve the project
+# root from this script's own location so `sbatch slurm/train.sbatch` works
+# regardless of which directory the user submits from.
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 mkdir -p logs
 
 # --- Activate the conda environment -----------------------------------------

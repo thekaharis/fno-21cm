@@ -44,6 +44,7 @@ from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints_3d/model_state_dict.pt"
+FIGURES_DIR = Path("figures")
 # Data source: prefer the pre-built cube cache if it exists, otherwise stream
 # from raw lightcones.  Must match what training used so the deterministic
 # split (driven by len(dataset) + SPLIT_SEED) lines up.
@@ -256,6 +257,7 @@ def main():
     print("Model loaded.")
 
     target_z = dataset.target_z
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
     for split_ds, split_idx, split_name in [
         (val_ds, val_idx, "validation"),
@@ -274,7 +276,7 @@ def main():
         idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE, dtype=int).tolist()
         fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
                             split_name)
-        out = f"comparison_3d_{split_name}.png"
+        out = FIGURES_DIR / f"comparison_3d_{split_name}.png"
         fig.savefig(out, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved {out}")
@@ -282,14 +284,14 @@ def main():
         # xz lightcone strip
         fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
                                    split_name)
-        out = f"lightcone_3d_{split_name}.png"
+        out = FIGURES_DIR / f"lightcone_3d_{split_name}.png"
         fig.savefig(out, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved {out}")
 
         # scatter over all voxels in the cube
         fig = plot_scatter(truth, pred, cone_id, split_name)
-        out = f"scatter_3d_{split_name}.png"
+        out = FIGURES_DIR / f"scatter_3d_{split_name}.png"
         fig.savefig(out, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved {out}")

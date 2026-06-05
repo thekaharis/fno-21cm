@@ -43,6 +43,7 @@ from dataset import SliceCache, split_by_cone
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints/model_state_dict.pt"
 CACHE_FILE = Path("trainset.h5")
+FIGURES_DIR = Path("figures")
 N_SLICES_PER_SPLIT = 4
 
 # Must match fno_21cm.py so val/test here are the same held-out cones.
@@ -196,6 +197,7 @@ def main():
         cache, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
     print(f"Cache: {len(cache)} slices, {len(np.unique(cache.cone_id))} cones")
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
     for split_ds, name in [(val_ds, "Validation"), (test_ds, "Test")]:
         n = len(split_ds)
@@ -215,10 +217,10 @@ def main():
                 for gi in global_idxs]
 
         fig = plot_comparison(truths, preds, inputs, meta)
-        fig.savefig(f"comparison_{name.lower()}.png", dpi=150,
-                    bbox_inches="tight")
+        out = FIGURES_DIR / f"comparison_{name.lower()}.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved comparison_{name.lower()}.png")
+        print(f"Saved {out}")
 
         # Scatter plot across many slices
         n_scatter = min(32, n)
@@ -226,10 +228,10 @@ def main():
         scatter_samples = [split_ds[i] for i in scatter_idxs]
         truths_all, preds_all, _ = predict_batch(model, scatter_samples)
         fig_s = plot_scatter(truths_all, preds_all, name)
-        fig_s.savefig(f"scatter_{name.lower()}.png", dpi=150,
-                     bbox_inches="tight")
+        out = FIGURES_DIR / f"scatter_{name.lower()}.png"
+        fig_s.savefig(out, dpi=150, bbox_inches="tight")
         plt.close(fig_s)
-        print(f"Saved scatter_{name.lower()}.png")
+        print(f"Saved {out}")
 
     print("Done.")
 

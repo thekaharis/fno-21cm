@@ -17,14 +17,31 @@ Two pipelines live side by side:
 
 ## Repository layout
 
+### Top-level layout
+
+```
+.
+├── fno_21cm.py, fno_21cm_3d.py    # training entry points (v2, v3)
+├── dataset.py, dataset_3d.py      # PyTorch Datasets
+├── build_trainset.py              # v2 slice cache builder
+├── build_cubes.py                 # v3 cube cache builder
+├── visualize.py, visualize_3d.py  # checkpoint -> plots
+├── loader.py                      # shared HDF5 lightcone reader
+├── slurm/                         # all sbatch scripts (cluster)
+├── figures/                       # all generated plots
+├── data/                          # raw lightcone .h5 files (gitignored)
+├── checkpoints/, checkpoints_3d/  # trained models (gitignored)
+└── neuraloperator/                # vendored third-party lib (gitignored)
+```
+
 ### 2-D pipeline (v2)
 | File | Purpose |
 |------|---------|
 | `fno_21cm.py` | 2-D training entry point. |
 | `dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
 | `build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
-| `visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter. |
-| `comparison_*.png`, `scatter_*.png` | Example outputs from the v2 run. |
+| `visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
+| `figures/comparison_*.png`, `figures/scatter_*.png` | Example outputs from the v2 run. |
 
 ### 3-D pipeline (v3)
 | File | Purpose |
@@ -32,14 +49,23 @@ Two pipelines live side by side:
 | `fno_21cm_3d.py` | 3-D training entry point (full lightcone in / full cube out). Auto-detects the cube cache; falls back to streaming. |
 | `dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
 | `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
-| `build_cubes.sbatch` / `build_cubes_merge.sbatch` | SLURM array + merge scripts for the cube precompute on the cluster. |
-| `visualize_3d.py` | Loads a 3-D checkpoint; renders z-slice grid, edge-on xz lightcone strip, and voxel scatter. |
+| `visualize_3d.py` | Loads a 3-D checkpoint; renders z-slice grid, edge-on xz lightcone strip, and voxel scatter into `figures/`. |
+
+### SLURM scripts (`slurm/`)
+| File | Purpose |
+|------|---------|
+| `slurm/train.sbatch` | GPU training (default: `fno_21cm.py`; switch the last line for 3-D). |
+| `slurm/build.sbatch`, `slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
+| `slurm/build_cubes.sbatch`, `slurm/build_cubes_merge.sbatch` | v3 cube cache build + merge. |
+
+All sbatch scripts auto-resolve the project root from their own location, so
+they can be submitted from anywhere (`sbatch slurm/train.sbatch` from the
+project root is the conventional usage).
 
 ### Shared
 | File | Purpose |
 |------|---------|
 | `loader.py` | `LightconeFile` — h5py reader for 21cmFAST `raw_lightcone_v2.0` files (used by both pipelines). |
-| `train.sbatch`, `build.sbatch`, `merge.sbatch` | SLURM scripts for the cluster. |
 
 **Not included in the repo** (see `.gitignore`):
 - `data/` — the 21cmFAST lightcone HDF5 files. Provide your own.
@@ -87,13 +113,13 @@ package) and the code will use the installed copy automatically.
 
 ```bash
 # Optional: point at lightcones outside ./data (default fallback).
-# train.sbatch already exports this for the cluster.
+# slurm/train.sbatch already exports this for the cluster.
 export LIGHTCONE_DIR=/path/to/21cmfast_11d_sample_h5_files
 
 # (Recommended) One-time: pre-interpolate every cube into cubes_3d.h5.
 # Speeds up training reads ~10x.  On the cluster, use the array job:
-#     AID=$(sbatch --parsable build_cubes.sbatch)
-#     sbatch --dependency=afterok:"$AID" build_cubes_merge.sbatch
+#     AID=$(sbatch --parsable slurm/build_cubes.sbatch)
+#     sbatch --dependency=afterok:"$AID" slurm/build_cubes_merge.sbatch
 # Locally:
 python build_cubes.py --data "$LIGHTCONE_DIR" --out cubes_3d.h5
 
