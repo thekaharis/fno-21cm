@@ -107,4 +107,4 @@ echo "================================================="
 # --- Train ------------------------------------------------------------------
 # Plain `python` (no `srun`): this is a single-process job, and launching it
 # under srun would spawn one trainer per task if --ntasks is ever raised.
-python fno_21cm.py
+python fno_21cm_3d.py
