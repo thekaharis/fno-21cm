@@ -36,7 +36,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-DATA_DIR=/pfs/10/project/bw24d007/hk/lightcones   # TODO: dir with the 6600 .h5 files
+DATA_DIR=/pfs/10/work/hd_id260-fno_training/data/data   # dir with the 6600 .h5 files
 NUM_SHARDS=33                                       # MUST equal the array width
 
 echo "shard ${SLURM_ARRAY_TASK_ID}/${NUM_SHARDS} on $(hostname)"

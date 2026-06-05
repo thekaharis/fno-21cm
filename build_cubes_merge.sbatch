@@ -31,6 +31,6 @@ export PYTHONUNBUFFERED=1
 
 # MUST match build_cubes.sbatch.
 NUM_SHARDS=33
-OUT_PATH=/pfs/10/project/bw24d007/hk/cubes_3d.h5
+OUT_PATH=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
 
 python build_cubes.py --out "$OUT_PATH" --merge --num-shards "$NUM_SHARDS"
