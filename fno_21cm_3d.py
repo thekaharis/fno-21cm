@@ -517,6 +517,14 @@ def main():
     n_params = count_model_params(fno)
     model = SilentFNO(fno).to(device)
     if is_distributed:
+        # SyncBatchNorm: convert every BatchNormNd in the model to its
+        # synchronised counterpart BEFORE the DDP wrap.  Without this, each
+        # rank maintains its own BN running_mean / running_var (DDP syncs
+        # gradients but not buffers); the saved checkpoint contains only
+        # rank-0's stats; the 4 ranks drift during training and produce
+        # spiky / inconsistent eval losses.  No-op for FNO (no BN layers);
+        # critical for U-FNO whose mini U-Net path is BN-heavy.
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
         # find_unused_parameters=False is the fast path; flip to True only if
         # DDP barks about unused params (FNO with positional_embedding="grid"
         # uses every parameter every step, so this should be fine).

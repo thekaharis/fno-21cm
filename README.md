@@ -56,7 +56,8 @@ Two pipelines live side by side:
 |------|---------|
 | `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
-| `slurm/viz.sbatch` | Render comparison / lightcone-strip / scatter PNGs from the latest checkpoint (1 GPU, 30 min). |
+| `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (1 GPU, 30 min). |
+| `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
 | `slurm/build.sbatch`, `slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
 | `slurm/build_cubes.sbatch`, `slurm/build_cubes_merge.sbatch` | v3 cube cache build + merge. |
 
