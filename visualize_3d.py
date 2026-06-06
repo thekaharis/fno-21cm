@@ -45,10 +45,17 @@ from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
 # Pull the architecture constants from the training script so the two stay in
 # sync automatically -- if you bump HIDDEN_CHANNELS or N_MODES there, viz
 # loads the matching checkpoint without a second edit here.
-from fno_21cm_3d import N_MODES, HIDDEN_CHANNELS, N_LAYERS
+from fno_21cm_3d import (
+    N_MODES, HIDDEN_CHANNELS, N_LAYERS, UFNO_WIDTH, MODEL_KIND,
+)
 
 # ------------------------------------------------------------------ config
-CHECKPOINT = "checkpoints_3d/model_state_dict.pt"
+# Default checkpoint path mirrors the training script's MODEL_KIND-aware
+# CHECKPOINT_DIR so viz auto-loads from the matching directory.
+_DEFAULT_CKPT = ("checkpoints_3d" if MODEL_KIND == "fno"
+                 else "checkpoints_3d_ufno")
+CHECKPOINT = os.environ.get("CHECKPOINT",
+                            f"{_DEFAULT_CKPT}/model_state_dict.pt")
 FIGURES_DIR = Path("figures")
 # Data source: prefer the pre-built cube cache if it exists, otherwise stream
 # from raw lightcones.  Must match what training used so the deterministic
@@ -60,6 +67,17 @@ FILE_GLOB = "21cmfast_11d_sample*.h5"
 N_Z = 256
 Z_MIN, Z_MAX = 5.0, 25.0
 N_SLICES_PER_CONE = 4              # z-slices to render in the comparison panel
+
+# Number of cones to visualize per held-out split (val + test).  Cones are
+# picked to span the range of reionization behaviors -- from "barely reionized
+# by z=5" to "fully reionized early" -- by ranking the held-out cones on their
+# mean truth x_HI at z = STRATIFY_Z and picking at evenly spaced percentiles.
+# A single representative cone (the old behavior) is a poor diagnostic because
+# LHS parameter draws produce wildly different reionization histories; the
+# multi-cone view is what makes architectural / loss interventions actually
+# comparable.
+N_CONES_PER_SPLIT = 4
+STRATIFY_Z = 7.0                   # mid-reionization redshift used for ranking
 
 # Must match fno_21cm_3d.py.
 SPLIT_SEED = 42
@@ -112,9 +130,22 @@ def load_model(in_channels: int = 2) -> nn.Module:
     raw_sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
     raw_sd = {k: v for k, v in raw_sd.items() if k != "_metadata"}
 
-    fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,
-              in_channels=in_channels, out_channels=1, n_layers=N_LAYERS,
-              projection_channel_ratio=2, positional_embedding="grid")
+    if MODEL_KIND == "ufno":
+        # U-FNO: SilentFNO wraps UFNOWrapped, which wraps Wen et al.'s
+        # SimpleBlock3d.  Same in/out conventions; same prefix-detection
+        # logic below handles the DDP module. prefix.
+        from models_ufno import UFNOWrapped
+        fno = UFNOWrapped(
+            modes1=N_MODES[0], modes2=N_MODES[1], modes3=N_MODES[2],
+            width=UFNO_WIDTH,
+            in_channels=in_channels,
+            out_channels=1,
+            sigmoid=True,
+        )
+    else:
+        fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,
+                  in_channels=in_channels, out_channels=1, n_layers=N_LAYERS,
+                  projection_channel_ratio=2, positional_embedding="grid")
     model = SilentFNO(fno)
     target_keys = set(model.state_dict().keys())
 
@@ -309,6 +340,115 @@ def plot_scatter(truth, pred, cone_id, split):
     return fig
 
 
+# ---------------------------------------------------- cone-picker by behavior
+def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
+                                 n_cones: int,
+                                 stratify_z: float) -> list[tuple[int, int, float]]:
+    """Pick *n_cones* cones from the split that span the reionization range.
+
+    Ranks every cone in the split by its mean truth-x_HI at the LOS slice
+    closest to *stratify_z* (a single 2-D slice per cone, cheap to read),
+    then samples at evenly spaced percentiles of that ranking.  Returns a
+    list of ``(idx_in_split, global_cone_id, summary_xhi)`` tuples,
+    ordered from most-reionized (low summary) to least (high summary).
+
+    Picking a single "first cone" -- the previous behavior -- gave wildly
+    different visuals run to run because LHS-sampled parameter draws produce
+    very different reionization histories.  Stratifying across cones is what
+    makes architectural / loss interventions diagnosable: the worst-case
+    "no reionization" cone is exactly where the model's parameter-conditioning
+    has to do the most work, and the typical mid-reion. cone is where bubble
+    walls show the FNO's spectral-truncation effects most clearly.
+    """
+    n = len(split_ds)
+    if n == 0:
+        return []
+
+    # Mean truth-x_HI at the slice closest to stratify_z.  One number per
+    # cone, fast (single 2-D slice per cube).  Used for both ranking and
+    # for the summary annotation in the rendered figures.
+    z_idx = int(np.argmin(np.abs(target_z - stratify_z)))
+    summaries = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        summaries[i] = split_ds[i]["y"][0, :, :, z_idx].mean().item()
+
+    if n_cones >= n:
+        order = list(range(n))
+    else:
+        # Sample at evenly spaced percentiles (5..95 by default) so the
+        # extremes are represented without being literal min/max outliers.
+        percentiles = np.linspace(5.0, 95.0, n_cones)
+        targets = np.percentile(summaries, percentiles)
+        order = []
+        for t in targets:
+            order.append(int(np.argmin(np.abs(summaries - t))))
+        # Dedupe while preserving order (np.unique would re-sort).
+        order = list(dict.fromkeys(order))
+        # If dedupe shrunk the list, top up with the next-closest cones.
+        while len(order) < n_cones and len(order) < n:
+            for k in range(n):
+                if k not in order:
+                    order.append(k); break
+
+    # Sort by summary x_HI so the rendered figures step cleanly from
+    # most-reionized (low <x_HI>) to least (high).
+    order.sort(key=lambda i: summaries[i])
+    return [(i, int(split_idx[i]), float(summaries[i])) for i in order]
+
+
+# ------------------------------------------------- multi-cone summary plot
+def plot_lightcone_summary_grid(per_cone, target_z, split_name):
+    """One xz lightcone strip per cone, stacked vertically.
+
+    *per_cone* is a list of ``(cone_id, summary_xhi, dens, truth, pred)``.
+    Each row shows three panels (True | Pred | Pred - True) at y = Ny/2 for
+    that cone, with the cone's mean truth-x_HI at z = STRATIFY_Z in the row
+    label so the reionization "level" is visible at a glance.
+
+    This is the single most useful comparison figure for the thesis: one
+    image shows how the same model handles cones with qualitatively different
+    reionization histories.
+    """
+    n = len(per_cone)
+    fig, axes = plt.subplots(n, 3, figsize=(18, 2.0 * n + 1), squeeze=False)
+    extent = [float(target_z[0]), float(target_z[-1]), 0, per_cone[0][2].shape[0]]
+
+    for row, (cone_id, summ, dens, truth, pred) in enumerate(per_cone):
+        j = truth.shape[1] // 2
+        t_strip = truth[:, j, :]
+        p_strip = pred[:, j, :]
+        e_strip = p_strip - t_strip
+
+        axes[row, 0].imshow(t_strip, cmap="viridis", aspect="auto",
+                            origin="lower", extent=extent, vmin=0, vmax=1)
+        axes[row, 0].set_ylabel(f"cone {cone_id}\n<x_HI>={summ:.2f}",
+                                fontsize=9)
+
+        axes[row, 1].imshow(p_strip, cmap="viridis", aspect="auto",
+                            origin="lower", extent=extent, vmin=0, vmax=1)
+
+        vmax_err = max(abs(e_strip.min()), abs(e_strip.max()), 0.01)
+        axes[row, 2].imshow(e_strip, cmap="RdBu_r", aspect="auto",
+                            origin="lower", extent=extent,
+                            vmin=-vmax_err, vmax=vmax_err)
+
+        if row == 0:
+            axes[row, 0].set_title("True x_HI")
+            axes[row, 1].set_title("Predicted x_HI")
+            axes[row, 2].set_title("Pred - True")
+        if row == n - 1:
+            for c in range(3):
+                axes[row, c].set_xlabel("redshift z")
+        else:
+            for c in range(3):
+                axes[row, c].set_xticklabels([])
+
+    fig.suptitle(f"Lightcone-strip grid across {n} reionization regimes  "
+                 f"({split_name})", y=1.0, fontsize=11)
+    fig.tight_layout()
+    return fig
+
+
 # ------------------------------------------------------------------ main
 def main():
     print(f"Device: {DEVICE}")
@@ -352,34 +492,60 @@ def main():
             print(f"No cones in {split_name} split; skipping")
             continue
 
-        # Use the first cone in each split for the per-cone visuals.
-        sample = split_ds[0]
-        cone_id = split_idx[0]
-        dens, truth, pred = predict_cube(model, sample)
+        # Pick N cones spanning the reionization-behavior range.
+        print(f"--- {split_name}: picking {N_CONES_PER_SPLIT} cones "
+              f"by reionization behavior at z={STRATIFY_Z} ---")
+        picks = pick_cones_by_reion_behavior(
+            split_ds, split_idx, target_z,
+            n_cones=N_CONES_PER_SPLIT, stratify_z=STRATIFY_Z,
+        )
+        for idx_in_split, cone_id, summ in picks:
+            print(f"  cone {cone_id:4d}  <x_HI>(z={STRATIFY_Z}) = {summ:.3f}")
 
-        # z-slice grid
-        idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE, dtype=int).tolist()
-        fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
-                            split_name)
-        out = FIGURES_DIR / f"comparison_3d_{split_name}.png"
-        fig.savefig(out, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved {out}")
+        # Render per-cone figures (individual files) AND accumulate the
+        # arrays we'll need for the summary-grid plot.
+        per_cone_for_grid: list[tuple[int, float, np.ndarray, np.ndarray, np.ndarray]] = []
+        for idx_in_split, cone_id, summ in picks:
+            print(f"--- {split_name} cone {cone_id} (idx_in_split={idx_in_split}) ---")
+            sample = split_ds[idx_in_split]
+            dens, truth, pred = predict_cube(model, sample)
+            per_cone_for_grid.append((cone_id, summ, dens, truth, pred))
 
-        # xz lightcone strip
-        fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
-                                   split_name)
-        out = FIGURES_DIR / f"lightcone_3d_{split_name}.png"
-        fig.savefig(out, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved {out}")
+            # z-slice grid (one PNG per cone)
+            idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE,
+                               dtype=int).tolist()
+            fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
+                                split_name)
+            out = FIGURES_DIR / f"comparison_3d_{split_name}_cone{cone_id}.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  saved {out}")
 
-        # scatter over all voxels in the cube
-        fig = plot_scatter(truth, pred, cone_id, split_name)
-        out = FIGURES_DIR / f"scatter_3d_{split_name}.png"
-        fig.savefig(out, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved {out}")
+            # xz lightcone strip (one PNG per cone)
+            fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
+                                       split_name)
+            out = FIGURES_DIR / f"lightcone_3d_{split_name}_cone{cone_id}.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  saved {out}")
+
+            # voxel scatter (one PNG per cone)
+            fig = plot_scatter(truth, pred, cone_id, split_name)
+            out = FIGURES_DIR / f"scatter_3d_{split_name}_cone{cone_id}.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  saved {out}")
+
+        # Single summary-grid figure with all N cones' lightcone strips
+        # stacked vertically -- the canonical "compare across reionization
+        # regimes" plot for the thesis.
+        if per_cone_for_grid:
+            fig = plot_lightcone_summary_grid(per_cone_for_grid, target_z,
+                                              split_name)
+            out = FIGURES_DIR / f"lightcone_grid_3d_{split_name}.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved {out}")
 
     print("Done.")
 

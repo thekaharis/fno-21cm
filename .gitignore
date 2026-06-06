@@ -9,6 +9,10 @@ neuraloperator/
 
 # Trained model artifacts (regenerable by re-running training)
 checkpoints/
+checkpoints_3d/
+
+# Rendered figures from visualize{,_3d}.py (regenerable from checkpoints)
+figures/
 
 # --- Python ------------------------------------------------------------------
 __pycache__/

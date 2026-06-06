@@ -69,24 +69,31 @@ CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
 N_Z = 256                           # LOS resolution after interpolation
 Z_MIN, Z_MAX = 5.0, 25.0
 
+# Which model to train.  "fno" = neuralop FNO (the v3 baseline).
+# "ufno" = the Wen et al. U-FNO via models_ufno.UFNOWrapped (3 FNO blocks
+# + 3 U-Fourier blocks with a mini 3-D U-Net path inside each).  Override
+# at submit time with MODEL_KIND=ufno in the sbatch.
+MODEL_KIND = os.environ.get("MODEL_KIND", "fno").lower()
+if MODEL_KIND not in ("fno", "ufno"):
+    raise ValueError(f"MODEL_KIND must be 'fno' or 'ufno', got {MODEL_KIND!r}")
+
 N_MODES = (16, 16, 16)
-HIDDEN_CHANNELS = 32
-N_LAYERS = 4
+HIDDEN_CHANNELS = 32                # neuralop FNO -- ignored for U-FNO
+UFNO_WIDTH = 32                     # U-FNO body width (analog of hidden_channels)
+N_LAYERS = 4                        # neuralop FNO only; U-FNO is fixed at 3+3 blocks
 BATCH_SIZE = 1                      # 3-D cubes are heavy; raise after profiling
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-5
-N_EPOCHS = 100
+# N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
+N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
 
-# Loss term weights.  L2 + H1 alone with weights (0.5, 0.5) is the v2/v3
-# baseline; the trained model under that recipe plateaus with diffuse bubble
-# walls because L2 rewards hedging-to-the-mean on uncertain voxels.  Adding a
-# BCE term explicitly penalises uncertainty and pushes the model toward
-# confident bimodal {0, 1} predictions, which (a) sharpens bubble walls and
-# (b) is physically right (x_HI is essentially binary at the voxel level).
-# Start with a modest BCE weight; bump if predictions remain soft.
+# Loss term weights.  L2 + H1 at (0.5, 0.5) is the v2/v3 baseline.  BCE adds
+# bimodal pressure but the BCE-at-0.5 experiment plateaued at the same floor
+# as L2+H1 only and slightly regressed at the hardest z, so it defaults off.
+# Set LOSS_BCE_WEIGHT > 0 to re-enable.
 LOSS_L2_WEIGHT = 0.5
 LOSS_H1_WEIGHT = 0.5
-LOSS_BCE_WEIGHT = 0.5
+LOSS_BCE_WEIGHT = 0.0
 
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
@@ -105,7 +112,11 @@ SPLIT_SEED = 42
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
 
-CHECKPOINT_DIR = "./checkpoints_3d"
+# Separate checkpoint directories per model so a U-FNO run never overwrites
+# the FNO baseline (or vice versa).  Override CHECKPOINT_DIR explicitly in
+# the env for a one-off custom run.
+_DEFAULT_CKPT = "./checkpoints_3d" if MODEL_KIND == "fno" else "./checkpoints_3d_ufno"
+CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", _DEFAULT_CKPT)
 METRICS_PATH = f"{CHECKPOINT_DIR}/metrics.jsonl"
 
 # Learning-rate scaling rule for multi-GPU DDP runs.  "sqrt" is conservative
@@ -478,15 +489,29 @@ def main():
            f"(density + 1/(1+z)"
            + (f" + {in_channels - 2} astrophysical params" if in_channels > 2 else "")
            + ")")
-    fno = FNO(
-        n_modes=N_MODES,
-        hidden_channels=HIDDEN_CHANNELS,
-        in_channels=in_channels,
-        out_channels=1,                 # x_HI
-        n_layers=N_LAYERS,
-        projection_channel_ratio=2,
-        positional_embedding="grid",    # injects normalized (x, y, z) coords
-    )
+
+    if MODEL_KIND == "ufno":
+        # Wen et al. U-FNO: 3 FNO blocks + 3 U-Fourier blocks (U-Net inside).
+        # The U-FNO body has no positional embedding -- its mini U-Net path
+        # provides the local spatial inductive bias instead.
+        from models_ufno import UFNOWrapped
+        fno = UFNOWrapped(
+            modes1=N_MODES[0], modes2=N_MODES[1], modes3=N_MODES[2],
+            width=UFNO_WIDTH,
+            in_channels=in_channels,
+            out_channels=1,
+            sigmoid=True,               # bound predictions to [0, 1] for x_HI
+        )
+    else:
+        fno = FNO(
+            n_modes=N_MODES,
+            hidden_channels=HIDDEN_CHANNELS,
+            in_channels=in_channels,
+            out_channels=1,
+            n_layers=N_LAYERS,
+            projection_channel_ratio=2,
+            positional_embedding="grid",
+        )
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
     # would confuse count_model_params).
     n_params = count_model_params(fno)
@@ -557,7 +582,12 @@ def main():
     rprint(f"LR: {scaled_lr:g}  (scaled from {LEARNING_RATE:g} by {LR_SCALE_RULE} "
            f"rule for {world_size} ranks)")
     rprint(f"Epochs: {N_EPOCHS}")
-    rprint(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
+    if MODEL_KIND == "ufno":
+        rprint(f"Model: U-FNO (3 FNO + 3 U-Fourier blocks)  "
+               f"modes={N_MODES}  width={UFNO_WIDTH}  sigmoid-output")
+    else:
+        rprint(f"Model: FNO  modes={N_MODES}  hidden={HIDDEN_CHANNELS}  "
+               f"layers={N_LAYERS}  pos-emb=grid")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
            f"+ {LOSS_BCE_WEIGHT}*BCE  (d=3)")
