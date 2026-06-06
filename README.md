@@ -56,8 +56,17 @@ Two pipelines live side by side:
 |------|---------|
 | `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
-| `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (1 GPU, 30 min). |
+| `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
 | `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
+| `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, per-cone active-z slice picker that focuses on the partial-reionization window. FNO checkpoint. |
+| `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
+
+All four viz scripts write into a per-run subfolder under `figures/` whose
+name encodes the model variant, timestamp, and (when running under SLURM)
+the job id — e.g. `figures/ufno_20260606-143022_job3965704/`. A
+`run_info.txt` is dropped in each folder summarising the config so old
+renders are self-explanatory. Successive viz runs never overwrite each
+other.
 | `slurm/build.sbatch`, `slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
 | `slurm/build_cubes.sbatch`, `slurm/build_cubes_merge.sbatch` | v3 cube cache build + merge. |
 

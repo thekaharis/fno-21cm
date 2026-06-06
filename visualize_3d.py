@@ -56,7 +56,13 @@ _DEFAULT_CKPT = ("checkpoints_3d" if MODEL_KIND == "fno"
                  else "checkpoints_3d_ufno")
 CHECKPOINT = os.environ.get("CHECKPOINT",
                             f"{_DEFAULT_CKPT}/model_state_dict.pt")
-FIGURES_DIR = Path("figures")
+
+# Base directory for all viz outputs.  Each call to main() creates a fresh
+# uniquely-named subfolder under this base (see make_run_folder), so
+# successive viz runs never overwrite each other -- useful for comparing
+# checkpoints at different training epochs, model variants, or simply
+# keeping an archive of every render.
+FIGURES_BASE = Path("figures")
 # Data source: prefer the pre-built cube cache if it exists, otherwise stream
 # from raw lightcones.  Must match what training used so the deterministic
 # split (driven by len(dataset) + SPLIT_SEED) lines up.
@@ -87,6 +93,51 @@ TEST_FRACTION = 0.1
 DEVICE = ("cuda" if torch.cuda.is_available()
           else "mps" if torch.backends.mps.is_available()
           else "cpu")
+
+
+# ------------------------------------------------- per-run output folder
+def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
+    """Create a uniquely-named subfolder of *base* for one viz run.
+
+    Folder name: ``{tag}_{timestamp}[_job{SLURM_JOB_ID}]``, where:
+      * tag is "fno", "ufno", "fno-detailed", "ufno-detailed", ... -- the
+        caller passes whatever identifies the variant
+      * timestamp is the local time the run started (YYYYMMDD-HHMMSS)
+      * job id is appended when running under SLURM so cluster runs are
+        easy to correlate with sbatch log files
+
+    Also writes a ``run_info.txt`` inside the folder summarising the run
+    config -- helpful months later when you find a folder full of PNGs
+    and want to remember which model / checkpoint produced them.
+
+    Example folder names:
+      ``figures/ufno_20260606-143022_job3965704/``
+      ``figures/fno-detailed_20260606-145501/``        (no SLURM)
+    """
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    parts = [p for p in (tag, ts) if p]
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if job_id:
+        parts.append(f"job{job_id}")
+    folder = base / "_".join(parts)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    # Drop a small breadcrumb so old folders are self-explanatory.
+    info_lines = [
+        f"tag:          {tag or '(unset)'}",
+        f"timestamp:    {ts}",
+        f"job_id:       {job_id or '(local, no SLURM)'}",
+        f"MODEL_KIND:   {MODEL_KIND}",
+        f"CHECKPOINT:   {CHECKPOINT}",
+        f"CUBES_CACHE:  {CUBES_CACHE}",
+        f"N_MODES:      {N_MODES}",
+        f"HIDDEN_CHAN:  {HIDDEN_CHANNELS}",
+        f"UFNO_WIDTH:   {UFNO_WIDTH}",
+        f"N_LAYERS:     {N_LAYERS}",
+    ]
+    (folder / "run_info.txt").write_text("\n".join(info_lines) + "\n")
+    return folder
 
 
 # ------------------------------------------------------------------ wrapper
@@ -482,7 +533,11 @@ def main():
     print("Model loaded.")
 
     target_z = dataset.target_z
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    # Create a unique per-run output folder so this render never overwrites
+    # a prior viz job's output.  Tag is just the model kind for the standard
+    # viz; detailed viz overrides with a different tag.
+    figures_dir = make_run_folder(FIGURES_BASE, tag=MODEL_KIND)
+    print(f"Writing figures to: {figures_dir}")
 
     for split_ds, split_idx, split_name in [
         (val_ds, val_idx, "validation"),
@@ -516,7 +571,7 @@ def main():
                                dtype=int).tolist()
             fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
                                 split_name)
-            out = FIGURES_DIR / f"comparison_3d_{split_name}_cone{cone_id}.png"
+            out = figures_dir / f"comparison_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"  saved {out}")
@@ -524,14 +579,14 @@ def main():
             # xz lightcone strip (one PNG per cone)
             fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
                                        split_name)
-            out = FIGURES_DIR / f"lightcone_3d_{split_name}_cone{cone_id}.png"
+            out = figures_dir / f"lightcone_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"  saved {out}")
 
             # voxel scatter (one PNG per cone)
             fig = plot_scatter(truth, pred, cone_id, split_name)
-            out = FIGURES_DIR / f"scatter_3d_{split_name}_cone{cone_id}.png"
+            out = figures_dir / f"scatter_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"  saved {out}")
@@ -542,7 +597,7 @@ def main():
         if per_cone_for_grid:
             fig = plot_lightcone_summary_grid(per_cone_for_grid, target_z,
                                               split_name)
-            out = FIGURES_DIR / f"lightcone_grid_3d_{split_name}.png"
+            out = figures_dir / f"lightcone_grid_3d_{split_name}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"Saved {out}")
