@@ -46,7 +46,9 @@ from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
 # sync automatically -- if you bump HIDDEN_CHANNELS or N_MODES there, viz
 # loads the matching checkpoint without a second edit here.
 from fno_21cm_3d import (
-    N_MODES, HIDDEN_CHANNELS, N_LAYERS, UFNO_WIDTH, MODEL_KIND,
+    N_MODES, HIDDEN_CHANNELS, N_LAYERS,
+    UFNO_WIDTH, UFNO_NORM, UFNO_UNET_VARIANT, UFNO_GLOBAL_RESIDUAL,
+    MODEL_KIND,
 )
 
 # ------------------------------------------------------------------ config
@@ -134,6 +136,9 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
         f"N_MODES:      {N_MODES}",
         f"HIDDEN_CHAN:  {HIDDEN_CHANNELS}",
         f"UFNO_WIDTH:   {UFNO_WIDTH}",
+        f"UFNO_NORM:    {UFNO_NORM}",
+        f"UFNO_UNET:    {UFNO_UNET_VARIANT}"
+        + ("+global_residual" if UFNO_GLOBAL_RESIDUAL else ""),
         f"N_LAYERS:     {N_LAYERS}",
     ]
     (folder / "run_info.txt").write_text("\n".join(info_lines) + "\n")
@@ -192,6 +197,9 @@ def load_model(in_channels: int = 2) -> nn.Module:
             in_channels=in_channels,
             out_channels=1,
             sigmoid=True,
+            norm=UFNO_NORM,                     # must match training time
+            unet_variant=UFNO_UNET_VARIANT,     # must match training time
+            global_residual=UFNO_GLOBAL_RESIDUAL,
         )
     else:
         fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,

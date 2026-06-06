@@ -77,9 +77,37 @@ MODEL_KIND = os.environ.get("MODEL_KIND", "fno").lower()
 if MODEL_KIND not in ("fno", "ufno"):
     raise ValueError(f"MODEL_KIND must be 'fno' or 'ufno', got {MODEL_KIND!r}")
 
-N_MODES = (16, 16, 16)
+# Fourier modes per spatial axis.  X and Y default to 16 (transverse cube
+# is isotropic 140x140); Z is overridable via the N_MODES_Z env var so we
+# can experiment with asymmetric LOS modes (the LOS direction has
+# step-function content from reionization that wants more modes).
+# Default 16 preserves v1 behaviour exactly.
+_n_modes_z = int(os.environ.get("N_MODES_Z", "16"))
+N_MODES = (16, 16, _n_modes_z)
+
 HIDDEN_CHANNELS = 32                # neuralop FNO -- ignored for U-FNO
 UFNO_WIDTH = 32                     # U-FNO body width (analog of hidden_channels)
+
+# Normalisation inside the U-Net path: "batchnorm" (paper default; v1 U-FNO
+# run) or "groupnorm" (v2 experiment -- batch-independent, no SyncBN
+# foot-gun).  No-op for the plain-FNO model kind.
+UFNO_NORM = os.environ.get("UFNO_NORM", "batchnorm").lower()
+
+# Tier 2 U-Net path variants.  All default to v1/v2 behaviour exactly.
+#   * UFNO_UNET_VARIANT:
+#       "default"       -- Wen et al.'s upstream U-Net (v1, v2)
+#       "anisotropic_z" -- option D: extra Z downsampling, doubles LOS RF
+#       "los1d"         -- option F: 1-D Z-only conv path, no spatial
+#                          downsample, ~25-cell LOS receptive field
+#   * UFNO_GLOBAL_RESIDUAL:
+#       "true" / "false" -- option E: wrap the chosen U-Net with a
+#                          global-pooling residual giving cone-level context.
+#                          Composable with any variant.
+UFNO_UNET_VARIANT = os.environ.get("UFNO_UNET_VARIANT", "default").lower()
+UFNO_GLOBAL_RESIDUAL = (
+    os.environ.get("UFNO_GLOBAL_RESIDUAL", "false").lower() == "true"
+)
+
 N_LAYERS = 4                        # neuralop FNO only; U-FNO is fixed at 3+3 blocks
 BATCH_SIZE = 1                      # 3-D cubes are heavy; raise after profiling
 LEARNING_RATE = 5e-4
@@ -87,13 +115,14 @@ WEIGHT_DECAY = 1e-5
 # N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
 
-# Loss term weights.  L2 + H1 at (0.5, 0.5) is the v2/v3 baseline.  BCE adds
-# bimodal pressure but the BCE-at-0.5 experiment plateaued at the same floor
-# as L2+H1 only and slightly regressed at the hardest z, so it defaults off.
-# Set LOSS_BCE_WEIGHT > 0 to re-enable.
-LOSS_L2_WEIGHT = 0.5
-LOSS_H1_WEIGHT = 0.5
-LOSS_BCE_WEIGHT = 0.0
+# Loss term weights.  Defaults (0.5, 0.5, 0.0) match the v1 run.  All three
+# are env-var overridable so experiments don't need to edit this file:
+#   * (0.5, 0.5, 0.0)  v1 U-FNO baseline
+#   * (0.5, 0.5, 0.5)  BCE-on experiment (Act 4)
+#   * (0.3, 0.7, 0.0)  v2 H1-weighted (C of the v2 A+B+C bundle)
+LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
+LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
+LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
 
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
@@ -500,7 +529,10 @@ def main():
             width=UFNO_WIDTH,
             in_channels=in_channels,
             out_channels=1,
-            sigmoid=True,               # bound predictions to [0, 1] for x_HI
+            sigmoid=True,                       # bound predictions to [0, 1]
+            norm=UFNO_NORM,                     # "batchnorm" or "groupnorm"
+            unet_variant=UFNO_UNET_VARIANT,     # "default"/"anisotropic_z"/"los1d"
+            global_residual=UFNO_GLOBAL_RESIDUAL,
         )
     else:
         fno = FNO(
@@ -592,7 +624,10 @@ def main():
     rprint(f"Epochs: {N_EPOCHS}")
     if MODEL_KIND == "ufno":
         rprint(f"Model: U-FNO (3 FNO + 3 U-Fourier blocks)  "
-               f"modes={N_MODES}  width={UFNO_WIDTH}  sigmoid-output")
+               f"modes={N_MODES}  width={UFNO_WIDTH}  norm={UFNO_NORM}  "
+               f"unet={UFNO_UNET_VARIANT}"
+               + ("+global_residual" if UFNO_GLOBAL_RESIDUAL else "")
+               + "  sigmoid-output")
     else:
         rprint(f"Model: FNO  modes={N_MODES}  hidden={HIDDEN_CHANNELS}  "
                f"layers={N_LAYERS}  pos-emb=grid")

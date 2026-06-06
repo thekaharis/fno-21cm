@@ -56,6 +56,11 @@ Two pipelines live side by side:
 |------|---------|
 | `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
+| `slurm/train_ufno_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v1** (3 FNO + 3 U-Fourier blocks; BatchNorm + SyncBN; modes (16,16,16); 0.5/0.5 L²/H¹). |
+| `slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints_3d_ufno_v2/`. |
+| `slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints_3d_ufno_v3_anisoz/`. |
+| `slurm/train_ufno_v3_globalres_h200_4gpu.sbatch` | **U-FNO v3 / option E** — global-pooling residual added to each U-Net path (gives cone-level context to the local-feature path). Composable with v3-anisoz or v3-los1d via env-var. Writes to `./checkpoints_3d_ufno_v3_globalres/`. |
+| `slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints_3d_ufno_v3_los1d/`. |
 | `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
 | `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
 | `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, per-cone active-z slice picker that focuses on the partial-reionization window. FNO checkpoint. |
