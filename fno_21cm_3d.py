@@ -124,23 +124,6 @@ LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
 
-# Mixed-precision autocast for the model forward pass.  Default off so the
-# v1 / FNO baselines reproduce exactly.  On H200 with bf16 tensor cores,
-# bf16 autocast typically gives ~1.5-2x speedup on this compute-bound 3-D
-# convolution + FFT workload; bf16 keeps the fp32 exponent range so we
-# don't need GradScaler (unlike fp16).  fp16 is also accepted but not
-# recommended -- can underflow gradients on the FFT path.
-_autocast_env = os.environ.get("AUTOCAST", "off").lower()
-_autocast_map = {
-    "off": None,
-    "bf16": torch.bfloat16,
-    "fp16": torch.float16,
-}
-if _autocast_env not in _autocast_map:
-    raise ValueError(
-        f"AUTOCAST must be one of {sorted(_autocast_map)}, got {_autocast_env!r}")
-AUTOCAST_DTYPE = _autocast_map[_autocast_env]
-
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
 # allocated CPUs gets the GPU fed.  Defaults to SLURM_CPUS_PER_TASK on the
@@ -280,36 +263,17 @@ class BCETerm:
 
 
 class SilentFNO(nn.Module):
-    """Discard extra kwargs the Trainer injects (``y``, etc.) and optionally
-    wrap the forward in ``torch.autocast`` for mixed-precision training.
+    """Discard extra kwargs the Trainer injects (``y``, etc.).
 
-    Identical to the 2-D wrapper for attribute delegation: ``nn.Module``
-    lookup falls through to the underlying FNO via ``__getattr__``.
-
-    Parameters
-    ----------
-    fno : nn.Module
-        The wrapped FNO / U-FNO body.
-    autocast_dtype : torch.dtype or None
-        If not ``None``, wrap every forward pass in
-        ``torch.autocast(device_type="cuda", dtype=autocast_dtype)``
-        when the input is on CUDA.  bf16 is recommended on H200 -- ~1.5-2x
-        speedup vs fp32, no GradScaler needed because bf16 keeps the fp32
-        exponent range.  On CPU / MPS the autocast is skipped (no
-        operational effect for smoke tests).
+    Identical to the 2-D wrapper -- ``nn.Module`` attribute lookup falls
+    through to the underlying FNO via ``__getattr__``.
     """
 
-    def __init__(self, fno: nn.Module,
-                 autocast_dtype: torch.dtype | None = None):
+    def __init__(self, fno: FNO):
         super().__init__()
         self.fno = fno
-        self._autocast_dtype = autocast_dtype
 
     def forward(self, x, **kwargs):
-        if self._autocast_dtype is not None and x.is_cuda:
-            with torch.autocast(device_type="cuda",
-                                dtype=self._autocast_dtype):
-                return self.fno(x)
         return self.fno(x)
 
     def __getattr__(self, name):
@@ -583,7 +547,7 @@ def main():
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
     # would confuse count_model_params).
     n_params = count_model_params(fno)
-    model = SilentFNO(fno, autocast_dtype=AUTOCAST_DTYPE).to(device)
+    model = SilentFNO(fno).to(device)
     if is_distributed:
         # SyncBatchNorm: convert every BatchNormNd in the model to its
         # synchronised counterpart BEFORE the DDP wrap.  Without this, each
@@ -670,11 +634,6 @@ def main():
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
            f"+ {LOSS_BCE_WEIGHT}*BCE  (d=3)")
-    if AUTOCAST_DTYPE is not None:
-        rprint(f"Autocast: {AUTOCAST_DTYPE} (model forward wrapped in "
-               f"torch.autocast)")
-    else:
-        rprint(f"Autocast: off (pure fp32 forward)")
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
