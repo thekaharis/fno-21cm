@@ -84,6 +84,11 @@ export LOSS_L2_WEIGHT=0.3
 export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
+# bf16 mixed precision -- ~1.5-2x speedup on H200 tensor cores, no
+# GradScaler needed (bf16 keeps fp32 exponent range).  Numerically robust
+# for FFTs.  Disable by setting AUTOCAST=off here if you want pure fp32.
+export AUTOCAST=bf16
+
 # Separate checkpoint dir so v1 and v2 don't collide.  fno_21cm_3d.py
 # honors CHECKPOINT_DIR if set; otherwise it picks ./checkpoints_3d_ufno
 # from MODEL_KIND=ufno.
@@ -137,6 +142,7 @@ echo "N_EPOCHS:           ${N_EPOCHS}"
 echo "N_MODES_Z:          ${N_MODES_Z}"
 echo "UFNO_NORM:          ${UFNO_NORM}"
 echo "LOSS L2 / H1 / BCE: ${LOSS_L2_WEIGHT} / ${LOSS_H1_WEIGHT} / ${LOSS_BCE_WEIGHT}"
+echo "AUTOCAST:           ${AUTOCAST:-off}"
 echo "CHECKPOINT_DIR:     ${CHECKPOINT_DIR}"
 echo "Conda env:          ${CONDA_DEFAULT_ENV:-?}"
 echo "Python:             $(which python)"
