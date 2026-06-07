@@ -45,7 +45,7 @@ from visualize_3d import (
     DEVICE, CUBES_CACHE, DATA_DIR, FILE_GLOB,
     N_Z, Z_MIN, Z_MAX, STRATIFY_Z,
     SPLIT_SEED, VAL_FRACTION, TEST_FRACTION,
-    FIGURES_BASE, make_run_folder,
+    FIGURES_BASE, VIZ_TAG, make_run_folder,
     load_model, predict_cube,
     plot_z_slices, plot_lightcone_strip, plot_scatter,
     plot_lightcone_summary_grid,
@@ -154,10 +154,12 @@ def main():
     print("Model loaded.")
 
     target_z = dataset.target_z
-    # Unique per-run output folder.  Tag is "{model}-detailed" so the
+    # Unique per-run output folder.  Tag is "<VIZ_TAG>-detailed" so the
     # detailed variant is visibly different from the standard 4-cone run
-    # ("fno", "ufno") in the figures/ listing.
-    figures_dir = make_run_folder(FIGURES_BASE, tag=f"{MODEL_KIND}-detailed")
+    # in the figures/ listing.  VIZ_TAG defaults to MODEL_KIND for v1/v2
+    # ("fno", "ufno"); v3 sbatches set it to e.g. "ufno-v3-anisoz" so the
+    # render lands in ``figures/ufno-v3-anisoz-detailed_<timestamp>_job.../``.
+    figures_dir = make_run_folder(FIGURES_BASE, tag=f"{VIZ_TAG}-detailed")
     print(f"Writing figures to: {figures_dir}")
 
     for split_ds, split_idx, split_name in [

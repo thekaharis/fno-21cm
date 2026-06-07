@@ -65,6 +65,15 @@ CHECKPOINT = os.environ.get("CHECKPOINT",
 # checkpoints at different training epochs, model variants, or simply
 # keeping an archive of every render.
 FIGURES_BASE = Path("figures")
+
+# Tag used for the per-run figures folder + run_info breadcrumb.  Defaults
+# to MODEL_KIND ("fno"/"ufno") for back-compat with the v1 / v2 sbatches.
+# For v3 (D/E/F) variants, the matching viz sbatch sets VIZ_TAG explicitly
+# so figures land in e.g. ``figures/ufno-v3-anisoz_<timestamp>_job...`` --
+# essential when several variants' renders pile up in figures/ side by
+# side, otherwise every U-FNO render is just "ufno_<timestamp>" with no
+# way to tell which variant produced it without opening run_info.txt.
+VIZ_TAG = os.environ.get("VIZ_TAG", MODEL_KIND)
 # Data source: prefer the pre-built cube cache if it exists, otherwise stream
 # from raw lightcones.  Must match what training used so the deterministic
 # split (driven by len(dataset) + SPLIT_SEED) lines up.
@@ -542,9 +551,10 @@ def main():
 
     target_z = dataset.target_z
     # Create a unique per-run output folder so this render never overwrites
-    # a prior viz job's output.  Tag is just the model kind for the standard
-    # viz; detailed viz overrides with a different tag.
-    figures_dir = make_run_folder(FIGURES_BASE, tag=MODEL_KIND)
+    # a prior viz job's output.  Tag defaults to MODEL_KIND for v1/v2 runs,
+    # or whatever the sbatch set via VIZ_TAG for v3 (e.g. "ufno-v3-anisoz").
+    # Detailed viz appends "-detailed" downstream.
+    figures_dir = make_run_folder(FIGURES_BASE, tag=VIZ_TAG)
     print(f"Writing figures to: {figures_dir}")
 
     for split_ds, split_idx, split_name in [
