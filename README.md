@@ -65,7 +65,7 @@ Two pipelines live side by side:
 | `slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints_3d_ufno_v3_los1d/`. |
 | `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
 | `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
-| `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, per-cone active-z slice picker that focuses on the partial-reionization window. FNO checkpoint. |
+| `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
 
 All four viz scripts write into a per-run subfolder under `figures/` whose

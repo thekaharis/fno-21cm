@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from metrics_21cm import compute_physical_metrics
+from metrics_21cm import compute_physical_metrics, find_low_z_cutoff_index
 from models_ufno import UFNOWrapped, pad_ufno_spatial
 
 
@@ -48,3 +48,27 @@ def test_physical_metrics_are_exact_for_identical_fields():
         metrics["ionized_regions_truth"]
         == metrics["ionized_regions_pred"]
     )
+
+
+def test_low_z_cutoff_skips_settled_ionized_tail():
+    target_z = np.linspace(5.0, 12.0, 29)
+    history = np.zeros_like(target_z)
+    history[8:] = np.linspace(0.0, 1.0, len(history) - 8)
+
+    cutoff = find_low_z_cutoff_index(
+        history,
+        target_z,
+        min_change=0.01,
+        smoothing_points=1,
+        min_consecutive=3,
+        buffer_points=1,
+    )
+
+    assert cutoff == 8
+
+
+def test_low_z_cutoff_keeps_constant_history():
+    target_z = np.linspace(5.0, 12.0, 29)
+    history = np.ones_like(target_z)
+
+    assert find_low_z_cutoff_index(history, target_z) == 0

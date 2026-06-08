@@ -294,17 +294,27 @@ def plot_z_slices(dens, truth, pred, target_z, idxs, cone_id, split):
 
 
 # ----------------------------------------------------- xz lightcone strip
-def plot_lightcone_strip(dens, truth, pred, target_z, cone_id, split):
-    """Edge-on xz panel at y = Ny // 2 spanning the full LOS extent."""
+def plot_lightcone_strip(
+    dens, truth, pred, target_z, cone_id, split, z_start_idx=0
+):
+    """Edge-on xz panel at y = Ny // 2 over the selected LOS extent."""
+    z_start_idx = int(z_start_idx)
+    if not 0 <= z_start_idx < len(target_z):
+        raise ValueError("z_start_idx is outside target_z")
     ny = dens.shape[1]
     j = ny // 2
-    d_strip = dens[:, j, :]
-    t_strip = truth[:, j, :]
-    p_strip = pred[:, j, :]
+    d_strip = dens[:, j, z_start_idx:]
+    t_strip = truth[:, j, z_start_idx:]
+    p_strip = pred[:, j, z_start_idx:]
     e_strip = p_strip - t_strip
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 8), sharex=True)
-    extent = [float(target_z[0]), float(target_z[-1]), 0, d_strip.shape[0]]
+    extent = [
+        float(target_z[z_start_idx]),
+        float(target_z[-1]),
+        0,
+        d_strip.shape[0],
+    ]
 
     axes[0].imshow(d_strip, cmap="plasma", aspect="auto",
                    origin="lower", extent=extent)
@@ -334,10 +344,12 @@ def plot_lightcone_strip(dens, truth, pred, target_z, cone_id, split):
 
 
 # --------------------------------------------------------------- scatter
-def plot_scatter(truth, pred, cone_id, split):
+def plot_scatter(
+    truth, pred, cone_id, split, z_start_idx=0, z_min=None
+):
     fig, ax = plt.subplots(figsize=(5, 5))
-    t_flat = truth.ravel()
-    p_flat = pred.ravel()
+    t_flat = truth[..., int(z_start_idx):].ravel()
+    p_flat = pred[..., int(z_start_idx):].ravel()
 
     max_pts = 50_000
     if len(t_flat) > max_pts:
@@ -354,7 +366,8 @@ def plot_scatter(truth, pred, cone_id, split):
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_aspect("equal")
-    ax.set_title(f"Scatter - {split} (cone {cone_id})")
+    z_note = "" if z_min is None else f", z >= {float(z_min):.2f}"
+    ax.set_title(f"Scatter - {split} (cone {cone_id}{z_note})")
     ax.legend()
 
     r2 = float(np.corrcoef(t_flat, p_flat)[0, 1] ** 2)
@@ -447,7 +460,9 @@ def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
 
 
 # ------------------------------------------------- multi-cone summary plot
-def plot_lightcone_summary_grid(per_cone, target_z, split_name):
+def plot_lightcone_summary_grid(
+    per_cone, target_z, split_name, z_start_idx=0
+):
     """One xz lightcone strip per cone, stacked vertically.
 
     *per_cone* is a list of ``(cone_id, summary_xhi, dens, truth, pred)``.
@@ -459,14 +474,22 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
     image shows how the same model handles cones with qualitatively different
     reionization histories.
     """
+    z_start_idx = int(z_start_idx)
+    if not 0 <= z_start_idx < len(target_z):
+        raise ValueError("z_start_idx is outside target_z")
     n = len(per_cone)
     fig, axes = plt.subplots(n, 3, figsize=(18, 2.0 * n + 1), squeeze=False)
-    extent = [float(target_z[0]), float(target_z[-1]), 0, per_cone[0][2].shape[0]]
+    extent = [
+        float(target_z[z_start_idx]),
+        float(target_z[-1]),
+        0,
+        per_cone[0][2].shape[0],
+    ]
 
     for row, (cone_id, summ, dens, truth, pred) in enumerate(per_cone):
         j = truth.shape[1] // 2
-        t_strip = truth[:, j, :]
-        p_strip = pred[:, j, :]
+        t_strip = truth[:, j, z_start_idx:]
+        p_strip = pred[:, j, z_start_idx:]
         e_strip = p_strip - t_strip
 
         axes[row, 0].imshow(t_strip, cmap="viridis", aspect="auto",
@@ -494,7 +517,8 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
                 axes[row, c].set_xticklabels([])
 
     fig.suptitle(f"Lightcone-strip grid across {n} reionization regimes  "
-                 f"({split_name})", y=1.0, fontsize=11)
+                 f"({split_name}, z >= {float(target_z[z_start_idx]):.2f})",
+                 y=1.0, fontsize=11)
     fig.tight_layout()
     return fig
 

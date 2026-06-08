@@ -6,6 +6,58 @@ import numpy as np
 from scipy import ndimage
 
 
+def find_low_z_cutoff_index(
+    history: np.ndarray,
+    target_z: np.ndarray,
+    min_change: float = 0.01,
+    baseline_points: int = 8,
+    smoothing_points: int = 5,
+    min_consecutive: int = 3,
+    buffer_points: int = 1,
+) -> int:
+    """Find where x_HI first departs from its settled low-redshift state.
+
+    The input history is smoothed before comparison with the median of its
+    lowest-redshift samples. A change must persist for ``min_consecutive``
+    samples, which prevents a single noisy slice from setting the crop.
+    """
+    history = np.asarray(history, dtype=np.float64)
+    target_z = np.asarray(target_z, dtype=np.float64)
+    if history.ndim != 1 or target_z.ndim != 1:
+        raise ValueError("history and target_z must be one-dimensional")
+    if len(history) != len(target_z) or len(history) == 0:
+        raise ValueError("history and target_z must have the same non-zero length")
+    if np.any(np.diff(target_z) <= 0):
+        raise ValueError("target_z must be strictly increasing")
+
+    n = len(history)
+    baseline_points = max(1, min(int(baseline_points), n))
+    smoothing_points = max(1, min(int(smoothing_points), n))
+    min_consecutive = max(1, min(int(min_consecutive), n))
+    buffer_points = max(0, int(buffer_points))
+
+    if smoothing_points > 1:
+        left = smoothing_points // 2
+        right = smoothing_points - 1 - left
+        padded = np.pad(history, (left, right), mode="edge")
+        kernel = np.full(smoothing_points, 1.0 / smoothing_points)
+        smoothed = np.convolve(padded, kernel, mode="valid")
+    else:
+        smoothed = history
+
+    baseline = float(np.median(smoothed[:baseline_points]))
+    changed = np.abs(smoothed - baseline) >= float(min_change)
+    sustained = np.convolve(
+        changed.astype(np.int8),
+        np.ones(min_consecutive, dtype=np.int8),
+        mode="valid",
+    )
+    starts = np.flatnonzero(sustained == min_consecutive)
+    if starts.size == 0:
+        return 0
+    return max(0, int(starts[0]) - buffer_points)
+
+
 def _radial_fourier_statistics(
     truth: np.ndarray,
     pred: np.ndarray,
