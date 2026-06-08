@@ -10,25 +10,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop checkout if one is available ---------------
-# Accept any of these layouts and skip locations whose package is incomplete:
-#   ./neuraloperator/neuralop/    (checkout vendored inside the repo)
-#   ../neuraloperator/neuralop/   (checkout sibling to the repo: project/{data,
-#                                  neuraloperator, fno-21cm} layout)
-#   ./neuralop/                   (the package dropped straight into the repo)
-# If none has a valid __init__.py, fall back to an installed `neuralop`.
-_HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator",
-              _HERE.parent / "neuraloperator",
-              _HERE):
-    if (_cand / "neuralop" / "__init__.py").is_file():
-        sys.path.insert(0, str(_cand))
-        break
-# ---------------------------------------------------------------------------
+from neuralop_setup import prefer_local_neuralop
+
+prefer_local_neuralop()
 
 import numpy as np
 import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
@@ -39,6 +26,7 @@ import neuralop as _neuralop
 print(f"[visualize] using neuralop from {_neuralop.__file__}")
 
 from dataset import SliceCache, split_by_cone
+from modeling import TrainerModel, load_checkpoint
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints/model_state_dict.pt"
@@ -54,34 +42,19 @@ TEST_FRACTION = 0.1
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-# ------------------------------------------------------------------ wrapper
-class SilentFNO(nn.Module):
-    def __init__(self, fno):
-        super().__init__()
-        self.fno = fno
-
-    def forward(self, x, **kwargs):
-        return self.fno(x)
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            pass
-        return getattr(self._modules["fno"], name)
-
-
 # ------------------------------------------------------------------ helpers
-def load_model() -> nn.Module:
-    sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
-    sd = {f"fno.{k}": v for k, v in sd.items() if k != "_metadata"}
+def load_model() -> torch.nn.Module:
     # NOTE: must match the architecture in fno_21cm.py exactly, or the
     # checkpoint will not load correctly.
     fno = FNO(n_modes=(32, 32), hidden_channels=64, in_channels=1,
                out_channels=1, n_layers=4, projection_channel_ratio=2,
                positional_embedding="grid")
-    model = SilentFNO(fno)
-    model.load_state_dict(sd, strict=False)
+    model = TrainerModel(fno)
+    report = load_checkpoint(model, CHECKPOINT)
+    print(
+        f"[load_model] transform={report.transform!r}, "
+        f"matched={report.matched}/{report.total}"
+    )
     return model.to(DEVICE).eval()
 
 

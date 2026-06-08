@@ -37,11 +37,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-# 11 LHS-sampled parameters (stored per slice for later conditioning / analysis)
-PARAMS = [
-    "F_ESC10", "F_STAR10", "ALPHA_ESC", "ALPHA_STAR", "L_X", "NU_X_THRESH",
-    "M_TURN", "t_STAR", "X_RAY_SPEC_INDEX", "OMm", "SIGMA_8",
-]
+from lightcone_params import PARAM_NAMES, read_sampled_params
+
+PARAMS = list(PARAM_NAMES)
 
 
 # ----------------------------------------------------------------- selection
@@ -77,25 +75,6 @@ def select_indices(prof: np.ndarray, k: int, rng: np.random.Generator,
     return np.sort(rng.choice(n, size=k, replace=False, p=w))
 
 
-def read_params(f: h5py.File, wanted: list[str]) -> np.ndarray:
-    """Best-effort read of the sampled parameters (NaN-filled on mismatch).
-
-    Parameters are not needed for the basic density->x_HI training, only for
-    later conditioning, so a layout mismatch must NOT abort the 8.6 TB pass.
-    """
-    try:
-        g = f["params"]
-        names = [n.decode() if isinstance(n, (bytes, bytearray)) else str(n)
-                 for n in np.asarray(g["names"])]
-        values = np.asarray(g["values"], dtype=np.float32).ravel()
-        lut = dict(zip(names, values))
-        return np.array([lut.get(w, np.nan) for w in wanted], dtype=np.float32)
-    except Exception as exc:                              # noqa: BLE001
-        print(f"  [warn] could not read params ({exc}); storing NaNs",
-              file=sys.stderr)
-        return np.full(len(wanted), np.nan, dtype=np.float32)
-
-
 def extract_one(path: Path, cone_id: int, k: int,
                 rng: np.random.Generator, lo: float, hi: float):
     """Return (x, y, z, xHI_mean, cone_id[], params[]) for one cone."""
@@ -108,7 +87,7 @@ def extract_one(path: Path, cone_id: int, k: int,
         # read ONLY the selected 2-D slices (each ~78 KB)
         x = np.stack([np.asarray(dens[:, :, i], dtype=np.float32) for i in idx])
         y = np.stack([np.asarray(xH[:, :, i], dtype=np.float32) for i in idx])
-        params = read_params(f, PARAMS)
+        params = read_sampled_params(f)
     n = len(idx)
     return (x, y, z_all[idx], prof[idx],
             np.full(n, cone_id, dtype=np.int32),

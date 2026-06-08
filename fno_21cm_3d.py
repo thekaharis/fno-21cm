@@ -18,21 +18,9 @@ import os
 import sys
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop checkout if one is available ---------------
-# Search order:
-#   ./neuraloperator/         (checkout vendored inside the repo)
-#   ../neuraloperator/        (checkout sibling to the repo: project/{data,
-#                              neuraloperator, fno-21cm} layout)
-#   ./                        (neuralop dropped straight into the repo)
-# If none has a valid __init__.py, fall back to an installed `neuralop`.
-_HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator",
-              _HERE.parent / "neuraloperator",
-              _HERE):
-    if (_cand / "neuralop" / "__init__.py").is_file():
-        sys.path.insert(0, str(_cand))
-        break
-# ---------------------------------------------------------------------------
+from neuralop_setup import prefer_local_neuralop
+
+prefer_local_neuralop()
 
 import torch
 import torch.nn as nn
@@ -41,7 +29,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from neuralop.models import FNO
 from neuralop import Trainer
 from neuralop import LpLoss, H1Loss
 from neuralop.utils import count_model_params
@@ -50,6 +37,8 @@ import neuralop as _neuralop
 print(f"[fno_21cm_3d] using neuralop from {_neuralop.__file__}")
 
 from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
+from losses import AbsoluteLoss, BinaryCrossEntropyTerm, WeightedLoss
+from modeling import ModelConfig, TrainerModel, build_3d_model
 
 
 # ------------------------------------------------------------------ config
@@ -69,46 +58,15 @@ CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
 N_Z = 256                           # LOS resolution after interpolation
 Z_MIN, Z_MAX = 5.0, 25.0
 
-# Which model to train.  "fno" = neuralop FNO (the v3 baseline).
-# "ufno" = the Wen et al. U-FNO via models_ufno.UFNOWrapped (3 FNO blocks
-# + 3 U-Fourier blocks with a mini 3-D U-Net path inside each).  Override
-# at submit time with MODEL_KIND=ufno in the sbatch.
-MODEL_KIND = os.environ.get("MODEL_KIND", "fno").lower()
-if MODEL_KIND not in ("fno", "ufno"):
-    raise ValueError(f"MODEL_KIND must be 'fno' or 'ufno', got {MODEL_KIND!r}")
-
-# Fourier modes per spatial axis.  X and Y default to 16 (transverse cube
-# is isotropic 140x140); Z is overridable via the N_MODES_Z env var so we
-# can experiment with asymmetric LOS modes (the LOS direction has
-# step-function content from reionization that wants more modes).
-# Default 16 preserves v1 behaviour exactly.
-_n_modes_z = int(os.environ.get("N_MODES_Z", "16"))
-N_MODES = (16, 16, _n_modes_z)
-
-HIDDEN_CHANNELS = 32                # neuralop FNO -- ignored for U-FNO
-UFNO_WIDTH = 32                     # U-FNO body width (analog of hidden_channels)
-
-# Normalisation inside the U-Net path: "batchnorm" (paper default; v1 U-FNO
-# run) or "groupnorm" (v2 experiment -- batch-independent, no SyncBN
-# foot-gun).  No-op for the plain-FNO model kind.
-UFNO_NORM = os.environ.get("UFNO_NORM", "batchnorm").lower()
-
-# Tier 2 U-Net path variants.  All default to v1/v2 behaviour exactly.
-#   * UFNO_UNET_VARIANT:
-#       "default"       -- Wen et al.'s upstream U-Net (v1, v2)
-#       "anisotropic_z" -- option D: extra Z downsampling, doubles LOS RF
-#       "los1d"         -- option F: 1-D Z-only conv path, no spatial
-#                          downsample, ~25-cell LOS receptive field
-#   * UFNO_GLOBAL_RESIDUAL:
-#       "true" / "false" -- option E: wrap the chosen U-Net with a
-#                          global-pooling residual giving cone-level context.
-#                          Composable with any variant.
-UFNO_UNET_VARIANT = os.environ.get("UFNO_UNET_VARIANT", "default").lower()
-UFNO_GLOBAL_RESIDUAL = (
-    os.environ.get("UFNO_GLOBAL_RESIDUAL", "false").lower() == "true"
-)
-
-N_LAYERS = 4                        # neuralop FNO only; U-FNO is fixed at 3+3 blocks
+MODEL_CONFIG = ModelConfig.from_env()
+MODEL_KIND = MODEL_CONFIG.kind
+N_MODES = MODEL_CONFIG.modes
+HIDDEN_CHANNELS = MODEL_CONFIG.hidden_channels
+UFNO_WIDTH = MODEL_CONFIG.ufno_width
+UFNO_NORM = MODEL_CONFIG.ufno_norm
+UFNO_UNET_VARIANT = MODEL_CONFIG.ufno_unet_variant
+UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
+N_LAYERS = MODEL_CONFIG.n_layers
 BATCH_SIZE = 1                      # 3-D cubes are heavy; raise after profiling
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-5
@@ -144,7 +102,7 @@ TEST_FRACTION = 0.1
 # Separate checkpoint directories per model so a U-FNO run never overwrites
 # the FNO baseline (or vice versa).  Override CHECKPOINT_DIR explicitly in
 # the env for a one-off custom run.
-_DEFAULT_CKPT = "./checkpoints_3d" if MODEL_KIND == "fno" else "./checkpoints_3d_ufno"
+_DEFAULT_CKPT = str(MODEL_CONFIG.default_checkpoint_dir)
 CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", _DEFAULT_CKPT)
 METRICS_PATH = f"{CHECKPOINT_DIR}/metrics.jsonl"
 
@@ -211,77 +169,6 @@ def _all_reduce_mean(value: float, world_size: int) -> float:
 # eval pass to each epoch's wall clock).  Bump to 5 once training has settled
 # if you want to reduce the eval-loop overhead.
 EVAL_INTERVAL = 1
-
-
-# ------------------------------------------------------------------ wrappers
-class AbsLoss:
-    """Wrap a neuralop loss to call ``.abs()`` and swallow Trainer kwargs."""
-
-    def __init__(self, loss):
-        self.loss = loss
-
-    def __call__(self, out, y, **kwargs):
-        return self.loss.abs(out, y)
-
-
-class WeightedSumLoss:
-    """Weighted sum of ``(weight, loss)`` terms; passes kwargs through."""
-
-    def __init__(self, *terms):
-        self.terms = terms
-
-    def __call__(self, out, y, **kwargs):
-        return sum(w * loss(out, y, **kwargs) for w, loss in self.terms)
-
-
-class BCETerm:
-    """Voxel-mean binary cross-entropy between predicted x_HI and {0, 1} truth.
-
-    Why this exists
-    ---------------
-    x_HI is essentially binary at the voxel level -- either neutral (1) or
-    ionized (0), with narrow transition regions at bubble walls.  L2 + H1
-    alone reward the optimizer for hedging on uncertain voxels (predicting
-    ~0.3 when the truth could be 0 or 1 minimises L2), which leaves bubble
-    interiors too bright and walls too soft.  BCE penalises hedging
-    explicitly: ``-log(p)`` blows up as ``p -> 0`` when truth is 1, so the
-    model is pushed toward confident predictions.
-
-    Predictions are clamped to ``(eps, 1 - eps)`` to avoid ``log(0)``.
-
-    Mirrors the ``AbsLoss`` interface: callable with ``(out, y, **kwargs)``
-    so the neuralop Trainer can use it directly in the training and eval
-    loops.
-    """
-
-    def __init__(self, eps: float = 1e-6):
-        self.eps = float(eps)
-
-    def __call__(self, out, y, **kwargs):
-        p = out.clamp(self.eps, 1.0 - self.eps)
-        return -(y * torch.log(p) + (1.0 - y) * torch.log(1.0 - p)).mean()
-
-
-class SilentFNO(nn.Module):
-    """Discard extra kwargs the Trainer injects (``y``, etc.).
-
-    Identical to the 2-D wrapper -- ``nn.Module`` attribute lookup falls
-    through to the underlying FNO via ``__getattr__``.
-    """
-
-    def __init__(self, fno: FNO):
-        super().__init__()
-        self.fno = fno
-
-    def forward(self, x, **kwargs):
-        return self.fno(x)
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            pass
-        return getattr(self._modules["fno"], name)
 
 
 class LoggingTrainer(Trainer):
@@ -519,35 +406,11 @@ def main():
            + (f" + {in_channels - 2} astrophysical params" if in_channels > 2 else "")
            + ")")
 
-    if MODEL_KIND == "ufno":
-        # Wen et al. U-FNO: 3 FNO blocks + 3 U-Fourier blocks (U-Net inside).
-        # The U-FNO body has no positional embedding -- its mini U-Net path
-        # provides the local spatial inductive bias instead.
-        from models_ufno import UFNOWrapped
-        fno = UFNOWrapped(
-            modes1=N_MODES[0], modes2=N_MODES[1], modes3=N_MODES[2],
-            width=UFNO_WIDTH,
-            in_channels=in_channels,
-            out_channels=1,
-            sigmoid=True,                       # bound predictions to [0, 1]
-            norm=UFNO_NORM,                     # "batchnorm" or "groupnorm"
-            unet_variant=UFNO_UNET_VARIANT,     # "default"/"anisotropic_z"/"los1d"
-            global_residual=UFNO_GLOBAL_RESIDUAL,
-        )
-    else:
-        fno = FNO(
-            n_modes=N_MODES,
-            hidden_channels=HIDDEN_CHANNELS,
-            in_channels=in_channels,
-            out_channels=1,
-            n_layers=N_LAYERS,
-            projection_channel_ratio=2,
-            positional_embedding="grid",
-        )
+    fno = build_3d_model(MODEL_CONFIG, in_channels)
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
     # would confuse count_model_params).
     n_params = count_model_params(fno)
-    model = SilentFNO(fno).to(device)
+    model = TrainerModel(fno).to(device)
     if is_distributed:
         # SyncBatchNorm: convert every BatchNormNd in the model to its
         # synchronised counterpart BEFORE the DDP wrap.  Without this, each
@@ -588,17 +451,17 @@ def main():
     # rewards bimodal {0, 1} predictions -- see BCETerm docstring.
     l2_loss = LpLoss(d=3, p=2)
     h1_loss = H1Loss(d=3)
-    bce_loss = BCETerm()
-    train_loss_fn = WeightedSumLoss(
-        (LOSS_L2_WEIGHT, AbsLoss(l2_loss)),
-        (LOSS_H1_WEIGHT, AbsLoss(h1_loss)),
+    bce_loss = BinaryCrossEntropyTerm()
+    train_loss_fn = WeightedLoss(
+        (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
+        (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
         (LOSS_BCE_WEIGHT, bce_loss),
     )
     # Eval losses are tracked separately in metrics.jsonl so we can see how
     # each component evolves.  Keys here become column names in JSONL.
     eval_losses = {
-        "l2": AbsLoss(l2_loss),
-        "h1": AbsLoss(h1_loss),
+        "l2": AbsoluteLoss(l2_loss),
+        "h1": AbsoluteLoss(h1_loss),
         "bce": bce_loss,
     }
 
@@ -622,15 +485,7 @@ def main():
     rprint(f"LR: {scaled_lr:g}  (scaled from {LEARNING_RATE:g} by {LR_SCALE_RULE} "
            f"rule for {world_size} ranks)")
     rprint(f"Epochs: {N_EPOCHS}")
-    if MODEL_KIND == "ufno":
-        rprint(f"Model: U-FNO (3 FNO + 3 U-Fourier blocks)  "
-               f"modes={N_MODES}  width={UFNO_WIDTH}  norm={UFNO_NORM}  "
-               f"unet={UFNO_UNET_VARIANT}"
-               + ("+global_residual" if UFNO_GLOBAL_RESIDUAL else "")
-               + "  sigmoid-output")
-    else:
-        rprint(f"Model: FNO  modes={N_MODES}  hidden={HIDDEN_CHANNELS}  "
-               f"layers={N_LAYERS}  pos-emb=grid")
+    rprint(f"Model: {MODEL_CONFIG.describe()}")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
            f"+ {LOSS_BCE_WEIGHT}*BCE  (d=3)")

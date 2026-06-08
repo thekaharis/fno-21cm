@@ -49,34 +49,10 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from lightcone_params import PARAM_NAMES, read_sampled_params
 from loader import LightconeFile
 
-# 11 LHS-sampled parameters (stored per cone for later conditioning / analysis).
-# Matches build_trainset.py so the two caches are interchangeable downstream.
-PARAMS = [
-    "F_ESC10", "F_STAR10", "ALPHA_ESC", "ALPHA_STAR", "L_X", "NU_X_THRESH",
-    "M_TURN", "t_STAR", "X_RAY_SPEC_INDEX", "OMm", "SIGMA_8",
-]
-
-
-# ------------------------------------------------------------------- params
-def read_params(f: h5py.File, wanted: list[str]) -> np.ndarray:
-    """Best-effort read of the sampled parameters (NaN-filled on mismatch).
-
-    Parameters are not needed for the basic density->x_HI training, only for
-    later conditioning, so a layout mismatch must NOT abort the cluster pass.
-    """
-    try:
-        g = f["params"]
-        names = [n.decode() if isinstance(n, (bytes, bytearray)) else str(n)
-                 for n in np.asarray(g["names"])]
-        values = np.asarray(g["values"], dtype=np.float32).ravel()
-        lut = dict(zip(names, values))
-        return np.array([lut.get(w, np.nan) for w in wanted], dtype=np.float32)
-    except Exception as exc:                              # noqa: BLE001
-        print(f"  [warn] could not read params ({exc}); storing NaNs",
-              file=sys.stderr)
-        return np.full(len(wanted), np.nan, dtype=np.float32)
+PARAMS = list(PARAM_NAMES)
 
 
 # --------------------------------------------------------------- per-cone IO
@@ -87,7 +63,7 @@ def interp_one(path: Path, target_z: np.ndarray
         dens = lf.read_interpolated("density", target_z)
         xhi = lf.read_interpolated("neutral_fraction", target_z)
     with h5py.File(path, "r") as f:
-        params = read_params(f, PARAMS)
+        params = read_sampled_params(f)
     return dens, xhi, params
 
 

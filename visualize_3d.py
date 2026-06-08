@@ -13,51 +13,45 @@ import os
 import sys
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop checkout if one is available ---------------
-# Search order:
-#   ./neuraloperator/         (checkout vendored inside the repo)
-#   ../neuraloperator/        (checkout sibling to the repo: project/{data,
-#                              neuraloperator, fno-21cm} layout)
-#   ./                        (neuralop dropped straight into the repo)
-# If none has a valid __init__.py, fall back to an installed `neuralop`.
-_HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator",
-              _HERE.parent / "neuraloperator",
-              _HERE):
-    if (_cand / "neuralop" / "__init__.py").is_file():
-        sys.path.insert(0, str(_cand))
-        break
-# ---------------------------------------------------------------------------
+from neuralop_setup import prefer_local_neuralop
+
+prefer_local_neuralop()
 
 import numpy as np
 import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-
-from neuralop.models import FNO
 
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
 from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
-
-# Pull the architecture constants from the training script so the two stay in
-# sync automatically -- if you bump HIDDEN_CHANNELS or N_MODES there, viz
-# loads the matching checkpoint without a second edit here.
-from fno_21cm_3d import (
-    N_MODES, HIDDEN_CHANNELS, N_LAYERS,
-    UFNO_WIDTH, UFNO_NORM, UFNO_UNET_VARIANT, UFNO_GLOBAL_RESIDUAL,
-    MODEL_KIND,
+from modeling import (
+    ModelConfig,
+    TrainerModel,
+    build_3d_model,
+    load_checkpoint,
 )
+
+MODEL_CONFIG = ModelConfig.from_env()
+MODEL_KIND = MODEL_CONFIG.kind
+N_MODES = MODEL_CONFIG.modes
+HIDDEN_CHANNELS = MODEL_CONFIG.hidden_channels
+N_LAYERS = MODEL_CONFIG.n_layers
+UFNO_WIDTH = MODEL_CONFIG.ufno_width
+UFNO_NORM = MODEL_CONFIG.ufno_norm
+UFNO_UNET_VARIANT = MODEL_CONFIG.ufno_unet_variant
+UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
 
 # ------------------------------------------------------------------ config
 # Default checkpoint path mirrors the training script's MODEL_KIND-aware
 # CHECKPOINT_DIR so viz auto-loads from the matching directory.
-_DEFAULT_CKPT = ("checkpoints_3d" if MODEL_KIND == "fno"
-                 else "checkpoints_3d_ufno")
-CHECKPOINT = os.environ.get("CHECKPOINT",
-                            f"{_DEFAULT_CKPT}/model_state_dict.pt")
+CHECKPOINT_DIR = Path(
+    os.environ.get("CHECKPOINT_DIR", MODEL_CONFIG.default_checkpoint_dir)
+)
+CHECKPOINT = Path(
+    os.environ.get("CHECKPOINT", CHECKPOINT_DIR / "model_state_dict.pt")
+)
 
 # Base directory for all viz outputs.  Each call to main() creates a fresh
 # uniquely-named subfolder under this base (see make_run_folder), so
@@ -154,29 +148,8 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
     return folder
 
 
-# ------------------------------------------------------------------ wrapper
-class SilentFNO(nn.Module):
-    def __init__(self, fno):
-        super().__init__()
-        self.fno = fno
-
-    def forward(self, x, **kwargs):
-        return self.fno(x)
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            pass
-        return getattr(self._modules["fno"], name)
-
-
-def _strip_prefix(k: str, prefix: str) -> str:
-    return k[len(prefix):] if k.startswith(prefix) else k
-
-
 # ------------------------------------------------------------------ helpers
-def load_model(in_channels: int = 2) -> nn.Module:
+def load_model(in_channels: int = 2) -> torch.nn.Module:
     """Reconstruct the FNO architecture and load the latest checkpoint.
 
     Robust to multiple checkpoint formats:
@@ -192,77 +165,14 @@ def load_model(in_channels: int = 2) -> nn.Module:
     ``dataset.in_channels`` from the caller so parameter-conditioned runs
     (where in_channels=13) load the correct lifting layer.
     """
-    raw_sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
-    raw_sd = {k: v for k, v in raw_sd.items() if k != "_metadata"}
-
-    if MODEL_KIND == "ufno":
-        # U-FNO: SilentFNO wraps UFNOWrapped, which wraps Wen et al.'s
-        # SimpleBlock3d.  Same in/out conventions; same prefix-detection
-        # logic below handles the DDP module. prefix.
-        from models_ufno import UFNOWrapped
-        fno = UFNOWrapped(
-            modes1=N_MODES[0], modes2=N_MODES[1], modes3=N_MODES[2],
-            width=UFNO_WIDTH,
-            in_channels=in_channels,
-            out_channels=1,
-            sigmoid=True,
-            norm=UFNO_NORM,                     # must match training time
-            unet_variant=UFNO_UNET_VARIANT,     # must match training time
-            global_residual=UFNO_GLOBAL_RESIDUAL,
-        )
-    else:
-        fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,
-                  in_channels=in_channels, out_channels=1, n_layers=N_LAYERS,
-                  projection_channel_ratio=2, positional_embedding="grid")
-    model = SilentFNO(fno)
-    target_keys = set(model.state_dict().keys())
-
-    candidates = [
-        ("as-is",
-            raw_sd),
-        ("add fno.",
-            {f"fno.{k}": v for k, v in raw_sd.items()}),
-        ("strip module.",
-            {_strip_prefix(k, "module."): v for k, v in raw_sd.items()}),
-        ("strip module. + add fno.",
-            {f"fno.{_strip_prefix(k, 'module.')}": v for k, v in raw_sd.items()}),
-    ]
-
-    def _matches(d: dict) -> int:
-        # A key matches only if the name is present AND the tensor shape
-        # agrees with the model's parameter at that key.
-        n = 0
-        target_sd = model.state_dict()
-        for k, v in d.items():
-            if k in target_sd and target_sd[k].shape == v.shape:
-                n += 1
-        return n
-
-    best_name, best_sd = max(candidates, key=lambda c: _matches(c[1]))
-    n_matched = _matches(best_sd)
-    n_target = len(target_keys)
-
-    print(f"[load_model] checkpoint keys: {len(raw_sd)}; "
-          f"best transform: {best_name!r}  "
-          f"matched {n_matched}/{n_target} model params "
+    model = TrainerModel(build_3d_model(MODEL_CONFIG, in_channels))
+    report = load_checkpoint(model, CHECKPOINT)
+    print(f"[load_model] transform: {report.transform!r}; "
+          f"matched {report.matched}/{report.total} model params "
           f"(in_channels={in_channels})")
-
-    if n_matched == 0:
-        raise RuntimeError(
-            f"No checkpoint keys match the model after trying all transforms. "
-            f"Sample raw key: {next(iter(raw_sd))!r}; "
-            f"sample target key: {next(iter(target_keys))!r}. "
-            f"Architecture mismatch -- the model was trained with a different "
-            f"in_channels/N_MODES/HIDDEN_CHANNELS than what viz is constructing."
-        )
-
-    # strict=False here because the checkpoint may contain optimizer/scheduler
-    # state under arbitrary extra keys -- those should be ignored.  But the
-    # n_matched check above guarantees we're not silently loading nothing.
-    missing, unexpected = model.load_state_dict(best_sd, strict=False)
-    if missing:
-        print(f"[load_model] WARNING: {len(missing)} parameters left at random "
-              f"init: {sorted(missing)[:3]}...")
+    if report.missing:
+        print(f"[load_model] WARNING: {len(report.missing)} parameters left at "
+              f"random init: {sorted(report.missing)[:3]}...")
     return model.to(DEVICE).eval()
 
 
@@ -520,7 +430,7 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
 # ------------------------------------------------------------------ main
 def main():
     print(f"Device: {DEVICE}")
-    if not Path(CHECKPOINT).exists():
+    if not CHECKPOINT.exists():
         print(f"Checkpoint not found: {CHECKPOINT}", file=sys.stderr)
         sys.exit(1)
 

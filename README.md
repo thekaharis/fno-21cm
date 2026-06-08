@@ -23,6 +23,9 @@ Two pipelines live side by side:
 .
 ├── fno_21cm.py, fno_21cm_3d.py    # training entry points (v2, v3)
 ├── dataset.py, dataset_3d.py      # PyTorch Datasets
+├── modeling.py, losses.py         # shared model factory and Trainer adapters
+├── neuralop_setup.py              # local/installed neuralop resolution
+├── lightcone_params.py            # shared conditioning-parameter schema
 ├── build_trainset.py              # v2 slice cache builder
 ├── build_cubes.py                 # v3 cube cache builder
 ├── visualize.py, visualize_3d.py  # checkpoint -> plots

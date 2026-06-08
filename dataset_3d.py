@@ -24,6 +24,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Subset
 
+from lightcone_params import PARAM_NAMES as LIGHTCONE_PARAM_NAMES
 from loader import LightconeFile
 
 
@@ -154,10 +155,7 @@ class LightconeCubeCache(Dataset):
 
     # Names of the 11 LHS-sampled parameters in the cache, in column order.
     # Matches build_cubes.PARAMS exactly.
-    PARAM_NAMES = (
-        "F_ESC10", "F_STAR10", "ALPHA_ESC", "ALPHA_STAR", "L_X", "NU_X_THRESH",
-        "M_TURN", "t_STAR", "X_RAY_SPEC_INDEX", "OMm", "SIGMA_8",
-    )
+    PARAM_NAMES = LIGHTCONE_PARAM_NAMES
 
     def __init__(self, cache_path: str | Path,
                  density_scale: float = 10.0,
