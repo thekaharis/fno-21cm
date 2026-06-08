@@ -9,9 +9,9 @@ Input tensor layout: ``(C, Nx, Ny, Nz)`` with two channels per sample:
     channel 1 : 1 / (1 + z), broadcast across transverse axes
 
 The ``positional_embedding="grid"`` option on the FNO supplies normalized
-(x, y, z) coordinate channels automatically -- the z-coordinate doubles as
-the normalized comoving distance because the native LOS cells are uniform in
-comoving distance.
+(x, y, grid-z) coordinate channels automatically. Since samples are
+interpolated to a uniform redshift grid, grid-z is normalized redshift rather
+than normalized comoving distance.
 """
 
 from __future__ import annotations

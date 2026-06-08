@@ -155,16 +155,17 @@ Each lightcone is interpolated along the LOS axis from its native ~2340 cells
 down to `N_Z = 256` (configurable) so a full cube fits on an A30 (24 GB) at
 `BATCH_SIZE = 1`. The input has two physical channels (density / 10 and
 `1/(1+z)`); the FNO's `positional_embedding="grid"` adds normalized
-(x, y, z) coordinate channels, where z doubles as normalized comoving
-distance because the native LOS cells are uniform in comoving distance.
+(x, y, grid-z) coordinate channels. The cache is sampled uniformly in
+redshift, so grid-z is normalized redshift rather than comoving distance.
 
 Key hyperparameters at the top of `fno_21cm_3d.py`:
 `N_MODES = (16, 16, 16)`, `HIDDEN_CHANNELS = 32`, `N_LAYERS = 4`,
 `BATCH_SIZE = 1`, `LEARNING_RATE = 5e-4`, `N_EPOCHS = 100`.
 
-Loss: `0.5 * absL2 + 0.5 * absH1` with `d=3` (the 3-D H1 term adds gradient
-sensitivity along all three axes — particularly useful for bubble edges
-along the line of sight, which the 2-D model could not see at all).
+Loss: `0.5 * absL2 + 0.5 * absH1` with `d=3`. H1 uses periodic finite
+differences in the transverse X/Y plane and non-periodic differences along
+the normalized-redshift LOS axis. This adds gradient sensitivity along all
+three axes without connecting the unrelated `z=5` and `z=25` endpoints.
 
 ### 2-D (legacy, kept for comparison)
 

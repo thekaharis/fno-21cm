@@ -7,9 +7,9 @@ Each lightcone is interpolated along the LOS axis to a fixed n_z grid so the
 whole cube fits in a single forward pass on an A30 (24 GB) at batch=1.  The
 input tensor carries the density (normalized by a fixed constant) and an
 explicit ``1/(1+z)`` channel.  The FNO's ``positional_embedding="grid"`` option
-then appends normalized (x, y, z) coordinates as additional channels; on this
-grid the z-coordinate IS the normalized comoving distance because the native
-LOS cells are uniform in comoving distance.
+then appends normalized grid coordinates as additional channels. Because the
+cube cache is sampled uniformly in redshift, the third grid coordinate is
+normalized redshift, not comoving distance.
 """
 
 from __future__ import annotations
@@ -209,6 +209,22 @@ def _all_reduce_weighted_metrics(
 EVAL_INTERVAL = 1
 
 
+def _build_h1_loss() -> H1Loss:
+    """H1 norm on normalized X/Y/redshift coordinates.
+
+    The transverse simulation plane is periodic. The lightcone redshift axis
+    is not: its endpoints represent z=5 and z=25 and must never be connected
+    by a wrapped finite difference.
+    """
+    return H1Loss(
+        d=3,
+        measure=(1.0, 1.0, 1.0),
+        periodic_in_x=True,
+        periodic_in_y=True,
+        periodic_in_z=False,
+    )
+
+
 class LoggingTrainer(Trainer):
     """``neuralop.Trainer`` + per-epoch metrics written to a JSONL file.
 
@@ -226,6 +242,11 @@ class LoggingTrainer(Trainer):
 
     def __init__(self, *args, metrics_path: str | Path | None = None,
                  rank: int = 0, world_size: int = 1, **kwargs):
+        if kwargs.get("use_distributed", False):
+            raise ValueError(
+                "LoggingTrainer must not wrap DDP itself; fno_21cm_3d.py "
+                "constructs the single DDP wrapper before the optimizer."
+            )
         super().__init__(*args, **kwargs)
         self.metrics_path = Path(metrics_path) if metrics_path else None
         # File and directory side effects happen on rank 0 only -- otherwise
@@ -493,7 +514,7 @@ def main():
     # so absolute is mandatory here.  BCE is a confidence regulariser that
     # rewards bimodal {0, 1} predictions -- see BCETerm docstring.
     l2_loss = LpLoss(d=3, p=2)
-    h1_loss = H1Loss(d=3)
+    h1_loss = _build_h1_loss()
     bce_loss = BinaryCrossEntropyTerm()
     train_loss_fn = WeightedLoss(
         (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
@@ -516,7 +537,9 @@ def main():
         data_processor=None,
         wandb_log=False,
         eval_interval=EVAL_INTERVAL,
-        use_distributed=is_distributed,
+        # The model is already wrapped exactly once above. Setting this True
+        # would make neuralop.Trainer add a second nested DDP wrapper.
+        use_distributed=False,
         verbose=is_rank_0,                 # silence non-rank-0 Trainer prints
         metrics_path=METRICS_PATH,
         rank=rank,
@@ -531,7 +554,8 @@ def main():
     rprint(f"Model: {MODEL_CONFIG.describe()}")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
-           f"+ {LOSS_BCE_WEIGHT}*BCE  (d=3)")
+           f"+ {LOSS_BCE_WEIGHT}*BCE  "
+           f"(H1: periodic X/Y, non-periodic normalized-redshift Z)")
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
