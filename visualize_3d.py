@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from pathlib import Path
 
 from neuralop_setup import prefer_local_neuralop
@@ -25,15 +26,59 @@ from matplotlib.gridspec import GridSpec
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
-from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
+from dataset_3d import (
+    InputFeatures,
+    LightconeCubeDataset,
+    LightconeCubeCache,
+    ParameterNormalization,
+    split_cubes,
+)
 from modeling import (
     ModelConfig,
     TrainerModel,
     build_3d_model,
     load_checkpoint,
 )
+from metrics_21cm import compute_physical_metrics
+from run_metadata import load_run_metadata, resolve_checkpoint
 
-MODEL_CONFIG = ModelConfig.from_env()
+# ------------------------------------------------------------------ config
+_ENV_MODEL_CONFIG = ModelConfig.from_env()
+CHECKPOINT_DIR = Path(
+    os.environ.get("CHECKPOINT_DIR", _ENV_MODEL_CONFIG.default_checkpoint_dir)
+)
+CHECKPOINT = resolve_checkpoint(CHECKPOINT_DIR)
+RUN_METADATA = (
+    load_run_metadata(CHECKPOINT.parent)
+    or load_run_metadata(CHECKPOINT_DIR)
+)
+MODEL_CONFIG = (
+    ModelConfig.from_dict(RUN_METADATA["model_config"])
+    if RUN_METADATA and "model_config" in RUN_METADATA
+    else _ENV_MODEL_CONFIG
+)
+INPUT_FEATURES = InputFeatures(
+    RUN_METADATA["input_features"]["name"]
+    if RUN_METADATA and "input_features" in RUN_METADATA
+    else os.environ.get("INPUT_FEATURES", "density_z_params").lower()
+)
+PARAMETER_NORMALIZATION = (
+    ParameterNormalization.from_dict(RUN_METADATA["parameter_normalization"])
+    if RUN_METADATA and RUN_METADATA.get("parameter_normalization")
+    else None
+)
+CHECKPOINT_TYPE = (
+    "best" if CHECKPOINT.name.startswith("best_")
+    else "final" if CHECKPOINT.name.startswith("final_")
+    else "legacy/custom"
+)
+CHECKPOINT_EPOCH = None
+if RUN_METADATA:
+    training_metadata = RUN_METADATA.get("training", {})
+    if CHECKPOINT_TYPE == "best":
+        CHECKPOINT_EPOCH = training_metadata.get("best_epoch")
+    elif CHECKPOINT_TYPE == "final":
+        CHECKPOINT_EPOCH = training_metadata.get("final_epoch")
 MODEL_KIND = MODEL_CONFIG.kind
 N_MODES = MODEL_CONFIG.modes
 HIDDEN_CHANNELS = MODEL_CONFIG.hidden_channels
@@ -42,16 +87,6 @@ UFNO_WIDTH = MODEL_CONFIG.ufno_width
 UFNO_NORM = MODEL_CONFIG.ufno_norm
 UFNO_UNET_VARIANT = MODEL_CONFIG.ufno_unet_variant
 UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
-
-# ------------------------------------------------------------------ config
-# Default checkpoint path mirrors the training script's MODEL_KIND-aware
-# CHECKPOINT_DIR so viz auto-loads from the matching directory.
-CHECKPOINT_DIR = Path(
-    os.environ.get("CHECKPOINT_DIR", MODEL_CONFIG.default_checkpoint_dir)
-)
-CHECKPOINT = Path(
-    os.environ.get("CHECKPOINT", CHECKPOINT_DIR / "model_state_dict.pt")
-)
 
 # Base directory for all viz outputs.  Each call to main() creates a fresh
 # uniquely-named subfolder under this base (see make_run_folder), so
@@ -135,6 +170,9 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
         f"job_id:       {job_id or '(local, no SLURM)'}",
         f"MODEL_KIND:   {MODEL_KIND}",
         f"CHECKPOINT:   {CHECKPOINT}",
+        f"CKPT_TYPE:    {CHECKPOINT_TYPE}",
+        f"CKPT_EPOCH:   {CHECKPOINT_EPOCH}",
+        f"INPUT:        {INPUT_FEATURES.name}",
         f"CUBES_CACHE:  {CUBES_CACHE}",
         f"N_MODES:      {N_MODES}",
         f"HIDDEN_CHAN:  {HIDDEN_CHANNELS}",
@@ -198,6 +236,15 @@ def predict_cube(model, sample) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
           f"{truth.min():+.3f} / {truth.mean():+.3f} / {truth.max():+.3f} / "
           f"{truth.std():.3f}")
     return dens, truth, pred
+
+
+def xy_transpose_error(model, sample, pred: np.ndarray) -> float:
+    """Measure prediction consistency under exchange of transverse axes."""
+    x_transposed = sample["x"].transpose(1, 2).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        pred_transposed = model(x=x_transposed).cpu().numpy()[0, 0]
+    pred_transposed = pred_transposed.transpose(1, 0, 2)
+    return float(np.sqrt(np.mean((pred - pred_transposed) ** 2)))
 
 
 # --------------------------------------------------------- z-slice panel
@@ -318,6 +365,31 @@ def plot_scatter(truth, pred, cone_id, split):
     return fig
 
 
+def plot_physical_diagnostics(metrics: dict, cone_id: int, split: str):
+    """Plot global history, power spectra, and Fourier cross-correlation."""
+    fourier = metrics["fourier"]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    axes[0].plot(metrics["target_z"], metrics["global_xhi_truth"], label="truth")
+    axes[0].plot(metrics["target_z"], metrics["global_xhi_pred"], label="prediction")
+    axes[0].set(xlabel="redshift z", ylabel="global x_HI", ylim=(0, 1))
+    axes[0].legend()
+
+    axes[1].loglog(fourier["k_grid"], fourier["power_truth"], label="truth")
+    axes[1].loglog(fourier["k_grid"], fourier["power_pred"], label="prediction")
+    axes[1].set(xlabel="k [grid units]", ylabel="P_xHI(k)")
+    axes[1].legend()
+
+    axes[2].semilogx(fourier["k_grid"], fourier["cross_correlation"])
+    axes[2].set(
+        xlabel="k [grid units]",
+        ylabel="Fourier cross-correlation",
+        ylim=(-1.05, 1.05),
+    )
+    fig.suptitle(f"Physical diagnostics - {split} cone {cone_id}")
+    fig.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------- cone-picker by behavior
 def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
                                  n_cones: int,
@@ -430,13 +502,20 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
 # ------------------------------------------------------------------ main
 def main():
     print(f"Device: {DEVICE}")
+    print(
+        f"Checkpoint: {CHECKPOINT} "
+        f"(type={CHECKPOINT_TYPE}, epoch={CHECKPOINT_EPOCH})"
+    )
     if not CHECKPOINT.exists():
         print(f"Checkpoint not found: {CHECKPOINT}", file=sys.stderr)
         sys.exit(1)
 
     if CUBES_CACHE.exists():
         print(f"Using pre-computed cube cache: {CUBES_CACHE}")
-        dataset = LightconeCubeCache(CUBES_CACHE)
+        dataset = LightconeCubeCache(
+            CUBES_CACHE,
+            input_features=INPUT_FEATURES,
+        )
     else:
         print(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
               f"from {DATA_DIR}")
@@ -449,10 +528,24 @@ def main():
             file_paths=files,
             n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
             preload=False,
+            input_features=INPUT_FEATURES,
         )
-    _, val_ds, test_ds, (_, val_idx, test_idx) = split_cubes(
+    train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx) = split_cubes(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
+    del train_ds
+    normalization = PARAMETER_NORMALIZATION
+    if INPUT_FEATURES.use_params and normalization is None:
+        if RUN_METADATA is not None:
+            raise RuntimeError(
+                "run metadata is missing parameter normalization statistics"
+            )
+        print(
+            "WARNING: legacy checkpoint has no run metadata; fitting "
+            "train-split parameter statistics for visualization"
+        )
+        normalization = dataset.fit_parameter_normalization(train_idx)
+    dataset.set_parameter_normalization(normalization)
     print(f"Val cones: {val_idx}")
     print(f"Test cones: {test_idx}")
 
@@ -466,6 +559,7 @@ def main():
     # Detailed viz appends "-detailed" downstream.
     figures_dir = make_run_folder(FIGURES_BASE, tag=VIZ_TAG)
     print(f"Writing figures to: {figures_dir}")
+    physical_records = []
 
     for split_ds, split_idx, split_name in [
         (val_ds, val_idx, "validation"),
@@ -493,6 +587,21 @@ def main():
             sample = split_ds[idx_in_split]
             dens, truth, pred = predict_cube(model, sample)
             per_cone_for_grid.append((cone_id, summ, dens, truth, pred))
+            physical = compute_physical_metrics(truth, pred, target_z)
+            physical["xy_transpose_rmse"] = xy_transpose_error(
+                model, sample, pred
+            )
+            physical_records.append({
+                "split": split_name,
+                "cone_id": cone_id,
+                **physical,
+            })
+            print(
+                f"  XY transpose RMSE: {physical['xy_transpose_rmse']:.5f}; "
+                f"edge/interior RMSE: "
+                f"{physical['transverse_edge_rmse']:.5f}/"
+                f"{physical['transverse_interior_rmse']:.5f}"
+            )
 
             # z-slice grid (one PNG per cone)
             idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE,
@@ -500,6 +609,14 @@ def main():
             fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
                                 split_name)
             out = figures_dir / f"comparison_3d_{split_name}_cone{cone_id}.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  saved {out}")
+
+            fig = plot_physical_diagnostics(
+                physical, cone_id=cone_id, split=split_name
+            )
+            out = figures_dir / f"physical_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"  saved {out}")
@@ -530,6 +647,9 @@ def main():
             plt.close(fig)
             print(f"Saved {out}")
 
+    metrics_path = figures_dir / "physical_metrics.json"
+    metrics_path.write_text(json.dumps(physical_records, indent=2) + "\n")
+    print(f"Saved {metrics_path}")
     print("Done.")
 
 

@@ -31,14 +31,21 @@ from torch.utils.data.distributed import DistributedSampler
 
 from neuralop import Trainer
 from neuralop import LpLoss, H1Loss
+from neuralop.training.training_state import save_training_state
 from neuralop.utils import count_model_params
 
 import neuralop as _neuralop
 print(f"[fno_21cm_3d] using neuralop from {_neuralop.__file__}")
 
-from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
+from dataset_3d import (
+    InputFeatures,
+    LightconeCubeDataset,
+    LightconeCubeCache,
+    split_cubes,
+)
 from losses import AbsoluteLoss, BinaryCrossEntropyTerm, WeightedLoss
 from modeling import ModelConfig, TrainerModel, build_3d_model
+from run_metadata import write_run_metadata
 
 
 # ------------------------------------------------------------------ config
@@ -59,6 +66,9 @@ N_Z = 256                           # LOS resolution after interpolation
 Z_MIN, Z_MAX = 5.0, 25.0
 
 MODEL_CONFIG = ModelConfig.from_env()
+INPUT_FEATURES = InputFeatures(
+    os.environ.get("INPUT_FEATURES", "density_z_params").lower()
+)
 MODEL_KIND = MODEL_CONFIG.kind
 N_MODES = MODEL_CONFIG.modes
 HIDDEN_CHANNELS = MODEL_CONFIG.hidden_channels
@@ -257,6 +267,8 @@ class LoggingTrainer(Trainer):
         if self.metrics_path is not None and self._is_rank_0:
             self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
         self._last_train: dict | None = None
+        self.best_epoch: int | None = None
+        self.best_metric: float | None = None
 
     def train_one_epoch(self, epoch, train_loader, training_loss):
         # DistributedSampler must be told the epoch so it reshuffles
@@ -300,6 +312,12 @@ class LoggingTrainer(Trainer):
         eval_metrics = super().evaluate_all(*args, **kwargs)
         # evaluate() has already reduced every loader's metrics across ranks.
         clean = {k: float(v) for k, v in eval_metrics.items()}
+        monitored = clean.get("val_l2")
+        if monitored is not None and (
+            self.best_metric is None or monitored < self.best_metric
+        ):
+            self.best_metric = monitored
+            self.best_epoch = int(kwargs.get("epoch", -1))
         self._flush_row(clean)
         return eval_metrics
 
@@ -388,7 +406,10 @@ def main():
     # sample, no scipy interpolation in the hot path.
     if CUBES_CACHE.exists():
         rprint(f"Using pre-computed cube cache: {CUBES_CACHE}")
-        dataset = LightconeCubeCache(CUBES_CACHE)
+        dataset = LightconeCubeCache(
+            CUBES_CACHE,
+            input_features=INPUT_FEATURES,
+        )
         rprint(f"Dataset: {len(dataset)} cubes  "
                f"({dataset.n_x} x {dataset.n_y} x {dataset.n_z}, "
                f"z in [{dataset.target_z[0]:.2f}, {dataset.target_z[-1]:.2f}])")
@@ -406,6 +427,7 @@ def main():
             file_paths=files,
             n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
             preload=False,
+            input_features=INPUT_FEATURES,
         )
         rprint(f"Dataset: {len(dataset)} cubes  ({N_Z} LOS cells each, "
                f"z in [{Z_MIN}, {Z_MAX}])")
@@ -417,6 +439,8 @@ def main():
     overlap = set(train_idx) & set(val_idx) | set(train_idx) & set(test_idx) \
               | set(val_idx) & set(test_idx)
     assert not overlap, f"Split leakage: {overlap}"
+    parameter_normalization = dataset.fit_parameter_normalization(train_idx)
+    dataset.set_parameter_normalization(parameter_normalization)
     rprint(f"Train: {len(train_ds)} cones {train_idx}")
     rprint(f"Val:   {len(val_ds)} cones {val_idx}")
     rprint(f"Test:  {len(test_ds)} cones {test_idx}")
@@ -464,11 +488,9 @@ def main():
     # -------------------------------------------- 4. model + DDP wrap
     # in_channels read from the dataset so it auto-adjusts when parameter
     # conditioning is enabled (2 -> 13 with the 11 LHS params broadcast in).
-    in_channels = getattr(dataset, "in_channels", 2)
-    rprint(f"Input channels: {in_channels} "
-           f"(density + 1/(1+z)"
-           + (f" + {in_channels - 2} astrophysical params" if in_channels > 2 else "")
-           + ")")
+    in_channels = dataset.in_channels
+    rprint(f"Input channels ({in_channels}): "
+           + ", ".join(dataset.input_features.channel_names))
 
     fno = build_3d_model(MODEL_CONFIG, in_channels)
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
@@ -552,6 +574,7 @@ def main():
            f"rule for {world_size} ranks)")
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Model: {MODEL_CONFIG.describe()}")
+    rprint(f"Input ablation: {INPUT_FEATURES.name}")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
            f"+ {LOSS_BCE_WEIGHT}*BCE  "
@@ -562,6 +585,41 @@ def main():
     rprint(f"Metrics JSONL: {METRICS_PATH}")
 
     # -------------------------------------------- 8. train
+    metadata = {
+        "model_config": MODEL_CONFIG.to_dict(),
+        "input_features": {
+            "name": INPUT_FEATURES.name,
+            "channel_names": list(INPUT_FEATURES.channel_names),
+            "in_channels": in_channels,
+        },
+        "parameter_normalization": (
+            parameter_normalization.to_dict()
+            if parameter_normalization is not None
+            else None
+        ),
+        "split": {
+            "seed": SPLIT_SEED,
+            "val_fraction": VAL_FRACTION,
+            "test_fraction": TEST_FRACTION,
+            "train_indices": train_idx,
+            "val_indices": val_idx,
+            "test_indices": test_idx,
+        },
+        "training": {
+            "epochs": N_EPOCHS,
+            "best_metric_name": "val_l2",
+            "best_metric": None,
+            "best_epoch": None,
+            "final_epoch": None,
+        },
+        "checkpoints": {
+            "best": "best_model_state_dict.pt",
+            "final": "final_model_state_dict.pt",
+        },
+    }
+    if is_rank_0:
+        write_run_metadata(CHECKPOINT_DIR, metadata)
+
     try:
         trainer.train(
             train_loader=train_loader,
@@ -571,9 +629,29 @@ def main():
             regularizer=False,
             training_loss=train_loss_fn,
             eval_losses=eval_losses,
-            save_every=10,
+            save_best="val_l2",
             save_dir=CHECKPOINT_DIR,
         )
+        if is_rank_0:
+            save_training_state(
+                save_dir=CHECKPOINT_DIR,
+                save_name="final_model",
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                regularizer=None,
+                epoch=N_EPOCHS - 1,
+            )
+            metadata["training"].update(
+                best_metric=trainer.best_metric,
+                best_epoch=trainer.best_epoch,
+                final_epoch=N_EPOCHS - 1,
+            )
+            write_run_metadata(CHECKPOINT_DIR, metadata)
+            rprint(
+                f"Saved best checkpoint from epoch {trainer.best_epoch} "
+                f"(val_l2={trainer.best_metric}) and final epoch {N_EPOCHS - 1}"
+            )
     finally:
         if is_distributed and dist.is_initialized():
             dist.destroy_process_group()

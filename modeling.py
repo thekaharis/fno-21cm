@@ -66,6 +66,25 @@ class ModelConfig:
             ufno_global_residual=_env_bool("UFNO_GLOBAL_RESIDUAL"),
         )
 
+    @classmethod
+    def from_dict(cls, values: Mapping) -> "ModelConfig":
+        values = dict(values)
+        if "modes" in values:
+            values["modes"] = tuple(int(value) for value in values["modes"])
+        return cls(**values)
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "modes": list(self.modes),
+            "hidden_channels": self.hidden_channels,
+            "n_layers": self.n_layers,
+            "ufno_width": self.ufno_width,
+            "ufno_norm": self.ufno_norm,
+            "ufno_unet_variant": self.ufno_unet_variant,
+            "ufno_global_residual": self.ufno_global_residual,
+        }
+
     @property
     def default_checkpoint_dir(self) -> Path:
         suffix = "" if self.kind == "fno" else "_ufno"

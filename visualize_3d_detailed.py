@@ -45,6 +45,7 @@ from visualize_3d import (
     DEVICE, CUBES_CACHE, DATA_DIR, FILE_GLOB,
     N_Z, Z_MIN, Z_MAX, STRATIFY_Z,
     SPLIT_SEED, VAL_FRACTION, TEST_FRACTION,
+    INPUT_FEATURES, PARAMETER_NORMALIZATION, RUN_METADATA,
     FIGURES_BASE, VIZ_TAG, make_run_folder,
     load_model, predict_cube,
     plot_z_slices, plot_lightcone_strip, plot_scatter,
@@ -132,7 +133,10 @@ def main():
 
     if CUBES_CACHE.exists():
         print(f"Using pre-computed cube cache: {CUBES_CACHE}")
-        dataset = LightconeCubeCache(CUBES_CACHE)
+        dataset = LightconeCubeCache(
+            CUBES_CACHE,
+            input_features=INPUT_FEATURES,
+        )
     else:
         print(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
               f"from {DATA_DIR}")
@@ -144,13 +148,27 @@ def main():
         dataset = LightconeCubeDataset(
             file_paths=files, n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
             preload=False,
+            input_features=INPUT_FEATURES,
         )
-    _, val_ds, test_ds, (_, val_idx, test_idx) = split_cubes(
+    train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx) = split_cubes(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
         seed=SPLIT_SEED,
     )
+    del train_ds
+    normalization = PARAMETER_NORMALIZATION
+    if INPUT_FEATURES.use_params and normalization is None:
+        if RUN_METADATA is not None:
+            raise RuntimeError(
+                "run metadata is missing parameter normalization statistics"
+            )
+        print(
+            "WARNING: legacy checkpoint has no run metadata; fitting "
+            "train-split parameter statistics for visualization"
+        )
+        normalization = dataset.fit_parameter_normalization(train_idx)
+    dataset.set_parameter_normalization(normalization)
 
-    model = load_model(in_channels=getattr(dataset, "in_channels", 2))
+    model = load_model(in_channels=dataset.in_channels)
     print("Model loaded.")
 
     target_z = dataset.target_z

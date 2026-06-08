@@ -1,12 +1,11 @@
-"""PyTorch Dataset for full 21cm lightcone cubes (density -> neutral fraction).
+"""PyTorch Dataset for full 21cm lightcone cubes.
 
 One sample = one lightcone, downsampled along the line-of-sight to a fixed
 ``n_z``-cell grid so the whole cube fits in a single FNO forward pass.
 
-Input tensor layout: ``(C, Nx, Ny, Nz)`` with two channels per sample:
-
-    channel 0 : density / density_scale
-    channel 1 : 1 / (1 + z), broadcast across transverse axes
+Input tensor layout is ``(C, Nx, Ny, Nz)``. The selected channels are recorded
+by :class:`InputFeatures`; parameter channels are normalized from training
+cones only and use the same order in the raw and cached pipelines.
 
 The ``positional_embedding="grid"`` option on the FNO supplies normalized
 (x, y, grid-z) coordinate channels automatically. Since samples are
@@ -16,6 +15,7 @@ than normalized comoving distance.
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -24,8 +24,106 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Subset
 
-from lightcone_params import PARAM_NAMES as LIGHTCONE_PARAM_NAMES
+from lightcone_params import (
+    PARAM_NAMES as LIGHTCONE_PARAM_NAMES,
+    read_sampled_params,
+)
 from loader import LightconeFile
+
+
+@dataclass(frozen=True)
+class InputFeatures:
+    """Explicit input-channel contract for conditioning ablations."""
+
+    name: str = "density_z_params"
+
+    VALID = ("density", "params", "density_z", "density_z_params")
+
+    def __post_init__(self) -> None:
+        if self.name not in self.VALID:
+            raise ValueError(
+                f"input features must be one of {self.VALID}, got {self.name!r}"
+            )
+
+    @property
+    def use_density(self) -> bool:
+        return self.name in {"density", "density_z", "density_z_params"}
+
+    @property
+    def use_redshift(self) -> bool:
+        return self.name in {"density_z", "density_z_params"}
+
+    @property
+    def use_params(self) -> bool:
+        return self.name in {"params", "density_z_params"}
+
+    @property
+    def channel_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        if self.use_density:
+            names.append("density/10")
+        if self.use_redshift:
+            names.append("1/(1+z)")
+        if self.use_params:
+            names.extend(LIGHTCONE_PARAM_NAMES)
+        return tuple(names)
+
+
+@dataclass(frozen=True)
+class ParameterNormalization:
+    """Train-split statistics used to z-score sampled parameters."""
+
+    names: tuple[str, ...]
+    mean: tuple[float, ...]
+    std: tuple[float, ...]
+
+    @classmethod
+    def fit(
+        cls,
+        params: np.ndarray,
+        train_indices: Sequence[int],
+        names: Sequence[str] = LIGHTCONE_PARAM_NAMES,
+    ) -> "ParameterNormalization":
+        selected = np.asarray(params, dtype=np.float64)[list(train_indices)]
+        if selected.size == 0:
+            raise ValueError("cannot fit parameter normalization on an empty split")
+        if not np.isfinite(selected).all():
+            bad = np.where(~np.isfinite(selected).all(axis=1))[0]
+            raise ValueError(
+                "training parameters contain missing/non-finite values "
+                f"(local rows {bad[:5].tolist()})"
+            )
+        mean = selected.mean(axis=0)
+        std = selected.std(axis=0)
+        std = np.where(std < 1e-8, 1.0, std)
+        return cls(
+            names=tuple(names),
+            mean=tuple(float(value) for value in mean),
+            std=tuple(float(value) for value in std),
+        )
+
+    @classmethod
+    def from_dict(cls, values: dict) -> "ParameterNormalization":
+        return cls(
+            names=tuple(values["names"]),
+            mean=tuple(float(value) for value in values["mean"]),
+            std=tuple(float(value) for value in values["std"]),
+        )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def normalize(self, params: np.ndarray) -> np.ndarray:
+        if tuple(self.names) != tuple(LIGHTCONE_PARAM_NAMES):
+            raise ValueError("parameter normalization schema does not match dataset")
+        return (
+            (np.asarray(params, dtype=np.float32) - np.asarray(self.mean, dtype=np.float32))
+            / np.asarray(self.std, dtype=np.float32)
+        ).astype(np.float32)
+
+
+def _coerce_input_features(value: InputFeatures | str) -> InputFeatures:
+    return value if isinstance(value, InputFeatures) else InputFeatures(str(value))
 
 
 class LightconeCubeDataset(Dataset):
@@ -60,6 +158,8 @@ class LightconeCubeDataset(Dataset):
         target_field: str = "neutral_fraction",
         density_scale: float = 10.0,
         preload: bool = False,
+        input_features: InputFeatures | str = "density_z_params",
+        parameter_normalization: ParameterNormalization | None = None,
     ):
         self.file_paths = [Path(p) for p in file_paths]
         self.n_z = int(n_z)
@@ -69,17 +169,49 @@ class LightconeCubeDataset(Dataset):
         self.target_field = target_field
         self.density_scale = float(density_scale)
         self.preload = bool(preload)
+        self.input_features = _coerce_input_features(input_features)
+        self.parameter_normalization = parameter_normalization
+        self.params = None
+        if self.input_features.use_params:
+            rows = []
+            for path in self.file_paths:
+                with h5py.File(path, "r") as h5_file:
+                    rows.append(read_sampled_params(h5_file))
+            self.params = np.stack(rows).astype(np.float32)
+        self.n_params = len(LIGHTCONE_PARAM_NAMES) if self.input_features.use_params else 0
+        self.in_channels = len(self.input_features.channel_names)
 
         # Pre-compute the per-LOS redshift channel once; broadcast at __getitem__.
         self._z_channel_1d = (1.0 / (1.0 + self.target_z)).astype(np.float32)
 
-        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         if self.preload:
+            if self.input_features.use_params and self.parameter_normalization is None:
+                raise ValueError(
+                    "parameter_normalization must be set before preloading "
+                    "parameter-conditioned raw cubes"
+                )
             for i in range(len(self.file_paths)):
                 self._cache[i] = self._load(i)
 
+    def fit_parameter_normalization(
+        self, train_indices: Sequence[int]
+    ) -> ParameterNormalization | None:
+        if not self.input_features.use_params:
+            return None
+        assert self.params is not None
+        return ParameterNormalization.fit(self.params, train_indices)
+
+    def set_parameter_normalization(
+        self, normalization: ParameterNormalization | None
+    ) -> None:
+        if self.input_features.use_params and normalization is None:
+            raise ValueError("parameter-conditioned inputs require normalization")
+        self.parameter_normalization = normalization
+        self._cache.clear()
+
     # ----------------------------------------------------------------- core
-    def _load(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _load(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         p = self.file_paths[idx]
         with LightconeFile(p) as lf:
             dens = lf.read_interpolated(self.input_field, self.target_z)
@@ -94,12 +226,30 @@ class LightconeCubeDataset(Dataset):
             self._z_channel_1d.reshape(1, 1, nz), (nx, ny, nz)
         ).astype(np.float32, copy=False)
 
-        x = np.stack([c_dens, c_z], axis=0)            # (2, Nx, Ny, Nz)
+        channels = []
+        if self.input_features.use_density:
+            channels.append(c_dens)
+        if self.input_features.use_redshift:
+            channels.append(c_z)
+        if self.input_features.use_params:
+            if self.parameter_normalization is None:
+                raise RuntimeError(
+                    "parameter normalization has not been fitted or loaded"
+                )
+            assert self.params is not None
+            normalized = self.parameter_normalization.normalize(self.params[idx])
+            channels.extend(
+                np.broadcast_to(value, (nx, ny, nz))
+                for value in normalized
+            )
+
+        x = np.stack(channels, axis=0)
         y = xhi.astype(np.float32)[None, ...]          # (1, Nx, Ny, Nz)
 
         return (
             torch.from_numpy(np.ascontiguousarray(x)),
             torch.from_numpy(np.ascontiguousarray(y)),
+            torch.from_numpy(np.ascontiguousarray(c_dens)),
         )
 
     def __len__(self) -> int:
@@ -107,12 +257,12 @@ class LightconeCubeDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index in self._cache:
-            x, y = self._cache[index]
+            x, y, density = self._cache[index]
         else:
-            x, y = self._load(index)
+            x, y, density = self._load(index)
             if self.preload:
-                self._cache[index] = (x, y)
-        return {"x": x, "y": y}
+                self._cache[index] = (x, y, density)
+        return {"x": x, "y": y, "density": density}
 
 
 # ===================================================================== cache
@@ -160,11 +310,17 @@ class LightconeCubeCache(Dataset):
     def __init__(self, cache_path: str | Path,
                  density_scale: float = 10.0,
                  preload: bool = False,
-                 use_params: bool = True):
+                 use_params: bool | None = None,
+                 input_features: InputFeatures | str = "density_z_params",
+                 parameter_normalization: ParameterNormalization | None = None):
         self.cache_path = Path(cache_path)
         self.density_scale = float(density_scale)
         self.preload = bool(preload)
-        self.use_params = bool(use_params)
+        if use_params is not None:
+            input_features = "density_z_params" if use_params else "density_z"
+        self.input_features = _coerce_input_features(input_features)
+        self.use_params = self.input_features.use_params
+        self.parameter_normalization = parameter_normalization
 
         with h5py.File(self.cache_path, "r") as f:
             self.target_z = np.asarray(f["target_z"], dtype=np.float64)
@@ -184,12 +340,6 @@ class LightconeCubeCache(Dataset):
 
         self._z_channel_1d = (1.0 / (1.0 + self.target_z)).astype(np.float32)
 
-        # Parameter conditioning: z-score against the FULL cache (which is the
-        # training distribution at LHS-sampling time -- the design is
-        # space-filling so the per-split means are essentially the same).
-        # Parameters span very different physical scales (F_ESC10 ~ 0.01-1,
-        # NU_X_THRESH ~ 100-1500), so z-scoring is mandatory; an unnormalized
-        # 1500-eV channel would dominate the lifting layer.
         if self.use_params:
             if self.params is None:
                 raise ValueError(
@@ -203,21 +353,11 @@ class LightconeCubeCache(Dataset):
                     f"{len(bad)}/{len(self.params)} cones have NaN params in "
                     f"{self.cache_path} (first bad indices: {bad[:5].tolist()}). "
                     "Either rebuild the cache or pass use_params=False.")
-            self._params_mean = self.params.mean(axis=0,
-                                                 dtype=np.float64).astype(np.float32)
-            self._params_std = (self.params.std(axis=0, dtype=np.float64)
-                                + 1e-8).astype(np.float32)
-            self._params_normed = ((self.params - self._params_mean)
-                                   / self._params_std).astype(np.float32)
             self.n_params = self.params.shape[1]
         else:
-            self._params_normed = None
             self.n_params = 0
 
-        # Total input channels for the FNO: density (1) + 1/(1+z) (1) + params.
-        # The training script reads this attribute to size the FNO's lifting
-        # layer, so the architecture auto-adjusts.
-        self.in_channels = 2 + self.n_params
+        self.in_channels = len(self.input_features.channel_names)
 
         # Lazy per-process h5py handle (one per DataLoader worker after fork).
         self._h5: h5py.File | None = None
@@ -229,6 +369,21 @@ class LightconeCubeCache(Dataset):
 
     def __len__(self) -> int:
         return int(self.n_cones)
+
+    def fit_parameter_normalization(
+        self, train_indices: Sequence[int]
+    ) -> ParameterNormalization | None:
+        if not self.input_features.use_params:
+            return None
+        assert self.params is not None
+        return ParameterNormalization.fit(self.params, train_indices)
+
+    def set_parameter_normalization(
+        self, normalization: ParameterNormalization | None
+    ) -> None:
+        if self.input_features.use_params and normalization is None:
+            raise ValueError("parameter-conditioned inputs require normalization")
+        self.parameter_normalization = normalization
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         if self._dens is not None:
@@ -244,13 +399,22 @@ class LightconeCubeCache(Dataset):
             self._z_channel_1d.reshape(1, 1, self.n_z),
             (self.n_x, self.n_y, self.n_z),
         ).astype(np.float32, copy=False)
-        channels = [c_dens, c_z]
+        channels = []
+        if self.input_features.use_density:
+            channels.append(c_dens)
+        if self.input_features.use_redshift:
+            channels.append(c_z)
 
         # Append the 11 z-scored astrophysical params as constant channels.
         # Each is a scalar per-cone, broadcast over the (Nx, Ny, Nz) volume so
         # the lifting layer's 1x1 conv can mix them with the spatial inputs.
-        if self._params_normed is not None:
-            params_normed = self._params_normed[idx]      # (n_params,)
+        if self.input_features.use_params:
+            if self.parameter_normalization is None:
+                raise RuntimeError(
+                    "parameter normalization has not been fitted or loaded"
+                )
+            assert self.params is not None
+            params_normed = self.parameter_normalization.normalize(self.params[idx])
             for j in range(self.n_params):
                 c_p = np.broadcast_to(
                     np.float32(params_normed[j]),
@@ -263,6 +427,7 @@ class LightconeCubeCache(Dataset):
         return {
             "x": torch.from_numpy(np.ascontiguousarray(x)),
             "y": torch.from_numpy(np.ascontiguousarray(y)),
+            "density": torch.from_numpy(np.ascontiguousarray(c_dens)),
         }
 
 

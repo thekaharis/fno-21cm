@@ -10,10 +10,9 @@ Two pipelines live side by side:
   200 Mpc box) at a fixed redshift and predicts `x_HI` on the same grid.
 - **v3 — 3-D, full lightcone.** Takes an entire lightcone cube, interpolates
   the LOS axis down to a fixed 256-cell grid, and predicts the whole `x_HI`
-  cube in a single forward pass. Inputs carry both the density and an explicit
-  `1/(1+z)` channel so the model has direct access to cosmic time along the
-  line of sight; the FNO's grid positional embedding supplies the (x, y, z)
-  coordinates.
+  cube in a single forward pass. The default input carries density, explicit
+  `1/(1+z)`, and the 11 sampled simulation parameters. `INPUT_FEATURES`
+  selects controlled conditioning ablations.
 
 ## Repository layout
 
@@ -52,7 +51,7 @@ Two pipelines live side by side:
 | `fno_21cm_3d.py` | 3-D training entry point (full lightcone in / full cube out). Auto-detects the cube cache; falls back to streaming. |
 | `dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
 | `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
-| `visualize_3d.py` | Loads a 3-D checkpoint; renders z-slice grid, edge-on xz lightcone strip, and voxel scatter into `figures/`. |
+| `visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
 
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
@@ -147,16 +146,27 @@ python build_cubes.py --data "$LIGHTCONE_DIR" --out cubes_3d.h5
 # visualization use it automatically; otherwise they stream raw lightcones.
 python fno_21cm_3d.py
 
-# Visualize predictions from the latest 3-D checkpoint
+# Visualize the best-validation checkpoint (set CHECKPOINT_KIND=final for
+# the final epoch instead).
 python visualize_3d.py
 ```
 
 Each lightcone is interpolated along the LOS axis from its native ~2340 cells
 down to `N_Z = 256` (configurable) so a full cube fits on an A30 (24 GB) at
-`BATCH_SIZE = 1`. The input has two physical channels (density / 10 and
-`1/(1+z)`); the FNO's `positional_embedding="grid"` adds normalized
-(x, y, grid-z) coordinate channels. The cache is sampled uniformly in
-redshift, so grid-z is normalized redshift rather than comoving distance.
+`BATCH_SIZE = 1`. `INPUT_FEATURES` accepts `density`, `params`, `density_z`,
+or `density_z_params` (default). Parameter statistics are fitted only on
+training cones and stored in `run_metadata.json`, so cached and raw loading
+use the same held-out transformation. The FNO's grid positional embedding
+adds normalized (x, y, grid-z) coordinates. The cache is sampled uniformly
+in redshift, so grid-z is normalized redshift rather than comoving distance.
+
+Each training run writes `best_model_state_dict.pt` (lowest globally reduced
+`val_l2`), `final_model_state_dict.pt`, and `run_metadata.json`. Visualization
+defaults to the best checkpoint and reproduces the recorded model and input
+configuration. Its `physical_metrics.json` includes global `x_HI(z)`,
+active-window errors, isotropic power spectra, Fourier cross-correlation, and
+ionized-region size summaries. It also reports X/Y transpose consistency and
+transverse edge-versus-interior residuals for boundary diagnostics.
 
 Key hyperparameters at the top of `fno_21cm_3d.py`:
 `N_MODES = (16, 16, 16)`, `HIDDEN_CHANNELS = 32`, `N_LAYERS = 4`,

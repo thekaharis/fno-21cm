@@ -79,7 +79,7 @@ export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
 export CHECKPOINT_DIR=./checkpoints_3d_ufno_v3_anisoz
-export CHECKPOINT="${CHECKPOINT_DIR}/model_state_dict.pt"
+export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-anisoz
 
 # --- Data paths -------------------------------------------------------------
