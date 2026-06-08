@@ -164,6 +164,44 @@ def _all_reduce_mean(value: float, world_size: int) -> float:
     dist.all_reduce(t, op=dist.ReduceOp.SUM)
     return float(t.item() / world_size)
 
+
+def _all_reduce_weighted_metrics(
+    metrics: dict[str, float | torch.Tensor],
+    local_sample_count: int,
+    world_size: int,
+    device: str | torch.device,
+) -> dict[str, float]:
+    """Combine per-rank metric means using their local sample counts.
+
+    ``neuralop.Trainer.evaluate`` returns a mean over the samples handled by
+    the current rank. Reconstruct each local sum, reduce sums and counts across
+    ranks, then divide once so uneven rank-local shard sizes remain correct.
+    """
+    if local_sample_count < 0:
+        raise ValueError(
+            f"local_sample_count must be non-negative, got {local_sample_count}"
+        )
+
+    keys = list(metrics)
+    if world_size <= 1 or not dist.is_initialized():
+        return {key: float(metrics[key]) for key in keys}
+
+    local_count = float(local_sample_count)
+    packed = [float(metrics[key]) * local_count for key in keys]
+    packed.append(local_count)
+    reduced = torch.tensor(packed, dtype=torch.float64, device=device)
+    dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+
+    global_count = float(reduced[-1].item())
+    if global_count <= 0:
+        raise RuntimeError("distributed evaluation processed zero samples")
+
+    return {
+        key: float(reduced[i].item() / global_count)
+        for i, key in enumerate(keys)
+    }
+
+
 # How often the Trainer runs val/test evaluation AND prints the per-epoch
 # metrics line.  Set to 1 to see train+val+test losses every epoch (adds the
 # eval pass to each epoch's wall clock).  Bump to 5 once training has settled
@@ -228,13 +266,18 @@ class LoggingTrainer(Trainer):
             self._flush_row({})
         return out
 
+    def evaluate(self, *args, **kwargs):
+        local_metrics = super().evaluate(*args, **kwargs)
+        return _all_reduce_weighted_metrics(
+            local_metrics,
+            local_sample_count=self.n_samples,
+            world_size=self._world_size,
+            device=self.device,
+        )
+
     def evaluate_all(self, *args, **kwargs):
         eval_metrics = super().evaluate_all(*args, **kwargs)
-        # Force floats for clean JSON; eval values are tensors or numpy scalars.
-        # The neuralop Trainer with use_distributed=True is expected to
-        # all-reduce eval metrics internally; if it doesn't, the values logged
-        # below will be per-rank-0 partial means -- still informative as a
-        # trend, just biased.
+        # evaluate() has already reduced every loader's metrics across ranks.
         clean = {k: float(v) for k, v in eval_metrics.items()}
         self._flush_row(clean)
         return eval_metrics
