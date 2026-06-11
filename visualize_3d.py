@@ -22,6 +22,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+from torch.utils.data import Subset
 
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
@@ -31,7 +32,7 @@ from dataset_3d import (
     LightconeCubeDataset,
     LightconeCubeCache,
     ParameterNormalization,
-    split_cubes,
+    resolve_split,
 )
 from modeling import (
     ModelConfig,
@@ -404,16 +405,17 @@ def plot_physical_diagnostics(metrics: dict, cone_id: int, split: str):
 
 
 # ---------------------------------------------------- cone-picker by behavior
-def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
+def pick_cones_by_reion_behavior(split_ds, split_cone_ids, target_z,
                                  n_cones: int,
                                  stratify_z: float) -> list[tuple[int, int, float]]:
     """Pick *n_cones* cones from the split that span the reionization range.
 
     Ranks every cone in the split by its mean truth-x_HI at the LOS slice
-    closest to *stratify_z* (a single 2-D slice per cone, cheap to read),
-    then samples at evenly spaced percentiles of that ranking.  Returns a
-    list of ``(idx_in_split, global_cone_id, summary_xhi)`` tuples,
-    ordered from most-reionized (low summary) to least (high summary).
+    closest to *stratify_z*, then samples at evenly spaced percentiles of
+    that ranking.  ``split_cone_ids`` carries the global cone id (file
+    index) of each split position, used purely for labelling.  Returns a
+    list of ``(idx_in_split, cone_id, summary_xhi)`` tuples, ordered from
+    most-reionized (low summary) to least (high summary).
 
     Picking a single "first cone" -- the previous behavior -- gave wildly
     different visuals run to run because LHS-sampled parameter draws produce
@@ -456,7 +458,7 @@ def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
     # Sort by summary x_HI so the rendered figures step cleanly from
     # most-reionized (low <x_HI>) to least (high).
     order.sort(key=lambda i: summaries[i])
-    return [(i, int(split_idx[i]), float(summaries[i])) for i in order]
+    return [(i, int(split_cone_ids[i]), float(summaries[i])) for i in order]
 
 
 # ------------------------------------------------- multi-cone summary plot
@@ -554,10 +556,16 @@ def main():
             preload=False,
             input_features=INPUT_FEATURES,
         )
-    train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx) = split_cubes(
-        dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
+    # Prefer the split recorded at training time (cone ids when available)
+    # over recomputing it -- recomputation silently drifts if the dataset
+    # length or cache row order differs from training.
+    train_idx, val_idx, test_idx, split_source = resolve_split(
+        dataset, RUN_METADATA,
+        val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
-    del train_ds
+    val_ds = Subset(dataset, val_idx)
+    test_ds = Subset(dataset, test_idx)
+    print(f"Split source: {split_source}")
     normalization = PARAMETER_NORMALIZATION
     if INPUT_FEATURES.use_params and normalization is None:
         if RUN_METADATA is not None:
@@ -570,8 +578,8 @@ def main():
         )
         normalization = dataset.fit_parameter_normalization(train_idx)
     dataset.set_parameter_normalization(normalization)
-    print(f"Val cones: {val_idx}")
-    print(f"Test cones: {test_idx}")
+    print(f"Val cones (cone_id): {[int(dataset.cone_ids[r]) for r in val_idx]}")
+    print(f"Test cones (cone_id): {[int(dataset.cone_ids[r]) for r in test_idx]}")
 
     model = load_model(in_channels=getattr(dataset, "in_channels", 2))
     print("Model loaded.")
@@ -585,7 +593,7 @@ def main():
     print(f"Writing figures to: {figures_dir}")
     physical_records = []
 
-    for split_ds, split_idx, split_name in [
+    for split_ds, split_rows, split_name in [
         (val_ds, val_idx, "validation"),
         (test_ds, test_idx, "test"),
     ]:
@@ -593,11 +601,13 @@ def main():
             print(f"No cones in {split_name} split; skipping")
             continue
 
-        # Pick N cones spanning the reionization-behavior range.
+        # Pick N cones spanning the reionization-behavior range.  Labels use
+        # global cone ids, not cache row positions.
+        split_cone_ids = [int(dataset.cone_ids[r]) for r in split_rows]
         print(f"--- {split_name}: picking {N_CONES_PER_SPLIT} cones "
               f"by reionization behavior at z={STRATIFY_Z} ---")
         picks = pick_cones_by_reion_behavior(
-            split_ds, split_idx, target_z,
+            split_ds, split_cone_ids, target_z,
             n_cones=N_CONES_PER_SPLIT, stratify_z=STRATIFY_Z,
         )
         for idx_in_split, cone_id, summ in picks:

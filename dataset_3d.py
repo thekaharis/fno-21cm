@@ -162,6 +162,9 @@ class LightconeCubeDataset(Dataset):
         parameter_normalization: ParameterNormalization | None = None,
     ):
         self.file_paths = [Path(p) for p in file_paths]
+        # Global cone id == position in the sorted file list (the same
+        # ordering build_cubes.py records in the cache's `cone_id` dataset).
+        self.cone_ids = np.arange(len(self.file_paths), dtype=np.int64)
         self.n_z = int(n_z)
         self.target_z = np.linspace(float(z_min), float(z_max), self.n_z,
                                     dtype=np.float64)
@@ -184,7 +187,7 @@ class LightconeCubeDataset(Dataset):
         # Pre-compute the per-LOS redshift channel once; broadcast at __getitem__.
         self._z_channel_1d = (1.0 / (1.0 + self.target_z)).astype(np.float32)
 
-        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         if self.preload:
             if self.input_features.use_params and self.parameter_normalization is None:
                 raise ValueError(
@@ -211,7 +214,7 @@ class LightconeCubeDataset(Dataset):
         self._cache.clear()
 
     # ----------------------------------------------------------------- core
-    def _load(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _load(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         p = self.file_paths[idx]
         with LightconeFile(p) as lf:
             dens = lf.read_interpolated(self.input_field, self.target_z)
@@ -249,7 +252,6 @@ class LightconeCubeDataset(Dataset):
         return (
             torch.from_numpy(np.ascontiguousarray(x)),
             torch.from_numpy(np.ascontiguousarray(y)),
-            torch.from_numpy(np.ascontiguousarray(c_dens)),
         )
 
     def __len__(self) -> int:
@@ -257,12 +259,12 @@ class LightconeCubeDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if index in self._cache:
-            x, y, density = self._cache[index]
+            x, y = self._cache[index]
         else:
-            x, y, density = self._load(index)
+            x, y = self._load(index)
             if self.preload:
-                self._cache[index] = (x, y, density)
-        return {"x": x, "y": y, "density": density}
+                self._cache[index] = (x, y)
+        return {"x": x, "y": y}
 
 
 # ===================================================================== cache
@@ -324,7 +326,11 @@ class LightconeCubeCache(Dataset):
 
         with h5py.File(self.cache_path, "r") as f:
             self.target_z = np.asarray(f["target_z"], dtype=np.float64)
-            self.cone_id = np.asarray(f["cone_id"], dtype=np.int64)
+            # Global file index of each cache row.  Caches merged with the
+            # cone_id-sorted merge have cone_ids == row index; older caches
+            # are shard-interleaved, which is why downstream split / label
+            # logic must go through this map instead of row positions.
+            self.cone_ids = np.asarray(f["cone_id"], dtype=np.int64)
             self.n_cones, self.n_x, self.n_y, self.n_z = f["density"].shape
             if "params" in f:
                 self.params = np.asarray(f["params"], dtype=np.float32)
@@ -427,7 +433,6 @@ class LightconeCubeCache(Dataset):
         return {
             "x": torch.from_numpy(np.ascontiguousarray(x)),
             "y": torch.from_numpy(np.ascontiguousarray(y)),
-            "density": torch.from_numpy(np.ascontiguousarray(c_dens)),
         }
 
 
@@ -480,4 +485,82 @@ def split_cubes(
         Subset(dataset, val_idx),
         Subset(dataset, test_idx),
         (train_idx, val_idx, test_idx),
+    )
+
+
+def rows_for_cone_ids(
+    dataset: LightconeCubeDataset | LightconeCubeCache,
+    cone_ids: Sequence[int],
+) -> list[int]:
+    """Map global cone ids to dataset row indices via ``dataset.cone_ids``.
+
+    Cone ids are invariant to cache row ordering (shard-interleaved merges,
+    rebuilds with a different shard count), so they are the safe currency for
+    persisting a train/val/test split across runs and pipelines.
+    """
+    row_by_id = {
+        int(cid): row for row, cid in enumerate(np.asarray(dataset.cone_ids))
+    }
+    missing = sorted({int(c) for c in cone_ids} - row_by_id.keys())
+    if missing:
+        raise ValueError(
+            f"{len(missing)} recorded cone ids are absent from this dataset "
+            f"(first few: {missing[:5]}); the cache/file set does not cover "
+            "the training-time cones"
+        )
+    return [row_by_id[int(c)] for c in cone_ids]
+
+
+def resolve_split(
+    dataset: LightconeCubeDataset | LightconeCubeCache,
+    run_metadata: dict | None,
+    val_frac: float = 0.1,
+    test_frac: float = 0.1,
+    seed: int = 42,
+) -> tuple[list[int], list[int], list[int], str]:
+    """Resolve train/val/test rows, preferring the recorded training split.
+
+    Preference order:
+      1. ``*_cone_ids`` from run metadata -- invariant to cache row order.
+      2. ``*_indices`` from run metadata (legacy runs) -- row positions,
+         only valid with the exact training-time cache ordering.
+      3. Recomputed seeded split -- last resort when no metadata exists;
+         matches training only if the dataset length is unchanged.
+
+    Returns ``(train_rows, val_rows, test_rows, source)`` where *source*
+    describes which path was taken (for logging).
+    """
+    split_meta = (run_metadata or {}).get("split") or {}
+    if "train_cone_ids" in split_meta:
+        train_rows, val_rows, test_rows = (
+            rows_for_cone_ids(dataset, split_meta[key])
+            for key in ("train_cone_ids", "val_cone_ids", "test_cone_ids")
+        )
+        return train_rows, val_rows, test_rows, "run metadata (cone ids)"
+    if "train_indices" in split_meta:
+        train_rows, val_rows, test_rows = (
+            [int(i) for i in split_meta[key]]
+            for key in ("train_indices", "val_indices", "test_indices")
+        )
+        highest = max(
+            (max(rows) for rows in (train_rows, val_rows, test_rows) if rows),
+            default=-1,
+        )
+        if highest >= len(dataset):
+            raise ValueError(
+                f"run metadata row index {highest} is out of range for this "
+                f"dataset of {len(dataset)} cones; the cache does not match "
+                "the training-time data"
+            )
+        return (
+            train_rows, val_rows, test_rows,
+            "run metadata (legacy row indices; assumes the training-time "
+            "cache ordering)",
+        )
+    train_rows, val_rows, test_rows = make_file_split(
+        len(dataset), seed=seed, val_frac=val_frac, test_frac=test_frac,
+    )
+    return (
+        train_rows, val_rows, test_rows,
+        "recomputed from seed (no run metadata)",
     )

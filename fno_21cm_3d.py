@@ -22,6 +22,7 @@ from neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -413,6 +414,13 @@ def main():
         rprint(f"Dataset: {len(dataset)} cubes  "
                f"({dataset.n_x} x {dataset.n_y} x {dataset.n_z}, "
                f"z in [{dataset.target_z[0]:.2f}, {dataset.target_z[-1]:.2f}])")
+        cache_cone_ids = np.asarray(dataset.cone_ids)
+        if cache_cone_ids.size and np.any(np.diff(cache_cone_ids) < 0):
+            rprint("WARNING: cube cache rows are not sorted by cone_id "
+                   "(cache built before the sorted merge). Row-position "
+                   "splits will not match the raw-streaming pipeline; the "
+                   "run metadata records cone ids so visualization stays "
+                   "consistent.")
     else:
         rprint(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
                f"from {DATA_DIR}. Run build_cubes.py to precompute and speed "
@@ -604,6 +612,12 @@ def main():
             "train_indices": train_idx,
             "val_indices": val_idx,
             "test_indices": test_idx,
+            # Cone ids are invariant to cache row ordering; downstream
+            # tooling (dataset_3d.resolve_split) prefers these over the
+            # row indices above.
+            "train_cone_ids": [int(dataset.cone_ids[i]) for i in train_idx],
+            "val_cone_ids": [int(dataset.cone_ids[i]) for i in val_idx],
+            "test_cone_ids": [int(dataset.cone_ids[i]) for i in test_idx],
         },
         "training": {
             "epochs": N_EPOCHS,

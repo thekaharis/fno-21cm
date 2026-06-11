@@ -34,6 +34,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from torch.utils.data import Subset
 
 # Reuse the standard viz machinery.  We override a couple of constants
 # (N_CONES_PER_SPLIT) and add the active-z picker; everything else --
@@ -52,7 +53,7 @@ from visualize_3d import (
     plot_lightcone_summary_grid,
     pick_cones_by_reion_behavior,
 )
-from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
+from dataset_3d import LightconeCubeDataset, LightconeCubeCache, resolve_split
 from metrics_21cm import find_low_z_cutoff_index
 
 # Pull the CHECKPOINT path lazily so MODEL_KIND env-var changes are still
@@ -171,11 +172,15 @@ def main():
             preload=False,
             input_features=INPUT_FEATURES,
         )
-    train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx) = split_cubes(
-        dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
-        seed=SPLIT_SEED,
+    # Prefer the split recorded at training time (cone ids when available)
+    # over recomputing it -- see dataset_3d.resolve_split.
+    train_idx, val_idx, test_idx, split_source = resolve_split(
+        dataset, RUN_METADATA,
+        val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
-    del train_ds
+    val_ds = Subset(dataset, val_idx)
+    test_ds = Subset(dataset, test_idx)
+    print(f"Split source: {split_source}")
     normalization = PARAMETER_NORMALIZATION
     if INPUT_FEATURES.use_params and normalization is None:
         if RUN_METADATA is not None:
@@ -201,7 +206,7 @@ def main():
     figures_dir = make_run_folder(FIGURES_BASE, tag=f"{VIZ_TAG}-detailed")
     print(f"Writing figures to: {figures_dir}")
 
-    for split_ds, split_idx, split_name in [
+    for split_ds, split_rows, split_name in [
         (val_ds, val_idx, "validation"),
         (test_ds, test_idx, "test"),
     ]:
@@ -209,10 +214,12 @@ def main():
             print(f"No cones in {split_name} split; skipping")
             continue
 
+        # Labels use global cone ids, not cache row positions.
+        split_cone_ids = [int(dataset.cone_ids[r]) for r in split_rows]
         print(f"--- {split_name}: picking {N_CONES_PER_SPLIT} cones "
               f"by reionization behavior at z={STRATIFY_Z} ---")
         picks = pick_cones_by_reion_behavior(
-            split_ds, split_idx, target_z,
+            split_ds, split_cone_ids, target_z,
             n_cones=N_CONES_PER_SPLIT, stratify_z=STRATIFY_Z,
         )
         for idx_in_split, cone_id, summ in picks:

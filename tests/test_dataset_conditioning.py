@@ -76,6 +76,9 @@ def test_raw_and_cache_channel_contracts_are_equivalent(tmp_path):
 
     assert raw.input_features.channel_names == cache.input_features.channel_names
     assert raw.in_channels == cache.in_channels == 13
+    # Samples carry exactly the tensors the Trainer consumes -- anything
+    # else gets pinned and copied to the GPU every step for nothing.
+    assert set(raw[0]) == set(cache[0]) == {"x", "y"}
     assert np.allclose(raw[0]["x"].numpy(), cache[0]["x"].numpy())
     assert np.allclose(raw[0]["y"].numpy(), cache[0]["y"].numpy())
 
