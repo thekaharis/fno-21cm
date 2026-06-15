@@ -467,19 +467,27 @@ def split_cubes(
     test_frac: float = 0.1,
     seed: int = 42,
 ) -> tuple[Subset, Subset, Subset, tuple[list[int], list[int], list[int]]]:
-    """Split a cube dataset into train / val / test subsets.
+    """Split a cube dataset into train / val / test subsets by physical cone.
 
     Works with either :class:`LightconeCubeDataset` (raw streaming) or
-    :class:`LightconeCubeCache` (pre-computed cache) -- both expose the same
-    one-cube-per-index interface, so the split is index-level.
+    :class:`LightconeCubeCache` (pre-computed cache).  The split is computed
+    on ``dataset.cone_ids`` (the global file indices) and then mapped back to
+    dataset row indices.  This guarantees that raw and cached pipelines select
+    the same physical cones for the same seed, even when a cache has
+    shard-interleaved rows.
 
     Returns ``(train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx))``.
-    The raw index lists are returned alongside the ``Subset`` views so the
-    training script can print and sanity-check them.
+    The returned indices are dataset row positions suitable for ``Subset`` and
+    for indexing ``dataset.params``; the training script can recover the
+    physical cone ids via ``dataset.cone_ids[idx]`` for logging.
     """
-    train_idx, val_idx, test_idx = make_file_split(
-        len(dataset), seed=seed, val_frac=val_frac, test_frac=test_frac,
+    cone_ids = np.asarray(dataset.cone_ids)
+    train_cids, val_cids, test_cids = make_file_split(
+        len(cone_ids), seed=seed, val_frac=val_frac, test_frac=test_frac,
     )
+    train_idx = rows_for_cone_ids(dataset, train_cids)
+    val_idx = rows_for_cone_ids(dataset, val_cids)
+    test_idx = rows_for_cone_ids(dataset, test_cids)
     return (
         Subset(dataset, train_idx),
         Subset(dataset, val_idx),

@@ -444,14 +444,20 @@ def main():
     train_ds, val_ds, test_ds, (train_idx, val_idx, test_idx) = split_cubes(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
-    overlap = set(train_idx) & set(val_idx) | set(train_idx) & set(test_idx) \
-              | set(val_idx) & set(test_idx)
-    assert not overlap, f"Split leakage: {overlap}"
+    train_cone_ids = [int(dataset.cone_ids[i]) for i in train_idx]
+    val_cone_ids = [int(dataset.cone_ids[i]) for i in val_idx]
+    test_cone_ids = [int(dataset.cone_ids[i]) for i in test_idx]
+    overlap = (
+        set(train_cone_ids) & set(val_cone_ids)
+        | set(train_cone_ids) & set(test_cone_ids)
+        | set(val_cone_ids) & set(test_cone_ids)
+    )
+    assert not overlap, f"Split leakage (cone ids): {overlap}"
     parameter_normalization = dataset.fit_parameter_normalization(train_idx)
     dataset.set_parameter_normalization(parameter_normalization)
-    rprint(f"Train: {len(train_ds)} cones {train_idx}")
-    rprint(f"Val:   {len(val_ds)} cones {val_idx}")
-    rprint(f"Test:  {len(test_ds)} cones {test_idx}")
+    rprint(f"Train: {len(train_ds)} cones {train_cone_ids}")
+    rprint(f"Val:   {len(val_ds)} cones {val_cone_ids}")
+    rprint(f"Test:  {len(test_ds)} cones {test_cone_ids}")
 
     # -------------------------------------------- 3. dataloaders
     # Under DDP each rank consumes a disjoint shard of each split.  The

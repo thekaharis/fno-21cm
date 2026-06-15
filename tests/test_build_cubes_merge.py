@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import h5py
 import numpy as np
+import pytest
 
 from build_cubes import merge
 from lightcone_params import PARAM_NAMES
@@ -51,3 +52,53 @@ def test_merge_sorts_rows_by_cone_id(tmp_path):
         assert np.all(density[row] == float(cid))
         assert np.allclose(xhi[row], float(cid) / 10.0)
         assert np.all(params[row] == float(cid))
+
+
+def test_merge_rejects_duplicate_cone_ids(tmp_path):
+    out = tmp_path / "cubes_3d.h5"
+    _write_shard(tmp_path / "cubes_3d.shard000.h5", [0, 1])
+    _write_shard(tmp_path / "cubes_3d.shard001.h5", [1, 2])
+
+    with pytest.raises(ValueError, match="not a complete permutation"):
+        merge(out, num_shards=2, compress=False)
+
+
+def test_merge_rejects_missing_cone_ids(tmp_path):
+    out = tmp_path / "cubes_3d.h5"
+    _write_shard(tmp_path / "cubes_3d.shard000.h5", [0, 2])
+    _write_shard(tmp_path / "cubes_3d.shard001.h5", [3, 4])
+
+    with pytest.raises(ValueError, match="not a complete permutation"):
+        merge(out, num_shards=2, compress=False)
+
+
+def test_merge_row_to_cone_mapping_invariant_to_shard_count(tmp_path):
+    """A 1-shard build and a multi-shard merge yield identical row-to-cone maps."""
+    n_cones = 7
+    nx = ny = 2
+    n_z = 4
+
+    # Simulate the output of ``build --num-shards 1`` writing directly to out.
+    one_shard_out = tmp_path / "merged_1.h5"
+    _write_shard(one_shard_out, list(range(n_cones)), nx=nx, ny=ny, n_z=n_z)
+
+    # Multi-shard merge: shard s holds files [s, s + num_shards, ...].
+    multi_shard_out = tmp_path / "merged_3.h5"
+    num_shards = 3
+    for s in range(num_shards):
+        cone_ids = list(range(s, n_cones, num_shards))
+        _write_shard(
+            tmp_path / f"merged_3.shard{s:03d}.h5",
+            cone_ids, nx=nx, ny=ny, n_z=n_z,
+        )
+    merge(multi_shard_out, num_shards=num_shards, compress=False)
+
+    with h5py.File(one_shard_out, "r") as f:
+        ids_1 = f["cone_id"][:].tolist()
+        dens_1 = f["density"][:]
+    with h5py.File(multi_shard_out, "r") as f:
+        ids_3 = f["cone_id"][:].tolist()
+        dens_3 = f["density"][:]
+
+    assert ids_1 == ids_3 == list(range(n_cones))
+    assert np.array_equal(dens_1, dens_3)

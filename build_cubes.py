@@ -222,10 +222,28 @@ def merge(out: Path, num_shards: int, compress: bool) -> None:
             shard_cone_ids.append(np.asarray(f["cone_id"][:], dtype=np.int64))
     all_ids = np.concatenate(shard_cone_ids)
     n_total = int(all_ids.size)
-    if np.unique(all_ids).size != n_total:
-        print("[merge] WARNING: duplicate cone ids across shards; rows are "
-              "still cone_id-sorted but the cache contains repeated cones",
-              flush=True)
+
+    # Validate uniqueness and completeness.  Cone ids are global file indices
+    # from the sorted glob; the merged cache is only canonical if every id
+    # in 0..N-1 appears exactly once.  Fail loudly rather than write a cache
+    # that silently duplicates or omits physical cones.
+    sorted_ids = np.sort(all_ids)
+    expected = np.arange(n_total, dtype=all_ids.dtype)
+    if not np.array_equal(sorted_ids, expected):
+        ids_set = set(int(i) for i in all_ids)
+        missing = sorted(set(range(n_total)) - ids_set)
+        extra = sorted(ids_set - set(range(n_total)))
+        duplicates = sorted({
+            int(i) for i, count in zip(*np.unique(all_ids, return_counts=True))
+            if count > 1
+        })
+        raise ValueError(
+            f"Shard cone_ids are not a complete permutation of 0..{n_total - 1}. "
+            f"missing={missing[:10]}{'...' if len(missing) > 10 else ''}, "
+            f"extra={extra[:10]}{'...' if len(extra) > 10 else ''}, "
+            f"duplicates={duplicates[:10]}{'...' if len(duplicates) > 10 else ''}"
+        )
+
     # Destination row of each global source position = rank in cone_id order.
     order = np.argsort(all_ids, kind="stable")
     dst_of_src = np.empty(n_total, dtype=np.int64)
