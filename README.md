@@ -27,7 +27,8 @@ Two pipelines live side by side:
 ├── lightcone_params.py            # shared conditioning-parameter schema
 ├── build_trainset.py              # v2 slice cache builder
 ├── build_cubes.py                 # v3 cube cache builder
-├── visualize.py, visualize_3d.py  # checkpoint -> plots
+├── visualize.py, visualize_3d.py  # checkpoint -> prediction plots
+├── visualize_spectral_weights.py  # epoch -> Fourier-weight diagnostics
 ├── loader.py                      # shared HDF5 lightcone reader
 ├── slurm/                         # all sbatch scripts (cluster)
 ├── figures/                       # all generated plots
@@ -52,6 +53,7 @@ Two pipelines live side by side:
 | `dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
 | `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
 | `visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
+| `visualize_spectral_weights.py` | Plots per-layer Fourier-weight magnitudes over training epochs, selected-epoch profiles, and high-mode/low-mode cutoff ratios. |
 
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
@@ -67,8 +69,10 @@ Two pipelines live side by side:
 | `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
 | `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
+| `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 
-All four viz scripts write into a per-run subfolder under `figures/` whose
+The prediction-visualization scripts write into a per-run subfolder under
+`figures/` whose
 name encodes the model variant, timestamp, and (when running under SLURM)
 the job id — e.g. `figures/ufno_20260606-143022_job3965704/`. A
 `run_info.txt` is dropped in each folder summarising the config so old
@@ -149,6 +153,9 @@ python fno_21cm_3d.py
 # Visualize the best-validation checkpoint (set CHECKPOINT_KIND=final for
 # the final epoch instead).
 python visualize_3d.py
+
+# Plot Fourier weight evolution from initialization through every epoch.
+python visualize_spectral_weights.py
 ```
 
 Each lightcone is interpolated along the LOS axis from its native ~2340 cells
@@ -161,7 +168,17 @@ adds normalized (x, y, grid-z) coordinates. The cache is sampled uniformly
 in redshift, so grid-z is normalized redshift rather than comoving distance.
 
 Each training run writes `best_model_state_dict.pt` (lowest globally reduced
-`val_l2`), `final_model_state_dict.pt`, and `run_metadata.json`. Visualization
+`val_l2`), `final_model_state_dict.pt`, `run_metadata.json`, and a compact
+`spectral_weight_history.npz`. The latter stores channel-aggregated RMS
+complex-weight magnitudes for every Fourier layer at initialization and after
+every epoch. `visualize_spectral_weights.py` turns it into mode/epoch heatmaps,
+selected-epoch profiles, a high-mode/low-mode cutoff ratio, and a CSV export.
+The transverse axes fold positive and negative frequencies into absolute
+mode index; the LOS axis follows the non-negative real-FFT convention. Thus,
+for NeuralOperator `n_modes=(16,16,16)`, the plots show absolute transverse
+indices `0..8` and LOS indices `0..8`, rather than 16 distinct positive
+wavenumbers.
+Visualization
 defaults to the best checkpoint and reproduces the recorded model and input
 configuration. Its `physical_metrics.json` includes global `x_HI(z)`,
 active-window errors, isotropic power spectra, Fourier cross-correlation, and

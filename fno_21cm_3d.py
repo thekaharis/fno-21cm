@@ -47,6 +47,7 @@ from dataset_3d import (
 from losses import AbsoluteLoss, BinaryCrossEntropyTerm, WeightedLoss
 from modeling import ModelConfig, TrainerModel, build_3d_model
 from run_metadata import write_run_metadata
+from spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
 
 
 # ------------------------------------------------------------------ config
@@ -116,6 +117,7 @@ TEST_FRACTION = 0.1
 _DEFAULT_CKPT = str(MODEL_CONFIG.default_checkpoint_dir)
 CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", _DEFAULT_CKPT)
 METRICS_PATH = f"{CHECKPOINT_DIR}/metrics.jsonl"
+SPECTRAL_HISTORY_PATH = f"{CHECKPOINT_DIR}/{HISTORY_FILENAME}"
 
 # Learning-rate scaling rule for multi-GPU DDP runs.  "sqrt" is conservative
 # and rarely diverges; "linear" extracts more wall-clock speed but may need
@@ -251,8 +253,15 @@ class LoggingTrainer(Trainer):
     Read it back with ``pandas.read_json(path, lines=True)``.
     """
 
-    def __init__(self, *args, metrics_path: str | Path | None = None,
-                 rank: int = 0, world_size: int = 1, **kwargs):
+    def __init__(
+        self,
+        *args,
+        metrics_path: str | Path | None = None,
+        spectral_history_path: str | Path | None = None,
+        rank: int = 0,
+        world_size: int = 1,
+        **kwargs,
+    ):
         if kwargs.get("use_distributed", False):
             raise ValueError(
                 "LoggingTrainer must not wrap DDP itself; fno_21cm_3d.py "
@@ -270,6 +279,14 @@ class LoggingTrainer(Trainer):
         self._last_train: dict | None = None
         self.best_epoch: int | None = None
         self.best_metric: float | None = None
+        self.spectral_history = None
+        if spectral_history_path is not None and self._is_rank_0:
+            self.spectral_history = SpectralWeightHistory(
+                spectral_history_path,
+                self.model,
+                reset=True,
+            )
+            self.spectral_history.record(-1)
 
     def train_one_epoch(self, epoch, train_loader, training_loss):
         # DistributedSampler must be told the epoch so it reshuffles
@@ -296,6 +313,8 @@ class LoggingTrainer(Trainer):
             avg_lasso_loss=float(avg_lasso_global),
             epoch_train_time=float(t),
         )
+        if self.spectral_history is not None:
+            self.spectral_history.record(int(epoch))
         if self.eval_interval and (epoch % self.eval_interval != 0):
             self._flush_row({})
         return out
@@ -578,6 +597,7 @@ def main():
         use_distributed=False,
         verbose=is_rank_0,                 # silence non-rank-0 Trainer prints
         metrics_path=METRICS_PATH,
+        spectral_history_path=SPECTRAL_HISTORY_PATH,
         rank=rank,
         world_size=world_size,
     )
@@ -597,6 +617,7 @@ def main():
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
     rprint(f"Metrics JSONL: {METRICS_PATH}")
+    rprint(f"Spectral weight history: {SPECTRAL_HISTORY_PATH}")
 
     # -------------------------------------------- 8. train
     metadata = {
@@ -635,6 +656,7 @@ def main():
         "checkpoints": {
             "best": "best_model_state_dict.pt",
             "final": "final_model_state_dict.pt",
+            "spectral_weight_history": HISTORY_FILENAME,
         },
     }
     if is_rank_0:
