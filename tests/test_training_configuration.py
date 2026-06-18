@@ -25,7 +25,7 @@ def test_h1_uses_periodic_xy_and_nonperiodic_redshift() -> None:
     assert tuple(loss.measure) == (1.0, 1.0, 1.0)
 
 
-def test_h1_redshift_derivative_does_not_wrap_endpoints() -> None:
+def test_h1_redshift_derivative_uses_only_centered_interior_cells() -> None:
     loss = _build_h1_loss()
     z = torch.arange(8, dtype=torch.float32)
     field = z.view(1, 1, 1, 1, 8).expand(1, 1, 4, 4, 8)
@@ -35,6 +35,30 @@ def test_h1_redshift_derivative_does_not_wrap_endpoints() -> None:
         torch.zeros_like(field),
         quadrature=(1.0, 1.0, 1.0),
     )
-    dz = terms[3].reshape_as(field)
+    dz = terms[3].reshape(1, 1, 4, 4, 6)
 
     assert torch.allclose(dz, torch.ones_like(dz))
+
+
+def test_h1_los_derivative_has_no_endpoint_stencil() -> None:
+    loss = _build_h1_loss()
+    prediction = torch.zeros(1, 1, 4, 4, 8)
+    target = torch.zeros_like(prediction)
+    prediction[..., 0] = 1.0
+    prediction[..., -1] = -1.0
+
+    prediction_terms, target_terms = loss.compute_terms(
+        prediction,
+        target,
+        quadrature=(1.0, 1.0, 1.0),
+    )
+
+    # Endpoint errors remain in the H1 value term. They influence only the
+    # adjacent centered stencil; there are no one-sided derivative samples
+    # located at the endpoints.
+    assert not torch.equal(prediction_terms[0], target_terms[0])
+    dz = prediction_terms[3].reshape(1, 1, 4, 4, 6)
+    expected = torch.zeros_like(dz)
+    expected[..., 0] = -0.5
+    expected[..., -1] = -0.5
+    assert torch.equal(dz, expected)

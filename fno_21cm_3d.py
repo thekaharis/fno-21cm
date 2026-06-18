@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from neuralop import Trainer
-from neuralop import LpLoss, H1Loss
+from neuralop import LpLoss
 from neuralop.training.training_state import save_training_state
 from neuralop.utils import count_model_params
 
@@ -44,7 +44,12 @@ from dataset_3d import (
     LightconeCubeCache,
     split_cubes,
 )
-from losses import AbsoluteLoss, BinaryCrossEntropyTerm, WeightedLoss
+from losses import (
+    AbsoluteLoss,
+    BinaryCrossEntropyTerm,
+    LightconeH1Loss,
+    WeightedLoss,
+)
 from modeling import ModelConfig, TrainerModel, build_3d_model
 from run_metadata import write_run_metadata
 from spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
@@ -222,20 +227,9 @@ def _all_reduce_weighted_metrics(
 EVAL_INTERVAL = 1
 
 
-def _build_h1_loss() -> H1Loss:
-    """H1 norm on normalized X/Y/redshift coordinates.
-
-    The transverse simulation plane is periodic. The lightcone redshift axis
-    is not: its endpoints represent z=5 and z=25 and must never be connected
-    by a wrapped finite difference.
-    """
-    return H1Loss(
-        d=3,
-        measure=(1.0, 1.0, 1.0),
-        periodic_in_x=True,
-        periodic_in_y=True,
-        periodic_in_z=False,
-    )
+def _build_h1_loss() -> LightconeH1Loss:
+    """H1 objective with periodic X/Y and centered interior LOS differences."""
+    return LightconeH1Loss(measure=(1.0, 1.0, 1.0))
 
 
 class LoggingTrainer(Trainer):
@@ -612,7 +606,7 @@ def main():
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
            f"+ {LOSS_BCE_WEIGHT}*BCE  "
-           f"(H1: periodic X/Y, non-periodic normalized-redshift Z)")
+           f"(H1: periodic X/Y, centered interior-only Z)")
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")

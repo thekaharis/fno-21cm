@@ -190,9 +190,9 @@ Key hyperparameters at the top of `fno_21cm_3d.py`:
 `BATCH_SIZE = 1`, `LEARNING_RATE = 5e-4`, `N_EPOCHS = 100`.
 
 Loss: `0.5 * absL2 + 0.5 * absH1` with `d=3`. H1 uses periodic finite
-differences in the transverse X/Y plane and non-periodic differences along
-the normalized-redshift LOS axis. This adds gradient sensitivity along all
-three axes without connecting the unrelated `z=5` and `z=25` endpoints.
+differences in the transverse X/Y plane and centered differences on interior
+LOS cells. The value term still covers the complete cube, but the unrelated
+`z=5` and `z=25` endpoints are excluded from the LOS derivative term.
 
 ### 2-D (legacy, kept for comparison)
 
