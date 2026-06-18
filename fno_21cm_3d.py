@@ -343,21 +343,22 @@ class LoggingTrainer(Trainer):
         losses, output = super().eval_one_batch(
             sample, eval_losses, return_output=True
         )
-        detached = output.detach()
-        self._pred_sum += detached.sum(dtype=torch.float64)
-        self._pred_sq_sum += detached.square().sum(dtype=torch.float64)
-        self._pred_low_count += (detached <= 1e-4).sum()
-        self._pred_high_count += (detached >= 1.0 - 1e-4).sum()
-        self._pred_count += detached.numel()
+        # A regular 8-cell stride samples ~0.2% of the cube, which is ample
+        # for detecting all-zero/all-one collapse without adding several
+        # full-volume float64 reductions to every evaluation batch.
+        sampled = output.detach()[..., ::8, ::8, ::8]
+        self._pred_sum += sampled.sum()
+        self._pred_sq_sum += sampled.square().sum()
+        self._pred_low_count += (sampled <= 1e-4).sum()
+        self._pred_high_count += (sampled >= 1.0 - 1e-4).sum()
+        self._pred_count += sampled.numel()
         return losses, output if return_output else None
 
     def evaluate(self, *args, **kwargs):
         log_prefix = str(kwargs.get("log_prefix", "")).strip()
         metric_prefix = f"{log_prefix}_" if log_prefix else ""
-        self._pred_sum = torch.zeros((), dtype=torch.float64, device=self.device)
-        self._pred_sq_sum = torch.zeros(
-            (), dtype=torch.float64, device=self.device
-        )
+        self._pred_sum = torch.zeros((), dtype=torch.float32, device=self.device)
+        self._pred_sq_sum = torch.zeros((), dtype=torch.float32, device=self.device)
         self._pred_low_count = torch.zeros(
             (), dtype=torch.float64, device=self.device
         )
@@ -576,6 +577,10 @@ def main():
     # shows life within an epoch (the neuralop Trainer logs per-epoch only).
     train_loader = ProgressLoader(train_loader, log_every=LOG_EVERY,
                                   tag="train", rank=rank)
+    val_loader = ProgressLoader(val_loader, log_every=LOG_EVERY,
+                                tag="val", rank=rank)
+    test_loader = ProgressLoader(test_loader, log_every=LOG_EVERY,
+                                 tag="test", rank=rank)
     test_loaders = {"val": val_loader, "test": test_loader}
 
     # -------------------------------------------- 4. model + DDP wrap
