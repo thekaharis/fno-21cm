@@ -194,6 +194,14 @@ differences in the transverse X/Y plane and centered differences on interior
 LOS cells. The value term still covers the complete cube, but the unrelated
 `z=5` and `z=25` endpoints are excluded from the LOS derivative term.
 
+For U-FNO, training starts with the L2 term and linearly introduces H1 over
+five epochs. Its default base learning rate is `1e-4` and gradients are clipped
+to norm `1.0`, preventing the output sigmoid from collapsing to all zero.
+Override these safeguards with `UFNO_LEARNING_RATE`,
+`UFNO_H1_WARMUP_EPOCHS`, and `UFNO_GRAD_CLIP_NORM`. Metrics include
+`val/test_pred_mean`, `pred_std`, and saturation fractions so output collapse
+is visible after the first epoch.
+
 ### 2-D (legacy, kept for comparison)
 
 ```bash

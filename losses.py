@@ -42,6 +42,47 @@ class WeightedLoss:
         )
 
 
+class ScheduledWeightedLoss(WeightedLoss):
+    """Weighted loss whose selected terms ramp in over early epochs."""
+
+    def __init__(
+        self,
+        *terms: tuple[float, Callable],
+        warmup_terms: tuple[int, ...] = (),
+        warmup_epochs: int = 0,
+    ):
+        super().__init__(*terms)
+        self.warmup_terms = frozenset(int(index) for index in warmup_terms)
+        self.warmup_epochs = max(0, int(warmup_epochs))
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = max(0, int(epoch))
+
+    @property
+    def warmup_factor(self) -> float:
+        if self.warmup_epochs == 0:
+            return 1.0
+        return min(1.0, self.epoch / self.warmup_epochs)
+
+    @property
+    def active_weights(self) -> tuple[float, ...]:
+        factor = self.warmup_factor
+        return tuple(
+            weight * factor if index in self.warmup_terms else weight
+            for index, (weight, _) in enumerate(self.terms)
+        )
+
+    def __call__(self, out, y, **kwargs):
+        return sum(
+            active_weight * loss(out, y, **kwargs)
+            for active_weight, (_, loss) in zip(
+                self.active_weights, self.terms, strict=True
+            )
+            if active_weight != 0.0
+        )
+
+
 class BinaryCrossEntropyTerm:
     """Voxel-mean BCE for neutral-fraction targets in ``[0, 1]``."""
 

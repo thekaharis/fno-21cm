@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from fno_21cm_3d import LoggingTrainer, _build_h1_loss
+from losses import ScheduledWeightedLoss
 
 
 def test_logging_trainer_rejects_trainer_owned_ddp() -> None:
@@ -62,3 +63,27 @@ def test_h1_los_derivative_has_no_endpoint_stencil() -> None:
     expected[..., 0] = -0.5
     expected[..., -1] = -0.5
     assert torch.equal(dz, expected)
+
+
+def test_scheduled_loss_ramps_only_h1_term() -> None:
+    constant = lambda out, y, **kwargs: out.new_tensor(1.0)
+    loss = ScheduledWeightedLoss(
+        (0.5, constant),
+        (0.5, constant),
+        (0.0, constant),
+        warmup_terms=(1,),
+        warmup_epochs=5,
+    )
+    prediction = torch.zeros(1)
+
+    loss.set_epoch(0)
+    assert loss.active_weights == (0.5, 0.0, 0.0)
+    assert loss(prediction, prediction).item() == pytest.approx(0.5)
+
+    loss.set_epoch(2)
+    assert loss.active_weights == (0.5, 0.2, 0.0)
+    assert loss(prediction, prediction).item() == pytest.approx(0.7)
+
+    loss.set_epoch(5)
+    assert loss.active_weights == (0.5, 0.5, 0.0)
+    assert loss(prediction, prediction).item() == pytest.approx(1.0)

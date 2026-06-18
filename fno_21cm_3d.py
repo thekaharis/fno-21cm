@@ -48,6 +48,7 @@ from losses import (
     AbsoluteLoss,
     BinaryCrossEntropyTerm,
     LightconeH1Loss,
+    ScheduledWeightedLoss,
     WeightedLoss,
 )
 from modeling import ModelConfig, TrainerModel, build_3d_model
@@ -86,6 +87,10 @@ UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
 N_LAYERS = MODEL_CONFIG.n_layers
 BATCH_SIZE = 1                      # 3-D cubes are heavy; raise after profiling
 LEARNING_RATE = 5e-4
+# U-FNO's sigmoid output can saturate under the derivative-heavy H1 objective.
+# Use a more conservative base LR than the plain FNO; still apply the DDP
+# scaling rule below. Both values remain environment-overridable.
+UFNO_LEARNING_RATE = float(os.environ.get("UFNO_LEARNING_RATE", "1e-4"))
 WEIGHT_DECAY = 1e-5
 # N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
@@ -98,6 +103,12 @@ N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
+
+# Stability controls for U-FNO. H1 starts at zero and ramps linearly to its
+# configured weight, allowing the L2 value term to establish a non-saturated
+# output before derivative matching begins.
+UFNO_H1_WARMUP_EPOCHS = int(os.environ.get("UFNO_H1_WARMUP_EPOCHS", "5"))
+UFNO_GRAD_CLIP_NORM = float(os.environ.get("UFNO_GRAD_CLIP_NORM", "1.0"))
 
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
@@ -270,6 +281,9 @@ class LoggingTrainer(Trainer):
         self._is_rank_0 = (self._rank == 0)
         if self.metrics_path is not None and self._is_rank_0:
             self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            # This entry point does not resume runs. Avoid mixing a fresh
+            # trajectory with stale rows from an older checkpoint directory.
+            self.metrics_path.unlink(missing_ok=True)
         self._last_train: dict | None = None
         self.best_epoch: int | None = None
         self.best_metric: float | None = None
@@ -288,6 +302,8 @@ class LoggingTrainer(Trainer):
         sampler = getattr(train_loader, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(int(epoch))
+        if hasattr(training_loss, "set_epoch"):
+            training_loss.set_epoch(int(epoch))
 
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, avg_lasso, t = out
@@ -307,14 +323,64 @@ class LoggingTrainer(Trainer):
             avg_lasso_loss=float(avg_lasso_global),
             epoch_train_time=float(t),
         )
+        if hasattr(training_loss, "active_weights"):
+            active = training_loss.active_weights
+            self._last_train.update(
+                active_l2_weight=float(active[0]),
+                active_h1_weight=float(active[1]),
+                active_bce_weight=float(active[2]),
+            )
+        grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
+        if grad_norm is not None:
+            self._last_train["last_grad_norm"] = float(grad_norm)
         if self.spectral_history is not None:
             self.spectral_history.record(int(epoch))
         if self.eval_interval and (epoch % self.eval_interval != 0):
             self._flush_row({})
         return out
 
+    def eval_one_batch(self, sample, eval_losses, return_output=False):
+        losses, output = super().eval_one_batch(
+            sample, eval_losses, return_output=True
+        )
+        detached = output.detach()
+        self._pred_sum += detached.sum(dtype=torch.float64)
+        self._pred_sq_sum += detached.square().sum(dtype=torch.float64)
+        self._pred_low_count += (detached <= 1e-4).sum()
+        self._pred_high_count += (detached >= 1.0 - 1e-4).sum()
+        self._pred_count += detached.numel()
+        return losses, output if return_output else None
+
     def evaluate(self, *args, **kwargs):
+        log_prefix = str(kwargs.get("log_prefix", "")).strip()
+        metric_prefix = f"{log_prefix}_" if log_prefix else ""
+        self._pred_sum = torch.zeros((), dtype=torch.float64, device=self.device)
+        self._pred_sq_sum = torch.zeros(
+            (), dtype=torch.float64, device=self.device
+        )
+        self._pred_low_count = torch.zeros(
+            (), dtype=torch.float64, device=self.device
+        )
+        self._pred_high_count = torch.zeros(
+            (), dtype=torch.float64, device=self.device
+        )
+        self._pred_count = 0
         local_metrics = super().evaluate(*args, **kwargs)
+        count = max(int(self._pred_count), 1)
+        pred_mean = self._pred_sum / count
+        pred_variance = (self._pred_sq_sum / count - pred_mean.square()).clamp_min(0)
+        local_metrics.update(
+            **{
+                f"{metric_prefix}pred_mean": float(pred_mean.item()),
+                f"{metric_prefix}pred_std": float(pred_variance.sqrt().item()),
+                f"{metric_prefix}pred_sat_low": float(
+                    (self._pred_low_count / count).item()
+                ),
+                f"{metric_prefix}pred_sat_high": float(
+                    (self._pred_high_count / count).item()
+                ),
+            }
+        )
         return _all_reduce_weighted_metrics(
             local_metrics,
             local_sample_count=self.n_samples,
@@ -543,17 +609,31 @@ def main():
 
     # -------------------------------------------- 5. optimizer / scheduler
     # LR scaling rule for the effective global batch (BATCH_SIZE * world_size).
+    base_lr = (
+        UFNO_LEARNING_RATE if MODEL_KIND == "ufno" else LEARNING_RATE
+    )
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
         if LR_SCALE_RULE == "linear":
-            scaled_lr = LEARNING_RATE * world_size
+            scaled_lr = base_lr * world_size
         else:  # sqrt
-            scaled_lr = LEARNING_RATE * (world_size ** 0.5)
+            scaled_lr = base_lr * (world_size ** 0.5)
     else:
         global_bs = BATCH_SIZE
-        scaled_lr = LEARNING_RATE
+        scaled_lr = base_lr
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=scaled_lr, weight_decay=WEIGHT_DECAY)
+    if MODEL_KIND == "ufno" and UFNO_GRAD_CLIP_NORM > 0:
+        def _clip_before_step(optim, args, kwargs):
+            norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=UFNO_GRAD_CLIP_NORM
+            )
+            # Avoid synchronizing CUDA on every batch. The epoch logger
+            # converts only the final recorded norm to a Python float.
+            optim._last_grad_norm = norm.detach()
+            return None
+
+        optimizer.register_step_pre_hook(_clip_before_step)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                            T_max=N_EPOCHS)
 
@@ -565,11 +645,19 @@ def main():
     l2_loss = LpLoss(d=3, p=2)
     h1_loss = _build_h1_loss()
     bce_loss = BinaryCrossEntropyTerm()
-    train_loss_fn = WeightedLoss(
+    loss_terms = (
         (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
         (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
         (LOSS_BCE_WEIGHT, bce_loss),
     )
+    if MODEL_KIND == "ufno":
+        train_loss_fn = ScheduledWeightedLoss(
+            *loss_terms,
+            warmup_terms=(1,),
+            warmup_epochs=UFNO_H1_WARMUP_EPOCHS,
+        )
+    else:
+        train_loss_fn = WeightedLoss(*loss_terms)
     # Eval losses are tracked separately in metrics.jsonl so we can see how
     # each component evolves.  Keys here become column names in JSONL.
     eval_losses = {
@@ -598,7 +686,7 @@ def main():
 
     rprint(f"\nDevice: {device}")
     rprint(f"Batch size (per rank): {BATCH_SIZE}  global: {global_bs}")
-    rprint(f"LR: {scaled_lr:g}  (scaled from {LEARNING_RATE:g} by {LR_SCALE_RULE} "
+    rprint(f"LR: {scaled_lr:g}  (scaled from {base_lr:g} by {LR_SCALE_RULE} "
            f"rule for {world_size} ranks)")
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Model: {MODEL_CONFIG.describe()}")
@@ -607,6 +695,9 @@ def main():
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
            f"+ {LOSS_BCE_WEIGHT}*BCE  "
            f"(H1: periodic X/Y, centered interior-only Z)")
+    if MODEL_KIND == "ufno":
+        rprint(f"UFNO stability: H1 warmup={UFNO_H1_WARMUP_EPOCHS} epochs, "
+               f"gradient clip={UFNO_GRAD_CLIP_NORM:g}")
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
@@ -642,6 +733,15 @@ def main():
         },
         "training": {
             "epochs": N_EPOCHS,
+            "base_learning_rate": base_lr,
+            "scaled_learning_rate": scaled_lr,
+            "lr_scale_rule": LR_SCALE_RULE,
+            "ufno_h1_warmup_epochs": (
+                UFNO_H1_WARMUP_EPOCHS if MODEL_KIND == "ufno" else 0
+            ),
+            "ufno_grad_clip_norm": (
+                UFNO_GRAD_CLIP_NORM if MODEL_KIND == "ufno" else None
+            ),
             "best_metric_name": "val_l2",
             "best_metric": None,
             "best_epoch": None,
