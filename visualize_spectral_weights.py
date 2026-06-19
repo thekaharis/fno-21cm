@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -67,9 +68,12 @@ def _tick_indices(length: int, maximum: int = 8) -> np.ndarray:
     return np.unique(np.linspace(0, length - 1, count, dtype=int))
 
 
-def _log_limits(history: dict[str, np.ndarray]) -> tuple[float, float]:
+def _log_limits(
+    history: dict[str, np.ndarray],
+    axes: tuple[str, ...] = AXES,
+) -> tuple[float, float]:
     positive = np.concatenate(
-        [history[axis][history[axis] > 0] for axis in AXES]
+        [history[axis][history[axis] > 0] for axis in axes]
     )
     if not positive.size:
         return -12.0, 0.0
@@ -80,25 +84,37 @@ def _log_limits(history: dict[str, np.ndarray]) -> tuple[float, float]:
     )
 
 
-def plot_evolution(history: dict[str, np.ndarray], output: Path) -> None:
+def _z_only_layer_grid(layer_count: int) -> tuple[int, int]:
+    """Return a compact layer grid, using 3 columns for six-layer U-FNO."""
+    columns = min(3, max(1, layer_count))
+    rows = math.ceil(layer_count / columns)
+    return rows, columns
+
+
+def plot_evolution(
+    history: dict[str, np.ndarray],
+    output: Path,
+    axes_to_plot: tuple[str, ...] = AXES,
+) -> None:
     epochs = history["epochs"]
     layers = history["layers"].astype(str)
-    vmin, vmax = _log_limits(history)
-    figure, axes = plt.subplots(
-        len(layers),
-        len(AXES),
-        figsize=(4.2 * len(AXES), 2.7 * len(layers)),
-        squeeze=False,
-        constrained_layout=True,
-    )
+    vmin, vmax = _log_limits(history, axes_to_plot)
     image = None
     epoch_ticks = _tick_indices(len(epochs))
     labels = _epoch_labels(epochs)
 
-    for layer_index, layer in enumerate(layers):
-        for column, axis_name in enumerate(AXES):
-            axis = axes[layer_index, column]
-            values = history[axis_name][:, layer_index, :]
+    if axes_to_plot == ("z",):
+        rows, columns = _z_only_layer_grid(len(layers))
+        figure, axes = plt.subplots(
+            rows,
+            columns,
+            figsize=(5.2 * columns, 3.3 * rows),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for layer_index, layer in enumerate(layers):
+            axis = axes.flat[layer_index]
+            values = history["z"][:, layer_index, :]
             image = axis.imshow(
                 np.log10(np.maximum(values, 1e-12)),
                 origin="lower",
@@ -108,13 +124,46 @@ def plot_evolution(history: dict[str, np.ndarray], output: Path) -> None:
                 vmax=vmax,
                 cmap="viridis",
             )
-            axis.set_title(AXIS_TITLES[axis_name])
-            axis.set_xlabel("absolute mode index")
-            axis.set_yticks(epoch_ticks, [labels[index] for index in epoch_ticks])
-            if column == 0:
-                axis.set_ylabel(f"{layer}\nepoch")
-            else:
-                axis.set_ylabel("epoch")
+            axis.set_title(layer)
+            axis.set_xlabel("LOS mode index k_z")
+            axis.set_ylabel("epoch")
+            axis.set_yticks(
+                epoch_ticks,
+                [labels[index] for index in epoch_ticks],
+            )
+        for index in range(len(layers), rows * columns):
+            axes.flat[index].set_visible(False)
+    else:
+        figure, axes = plt.subplots(
+            len(layers),
+            len(axes_to_plot),
+            figsize=(4.2 * len(axes_to_plot), 2.7 * len(layers)),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for layer_index, layer in enumerate(layers):
+            for column, axis_name in enumerate(axes_to_plot):
+                axis = axes[layer_index, column]
+                values = history[axis_name][:, layer_index, :]
+                image = axis.imshow(
+                    np.log10(np.maximum(values, 1e-12)),
+                    origin="lower",
+                    aspect="auto",
+                    interpolation="nearest",
+                    vmin=vmin,
+                    vmax=vmax,
+                    cmap="viridis",
+                )
+                axis.set_title(AXIS_TITLES[axis_name])
+                axis.set_xlabel("absolute mode index")
+                axis.set_yticks(
+                    epoch_ticks,
+                    [labels[index] for index in epoch_ticks],
+                )
+                if column == 0:
+                    axis.set_ylabel(f"{layer}\nepoch")
+                else:
+                    axis.set_ylabel("epoch")
 
     assert image is not None
     figure.colorbar(
@@ -123,7 +172,12 @@ def plot_evolution(history: dict[str, np.ndarray], output: Path) -> None:
         label="log10 RMS |Fourier weight|",
         shrink=0.75,
     )
-    figure.suptitle("Fourier-weight evolution by layer and mode", fontsize=15)
+    title = (
+        "LOS Fourier-weight evolution"
+        if axes_to_plot == ("z",)
+        else "Fourier-weight evolution by layer and mode"
+    )
+    figure.suptitle(title, fontsize=15)
     figure.savefig(output, dpi=180)
     plt.close(figure)
 
@@ -132,24 +186,28 @@ def _selected_epoch_indices(length: int) -> np.ndarray:
     return np.unique(np.linspace(0, length - 1, min(4, length), dtype=int))
 
 
-def plot_profiles(history: dict[str, np.ndarray], output: Path) -> None:
+def plot_profiles(
+    history: dict[str, np.ndarray],
+    output: Path,
+    axes_to_plot: tuple[str, ...] = AXES,
+) -> None:
     epochs = history["epochs"]
     layers = history["layers"].astype(str)
     selected = _selected_epoch_indices(len(epochs))
     labels = _epoch_labels(epochs)
-    figure, axes = plt.subplots(
-        len(layers),
-        len(AXES),
-        figsize=(4.2 * len(AXES), 2.7 * len(layers)),
-        squeeze=False,
-        constrained_layout=True,
-    )
-
-    for layer_index, layer in enumerate(layers):
-        for column, axis_name in enumerate(AXES):
-            axis = axes[layer_index, column]
+    if axes_to_plot == ("z",):
+        rows, columns = _z_only_layer_grid(len(layers))
+        figure, axes = plt.subplots(
+            rows,
+            columns,
+            figsize=(5.2 * columns, 3.6 * rows),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for layer_index, layer in enumerate(layers):
+            axis = axes.flat[layer_index]
             for epoch_index in selected:
-                values = history[axis_name][epoch_index, layer_index]
+                values = history["z"][epoch_index, layer_index]
                 axis.plot(
                     np.arange(values.size),
                     values,
@@ -159,17 +217,51 @@ def plot_profiles(history: dict[str, np.ndarray], output: Path) -> None:
                     label=labels[epoch_index],
                 )
             axis.set_yscale("log")
-            axis.set_title(AXIS_TITLES[axis_name])
-            axis.set_xlabel("absolute mode index")
+            axis.set_title(layer)
+            axis.set_xlabel("LOS mode index k_z")
+            axis.set_ylabel("RMS |weight|")
             axis.grid(alpha=0.25)
-            if column == 0:
-                axis.set_ylabel(f"{layer}\nRMS |weight|")
-            else:
-                axis.set_ylabel("RMS |weight|")
-            if layer_index == 0 and column == len(AXES) - 1:
-                axis.legend(title="epoch", fontsize=8)
+        for index in range(len(layers), rows * columns):
+            axes.flat[index].set_visible(False)
+        axes.flat[0].legend(title="epoch", fontsize=8)
+    else:
+        figure, axes = plt.subplots(
+            len(layers),
+            len(axes_to_plot),
+            figsize=(4.2 * len(axes_to_plot), 2.7 * len(layers)),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for layer_index, layer in enumerate(layers):
+            for column, axis_name in enumerate(axes_to_plot):
+                axis = axes[layer_index, column]
+                for epoch_index in selected:
+                    values = history[axis_name][epoch_index, layer_index]
+                    axis.plot(
+                        np.arange(values.size),
+                        values,
+                        marker="o",
+                        markersize=2.5,
+                        linewidth=1.2,
+                        label=labels[epoch_index],
+                    )
+                axis.set_yscale("log")
+                axis.set_title(AXIS_TITLES[axis_name])
+                axis.set_xlabel("absolute mode index")
+                axis.grid(alpha=0.25)
+                if column == 0:
+                    axis.set_ylabel(f"{layer}\nRMS |weight|")
+                else:
+                    axis.set_ylabel("RMS |weight|")
+                if layer_index == 0 and column == len(axes_to_plot) - 1:
+                    axis.legend(title="epoch", fontsize=8)
 
-    figure.suptitle("Fourier-weight profiles at selected epochs", fontsize=15)
+    title = (
+        "LOS Fourier-weight profiles"
+        if axes_to_plot == ("z",)
+        else "Fourier-weight profiles at selected epochs"
+    )
+    figure.suptitle(title, fontsize=15)
     figure.savefig(output, dpi=180)
     plt.close(figure)
 
@@ -183,16 +275,28 @@ def high_low_ratio(values: np.ndarray) -> np.ndarray:
     return high / np.maximum(low, 1e-12)
 
 
-def plot_cutoff_ratios(history: dict[str, np.ndarray], output: Path) -> None:
+def plot_cutoff_ratios(
+    history: dict[str, np.ndarray],
+    output: Path,
+    axes_to_plot: tuple[str, ...] = AXES,
+) -> None:
     epochs = history["epochs"]
     layers = history["layers"].astype(str)
     labels = _epoch_labels(epochs)
     x = np.arange(len(epochs))
     figure, axes = plt.subplots(
-        1, len(AXES), figsize=(4.5 * len(AXES), 4.2), constrained_layout=True
+        1,
+        len(axes_to_plot),
+        figsize=(
+            (8.0, 4.8)
+            if axes_to_plot == ("z",)
+            else (4.5 * len(axes_to_plot), 4.2)
+        ),
+        constrained_layout=True,
+        squeeze=False,
     )
 
-    for axis, axis_name in zip(axes, AXES):
+    for axis, axis_name in zip(axes[0], axes_to_plot):
         ratios = high_low_ratio(history[axis_name])
         for layer_index, layer in enumerate(layers):
             axis.plot(x, ratios[:, layer_index], marker="o", label=layer)
@@ -204,16 +308,22 @@ def plot_cutoff_ratios(history: dict[str, np.ndarray], output: Path) -> None:
         axis.set_xticks(ticks, [labels[index] for index in ticks])
         axis.set_yscale("log")
         axis.grid(alpha=0.25)
-    axes[-1].legend(fontsize=8, title="layer")
-    figure.suptitle(
-        "Cutoff diagnostic: outer-quarter versus inner-quarter weights",
-        fontsize=15,
+    axes[0, -1].legend(fontsize=8, title="layer")
+    title = (
+        "LOS cutoff diagnostic"
+        if axes_to_plot == ("z",)
+        else "Cutoff diagnostic: outer-quarter versus inner-quarter weights"
     )
+    figure.suptitle(title, fontsize=15)
     figure.savefig(output, dpi=180)
     plt.close(figure)
 
 
-def write_csv(history: dict[str, np.ndarray], output: Path) -> None:
+def write_csv(
+    history: dict[str, np.ndarray],
+    output: Path,
+    axes_to_write: tuple[str, ...] = AXES,
+) -> None:
     epochs = history["epochs"]
     layers = history["layers"].astype(str)
     with output.open("w", newline="") as stream:
@@ -221,7 +331,7 @@ def write_csv(history: dict[str, np.ndarray], output: Path) -> None:
         writer.writerow(("epoch", "layer", "axis", "mode", "rms_weight"))
         for epoch_index, epoch in enumerate(epochs):
             for layer_index, layer in enumerate(layers):
-                for axis_name in AXES:
+                for axis_name in axes_to_write:
                     for mode, value in enumerate(
                         history[axis_name][epoch_index, layer_index]
                     ):

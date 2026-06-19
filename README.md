@@ -29,6 +29,7 @@ Two pipelines live side by side:
 ├── build_cubes.py                 # v3 cube cache builder
 ├── visualize.py, visualize_3d.py  # checkpoint -> prediction plots
 ├── visualize_spectral_weights.py  # epoch -> Fourier-weight diagnostics
+├── visualize_spectral_weights_z.py # Z/LOS-only Fourier-weight diagnostics
 ├── loader.py                      # shared HDF5 lightcone reader
 ├── slurm/                         # all sbatch scripts (cluster)
 ├── figures/                       # all generated plots
@@ -54,6 +55,7 @@ Two pipelines live side by side:
 | `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
 | `visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
 | `visualize_spectral_weights.py` | Plots per-layer Fourier-weight magnitudes over training epochs, selected-epoch profiles, and high-mode/low-mode cutoff ratios. |
+| `visualize_spectral_weights_z.py` | Compact version that renders only the LOS/Z modes and writes a Z-only CSV. |
 
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
@@ -70,6 +72,7 @@ Two pipelines live side by side:
 | `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
+| `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
 | `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
 
 The prediction-visualization scripts write into a per-run subfolder under
@@ -157,6 +160,9 @@ python visualize_3d.py
 
 # Plot Fourier weight evolution from initialization through every epoch.
 python visualize_spectral_weights.py
+
+# Plot only the Z/LOS Fourier modes.
+python visualize_spectral_weights_z.py
 ```
 
 For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary

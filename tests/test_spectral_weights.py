@@ -133,6 +133,32 @@ def test_history_renders_all_diagnostics(tmp_path):
         assert output.stat().st_size > 0
 
 
+def test_history_renders_z_only_diagnostics(tmp_path):
+    model = FakeFNO()
+    history_path = tmp_path / "spectral_weight_history.npz"
+    recorder = SpectralWeightHistory(history_path, model, reset=True)
+    recorder.record(-1)
+    recorder.record(0)
+    history = load_history(history_path)
+
+    outputs = (
+        tmp_path / "z_evolution.png",
+        tmp_path / "z_profiles.png",
+        tmp_path / "z_ratios.png",
+        tmp_path / "z_history.csv",
+    )
+    plot_evolution(history, outputs[0], ("z",))
+    plot_profiles(history, outputs[1], ("z",))
+    plot_cutoff_ratios(history, outputs[2], ("z",))
+    write_csv(history, outputs[3], ("z",))
+
+    for output in outputs:
+        assert output.exists()
+        assert output.stat().st_size > 0
+    assert ",z," in outputs[3].read_text()
+    assert ",x," not in outputs[3].read_text()
+
+
 def test_legacy_ufno_history_is_rejected(tmp_path):
     path = tmp_path / "legacy_ufno.npz"
     values = np.ones((2, 1, 4), dtype=np.float32)
