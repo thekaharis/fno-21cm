@@ -58,6 +58,19 @@ class ModelConfigTests(unittest.TestCase):
         self.assertEqual(config.modes, (16, 16, 32))
         self.assertTrue(config.ufno_global_residual)
 
+    def test_ufno_construction_respects_external_seed(self):
+        from modeling import build_3d_model
+
+        torch.manual_seed(17)
+        first = build_3d_model(ModelConfig(kind="ufno"), in_channels=2)
+        first_weight = first.body.conv0.weights1.detach().clone()
+
+        torch.manual_seed(17)
+        second = build_3d_model(ModelConfig(kind="ufno"), in_channels=2)
+        second_weight = second.body.conv0.weights1.detach().clone()
+
+        self.assertTrue(torch.equal(first_weight, second_weight))
+
 
 class WeightedLossTests(unittest.TestCase):
     def test_skips_disabled_terms(self):

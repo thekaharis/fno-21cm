@@ -70,11 +70,12 @@ export PYTHONUNBUFFERED=1
 
 # --- Model selection --------------------------------------------------------
 export MODEL_KIND=ufno
+export RUN_SEED="${RUN_SEED:-0}"
 export N_EPOCHS=30
 
 # --- v2 A+B+C bundle overrides ---------------------------------------------
 # A: asymmetric Z modes (16, 16, 32) vs v1's (16, 16, 16)
-export N_MODES_Z=32
+export N_MODES_Z="${N_MODES_Z:-32}"
 
 # B: GroupNorm instead of BatchNorm inside the U-Net path
 export UFNO_NORM=groupnorm
@@ -87,7 +88,7 @@ export LOSS_BCE_WEIGHT=0.0
 # Separate checkpoint dir so v1 and v2 don't collide.  fno_21cm_3d.py
 # honors CHECKPOINT_DIR if set; otherwise it picks ./checkpoints_3d_ufno
 # from MODEL_KIND=ufno.
-export CHECKPOINT_DIR=./checkpoints_3d_ufno_v2
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno_v2}"
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data

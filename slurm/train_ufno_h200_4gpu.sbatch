@@ -64,6 +64,8 @@ export PYTHONUNBUFFERED=1
 # constructor and (b) selects CHECKPOINT_DIR="./checkpoints_3d_ufno" so
 # this run never collides with the plain-FNO baseline.
 export MODEL_KIND=ufno
+export RUN_SEED="${RUN_SEED:-0}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno}"
 
 # 30 epochs is the first-pass experimental budget for U-FNO.  If the
 # trajectory looks promising at the end, extend by submitting again with

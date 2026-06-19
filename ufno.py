@@ -6,8 +6,6 @@ import operator
 from functools import reduce
 from functools import partial
 
-torch.manual_seed(0)
-
 class SpectralConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
         super(SpectralConv3d, self).__init__()

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import random
+
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
-from fno_21cm_3d import LoggingTrainer, _build_h1_loss
+from fno_21cm_3d import LoggingTrainer, _build_h1_loss, _seed_everything
 from losses import ScheduledWeightedLoss
 
 
@@ -87,3 +90,22 @@ def test_scheduled_loss_ramps_only_h1_term() -> None:
     loss.set_epoch(5)
     assert loss.active_weights == (0.5, 0.5, 0.0)
     assert loss(prediction, prediction).item() == pytest.approx(1.0)
+
+
+def test_seed_everything_repeats_python_numpy_and_torch() -> None:
+    _seed_everything(123)
+    first = (
+        random.random(),
+        np.random.random(),
+        torch.rand(3),
+    )
+    _seed_everything(123)
+    second = (
+        random.random(),
+        np.random.random(),
+        torch.rand(3),
+    )
+
+    assert first[0] == second[0]
+    assert first[1] == second[1]
+    assert torch.equal(first[2], second[2])

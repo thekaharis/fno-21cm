@@ -159,6 +159,20 @@ python visualize_3d.py
 python visualize_spectral_weights.py
 ```
 
+For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary
+`RUN_SEED`. This changes model initialization and training order while using
+the same train/validation/test cones:
+
+```bash
+RUN_SEED=41 CHECKPOINT_DIR=checkpoints_3d_ufno_z32_seed41 python fno_21cm_3d.py
+RUN_SEED=42 CHECKPOINT_DIR=checkpoints_3d_ufno_z32_seed42 python fno_21cm_3d.py
+RUN_SEED=43 CHECKPOINT_DIR=checkpoints_3d_ufno_z32_seed43 python fno_21cm_3d.py
+```
+
+Set `DETERMINISTIC_RUN=true` when bitwise repeatability is more important
+than maximum training throughput. Every seed must use its own
+`CHECKPOINT_DIR`.
+
 Each lightcone is interpolated along the LOS axis from its native ~2340 cells
 down to `N_Z = 256` (configurable) so a full cube fits on an A30 (24 GB) at
 `BATCH_SIZE = 1`. `INPUT_FEATURES` accepts `density`, `params`, `density_z`,

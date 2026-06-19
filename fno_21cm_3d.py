@@ -15,6 +15,7 @@ normalized redshift, not comoving distance.
 from __future__ import annotations
 
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -123,7 +124,15 @@ DEVICE = ("cuda" if torch.cuda.is_available()
           else "mps" if torch.backends.mps.is_available()
           else "cpu")
 
+# Keep the data split fixed across repeated experiments, while RUN_SEED
+# controls model initialization and training data order.
 SPLIT_SEED = 42
+RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
+DETERMINISTIC_RUN = os.environ.get(
+    "DETERMINISTIC_RUN", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+if DETERMINISTIC_RUN:
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
 
@@ -139,6 +148,28 @@ SPECTRAL_HISTORY_PATH = f"{CHECKPOINT_DIR}/{HISTORY_FILENAME}"
 # and rarely diverges; "linear" extracts more wall-clock speed but may need
 # warmup at large effective batches.
 LR_SCALE_RULE = "sqrt"   # "linear" or "sqrt"
+
+
+# ------------------------------------------------------------------ reproducibility
+def _seed_everything(seed: int, deterministic: bool = False) -> None:
+    """Seed model initialization and training-time random number generators."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = not deterministic
+    torch.backends.cudnn.deterministic = deterministic
+    torch.use_deterministic_algorithms(deterministic)
+
+
+def _seed_worker(_worker_id: int) -> None:
+    """Give each DataLoader worker a reproducible Python/NumPy RNG state."""
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 # ------------------------------------------------------------------ distributed
@@ -468,6 +499,9 @@ def main():
     rank, local_rank, world_size = _setup_distributed()
     is_rank_0 = (rank == 0)
     is_distributed = (world_size > 1)
+    # All ranks use the same initialization seed so DDP starts from identical
+    # parameters. DistributedSampler applies rank-specific partitioning.
+    _seed_everything(RUN_SEED, deterministic=DETERMINISTIC_RUN)
 
     # Per-rank device.  Under DDP each rank pins to its own GPU; in single-GPU
     # mode this is just the module-level DEVICE.
@@ -545,15 +579,15 @@ def main():
     if is_distributed:
         train_sampler = DistributedSampler(
             train_ds, num_replicas=world_size, rank=rank,
-            shuffle=True, drop_last=False,
+            shuffle=True, drop_last=False, seed=RUN_SEED,
         )
         val_sampler = DistributedSampler(
             val_ds, num_replicas=world_size, rank=rank,
-            shuffle=False, drop_last=False,
+            shuffle=False, drop_last=False, seed=RUN_SEED,
         )
         test_sampler = DistributedSampler(
             test_ds, num_replicas=world_size, rank=rank,
-            shuffle=False, drop_last=False,
+            shuffle=False, drop_last=False, seed=RUN_SEED,
         )
         train_shuffle = None  # mutually exclusive with sampler
     else:
@@ -565,13 +599,20 @@ def main():
         num_workers=NUM_WORKERS,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=(NUM_WORKERS > 0),
+        worker_init_fn=_seed_worker,
     )
+    train_generator = torch.Generator().manual_seed(RUN_SEED + rank)
+    val_generator = torch.Generator().manual_seed(RUN_SEED + 10_000 + rank)
+    test_generator = torch.Generator().manual_seed(RUN_SEED + 20_000 + rank)
     train_loader = DataLoader(train_ds, shuffle=train_shuffle,
-                              sampler=train_sampler, **dl_kwargs)
+                              sampler=train_sampler,
+                              generator=train_generator, **dl_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False,
-                            sampler=val_sampler, **dl_kwargs)
+                            sampler=val_sampler,
+                            generator=val_generator, **dl_kwargs)
     test_loader = DataLoader(test_ds, shuffle=False,
-                             sampler=test_sampler, **dl_kwargs)
+                             sampler=test_sampler,
+                             generator=test_generator, **dl_kwargs)
 
     # Wrap the train loader in a per-step progress reporter so the SLURM log
     # shows life within an epoch (the neuralop Trainer logs per-epoch only).
@@ -695,6 +736,7 @@ def main():
            f"rule for {world_size} ranks)")
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Model: {MODEL_CONFIG.describe()}")
+    rprint(f"Run seed: {RUN_SEED}  deterministic={DETERMINISTIC_RUN}")
     rprint(f"Input ablation: {INPUT_FEATURES.name}")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
@@ -738,6 +780,8 @@ def main():
         },
         "training": {
             "epochs": N_EPOCHS,
+            "run_seed": RUN_SEED,
+            "deterministic": DETERMINISTIC_RUN,
             "base_learning_rate": base_lr,
             "scaled_learning_rate": scaled_lr,
             "lr_scale_rule": LR_SCALE_RULE,
