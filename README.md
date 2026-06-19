@@ -178,7 +178,9 @@ The transverse axes fold positive and negative frequencies into absolute
 mode index; the LOS axis follows the non-negative real-FFT convention. Thus,
 for NeuralOperator `n_modes=(16,16,16)`, the plots show absolute transverse
 indices `0..8` and LOS indices `0..8`, rather than 16 distinct positive
-wavenumbers.
+wavenumbers. The Wen et al. U-FNO implementation retains separate positive
+and negative transverse slices, so `modes=(16,16,16)` spans absolute
+transverse indices `0..16` and LOS indices `0..15`.
 Visualization
 defaults to the best checkpoint and reproduces the recorded model and input
 configuration. Its `physical_metrics.json` includes global `x_HI(z)`,

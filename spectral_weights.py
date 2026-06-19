@@ -11,6 +11,7 @@ import torch.nn as nn
 
 
 HISTORY_FILENAME = "spectral_weight_history.npz"
+HISTORY_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -30,53 +31,104 @@ def _unwrap_model(model: nn.Module) -> nn.Module:
     return model
 
 
-def _channel_rms(weights: list[torch.Tensor]) -> np.ndarray:
-    """RMS complex magnitude over input/output channels and weight quadrants."""
-    powers = []
-    for weight in weights:
-        if weight.ndim != 5 or not torch.is_complex(weight):
-            raise ValueError(
-                "Expected complex spectral weights with shape "
-                "(in_channels, out_channels, modes_x, modes_y, modes_z)"
-            )
-        powers.append(weight.detach().abs().square().mean(dim=(0, 1)))
-    mean_power = torch.stack(powers).mean(dim=0)
-    return mean_power.sqrt().float().cpu().numpy()
+def _channel_power(weight: torch.Tensor) -> np.ndarray:
+    """Mean squared complex magnitude over input/output channels."""
+    if weight.ndim != 5 or not torch.is_complex(weight):
+        raise ValueError(
+            "Expected complex spectral weights with shape "
+            "(in_channels, out_channels, modes_x, modes_y, modes_z)"
+        )
+    return (
+        weight.detach()
+        .abs()
+        .square()
+        .mean(dim=(0, 1))
+        .float()
+        .cpu()
+        .numpy()
+    )
 
 
-def _grouped_rms(values: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
+def _grouped_rms(powers: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
     coordinate_max = int(coordinates.max(initial=0))
     profile = np.empty(coordinate_max + 1, dtype=np.float32)
-    squared = np.square(values, dtype=np.float64)
     for index in range(coordinate_max + 1):
-        selected = squared[coordinates == index]
+        selected = powers[coordinates == index]
         profile[index] = np.sqrt(selected.mean()) if selected.size else np.nan
     return profile
 
 
-def _profiles_from_magnitude(
-    magnitude: np.ndarray,
-    *,
-    centered_xy: bool,
+def _profiles_from_power_grids(
+    entries: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    nx, ny, nz = magnitude.shape
-    if centered_xy:
-        kx = np.abs(np.arange(nx) - nx // 2)
-        ky = np.abs(np.arange(ny) - ny // 2)
-    else:
-        kx = np.arange(nx)
-        ky = np.arange(ny)
-    kz = np.arange(nz)
+    powers_by_axis = {axis: [] for axis in ("x", "y", "z", "shell")}
+    coordinates_by_axis = {axis: [] for axis in powers_by_axis}
 
-    grid_x, grid_y, grid_z = np.meshgrid(kx, ky, kz, indexing="ij")
-    shell = np.floor(
-        np.sqrt(grid_x**2 + grid_y**2 + grid_z**2)
-    ).astype(np.int64)
-    return (
-        _grouped_rms(magnitude, grid_x),
-        _grouped_rms(magnitude, grid_y),
-        _grouped_rms(magnitude, grid_z),
-        _grouped_rms(magnitude, shell),
+    for power, kx, ky, kz in entries:
+        grid_x, grid_y, grid_z = np.meshgrid(kx, ky, kz, indexing="ij")
+        shell = np.floor(
+            np.sqrt(grid_x**2 + grid_y**2 + grid_z**2)
+        ).astype(np.int64)
+        grids = {
+            "x": grid_x,
+            "y": grid_y,
+            "z": grid_z,
+            "shell": shell,
+        }
+        for axis, grid in grids.items():
+            powers_by_axis[axis].append(power.reshape(-1))
+            coordinates_by_axis[axis].append(grid.reshape(-1))
+
+    return tuple(
+        _grouped_rms(
+            np.concatenate(powers_by_axis[axis]),
+            np.concatenate(coordinates_by_axis[axis]),
+        )
+        for axis in ("x", "y", "z", "shell")
+    )
+
+
+def _centered_fno_profiles(
+    weight: torch.Tensor,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    power = _channel_power(weight)
+    nx, ny, nz = power.shape
+    kx = np.abs(np.arange(nx) - nx // 2)
+    ky = np.abs(np.arange(ny) - ny // 2)
+    kz = np.arange(nz)
+    return _profiles_from_power_grids([(power, kx, ky, kz)])
+
+
+def _ufno_quadrant_profiles(
+    weights: list[torch.Tensor],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Map U-FNO's four unshifted FFT quadrants to absolute frequencies.
+
+    For a retained width ``m``, a positive slice ``:m`` maps tensor indices
+    to frequencies ``0, ..., m-1``. A negative slice ``-m:`` maps them to
+    ``-m, ..., -1``, so its absolute-frequency order is ``m, ..., 1``.
+    """
+    powers = [_channel_power(weight) for weight in weights]
+    nx, ny, nz = powers[0].shape
+    if any(power.shape != (nx, ny, nz) for power in powers):
+        raise ValueError("U-FNO quadrant weights must have matching shapes")
+
+    positive_x = np.arange(nx)
+    negative_x = np.arange(nx, 0, -1)
+    positive_y = np.arange(ny)
+    negative_y = np.arange(ny, 0, -1)
+    kz = np.arange(nz)
+    coordinates = (
+        (positive_x, positive_y, kz),
+        (negative_x, positive_y, kz),
+        (positive_x, negative_y, kz),
+        (negative_x, negative_y, kz),
+    )
+    return _profiles_from_power_grids(
+        [
+            (power, kx, ky, z)
+            for power, (kx, ky, z) in zip(powers, coordinates)
+        ]
     )
 
 
@@ -97,10 +149,7 @@ def extract_spectral_weight_profiles(
             and hasattr(weight, "to_tensor")
             and hasattr(module, "n_modes")
         ):
-            magnitude = _channel_rms([weight.to_tensor()])
-            x, y, z, shell = _profiles_from_magnitude(
-                magnitude, centered_xy=True
-            )
+            x, y, z, shell = _centered_fno_profiles(weight.to_tensor())
             profiles.append(SpectralWeightProfile(name, x, y, z, shell))
             continue
 
@@ -108,10 +157,7 @@ def extract_spectral_weight_profiles(
         quadrant_names = ("weights1", "weights2", "weights3", "weights4")
         if all(hasattr(module, attr) for attr in quadrant_names):
             tensors = [getattr(module, attr) for attr in quadrant_names]
-            magnitude = _channel_rms(tensors)
-            x, y, z, shell = _profiles_from_magnitude(
-                magnitude, centered_xy=False
-            )
+            x, y, z, shell = _ufno_quadrant_profiles(tensors)
             profiles.append(SpectralWeightProfile(name, x, y, z, shell))
 
     if not profiles:
@@ -178,6 +224,7 @@ class SpectralWeightHistory:
 
         order = np.argsort(epochs)
         payload = {
+            "format_version": np.asarray(HISTORY_FORMAT_VERSION),
             "epochs": epochs[order],
             "layers": layers,
             **{axis: values[order] for axis, values in history.items()},

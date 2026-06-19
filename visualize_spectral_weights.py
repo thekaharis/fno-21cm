@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from modeling import ModelConfig
-from spectral_weights import HISTORY_FILENAME
+from spectral_weights import HISTORY_FILENAME, HISTORY_FORMAT_VERSION
 
 
 AXES = ("x", "y", "z", "shell")
@@ -41,6 +41,20 @@ def load_history(path: str | Path) -> dict[str, np.ndarray]:
         missing = required - set(saved.files)
         if missing:
             raise ValueError(f"Spectral history is missing keys: {sorted(missing)}")
+        layers = saved["layers"].astype(str)
+        version = (
+            int(saved["format_version"])
+            if "format_version" in saved.files
+            else 1
+        )
+        if version != HISTORY_FORMAT_VERSION and any(
+            layer.startswith("body.conv") for layer in layers
+        ):
+            raise ValueError(
+                "This U-FNO history predates the corrected positive/negative "
+                "quadrant mapping and cannot be repaired from its aggregated "
+                "profiles. Regenerate it with a new training run."
+            )
         return {key: saved[key] for key in required}
 
 
