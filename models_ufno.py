@@ -468,11 +468,12 @@ class UFNOWrapped(nn.Module):
         pad_z = self._pad_amount(Z, mult_of=self._z_mult_of,
                                  min_pad=self.MIN_PAD)
 
-        # First pass: replicate-pad Y and Z on the right.  F.pad order is
-        # (last_dim_left, last_dim_right, 2nd_last_left, 2nd_last_right, ...).
-        x = F.pad(x, (0, 0, 0, pad_z, 0, pad_y), mode="replicate")
-        # Second pass: zero-pad X on the right.
-        x = F.pad(x, (0, 0, 0, 0, 0, 0, 0, pad_x), mode="constant", value=0.0)
+        # X/Y are equivalent periodic simulation axes; Z is the finite
+        # lightcone/redshift direction. Pad channels-first so PyTorch can
+        # apply circular padding to both transverse dimensions identically.
+        x = x.permute(0, 4, 1, 2, 3).contiguous()
+        x = pad_ufno_spatial(x, pad_x=pad_x, pad_y=pad_y, pad_z=pad_z)
+        x = x.permute(0, 2, 3, 4, 1).contiguous()
 
         # Run the U-FNO body.  SimpleBlock3d returns (B, X+pad_x, Y+pad_y,
         # Z+pad_z, 1) -- the final fc2 already projects to 1 output channel.
@@ -512,3 +513,21 @@ class UFNOWrapped(nn.Module):
         self.load_state_dict(torch.load(path.as_posix(),
                                         map_location=map_location,
                                         weights_only=False))
+
+
+def pad_ufno_spatial(
+    x: torch.Tensor,
+    pad_x: int,
+    pad_y: int,
+    pad_z: int,
+) -> torch.Tensor:
+    """Pad channels-first cubes with periodic X/Y and non-periodic Z."""
+    if pad_x or pad_y:
+        x = F.pad(
+            x,
+            (0, 0, 0, int(pad_y), 0, int(pad_x)),
+            mode="circular",
+        )
+    if pad_z:
+        x = F.pad(x, (0, int(pad_z), 0, 0, 0, 0), mode="replicate")
+    return x

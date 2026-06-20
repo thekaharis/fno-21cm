@@ -15,7 +15,7 @@
 #   * Walltime bumped to 60 min.
 #
 # Differences vs slurm/viz_detailed.sbatch:
-#   * MODEL_KIND=ufno -> loads checkpoints_3d_ufno/model_state_dict.pt and
+#   * MODEL_KIND=ufno -> loads checkpoints_3d_ufno/best_model_state_dict.pt and
 #     reconstructs the U-FNO architecture in load_model().
 #
 # This is one of two viz workflows -- the 4-cone summary is via

@@ -57,6 +57,7 @@ export PYTHONUNBUFFERED=1
 
 # --- Model selection --------------------------------------------------------
 export MODEL_KIND=ufno
+export RUN_SEED="${RUN_SEED:-0}"
 export N_EPOCHS=30
 
 # --- v3 (Tier 2) Option E: global-pooling residual -------------------------
@@ -64,13 +65,13 @@ export UFNO_UNET_VARIANT=default
 export UFNO_GLOBAL_RESIDUAL=true
 
 # --- v2 baseline overrides (carried forward) -------------------------------
-export N_MODES_Z=32
+export N_MODES_Z="${N_MODES_Z:-32}"
 export UFNO_NORM=groupnorm
 export LOSS_L2_WEIGHT=0.3
 export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
-export CHECKPOINT_DIR=./checkpoints_3d_ufno_v3_globalres
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno_v3_globalres}"
 
 # --- Data paths + NVMe staging ---------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data

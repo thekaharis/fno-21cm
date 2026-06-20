@@ -13,25 +13,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop checkout if one is available ---------------
-# Accept any of these layouts and skip locations whose package is incomplete:
-#   ./neuraloperator/neuralop/    (checkout vendored inside the repo)
-#   ../neuraloperator/neuralop/   (checkout sibling to the repo: project/{data,
-#                                  neuraloperator, fno-21cm} layout)
-#   ./neuralop/                   (the package dropped straight into the repo)
-# If none has a valid __init__.py, fall back to an installed `neuralop`.
-_HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator",
-              _HERE.parent / "neuraloperator",
-              _HERE):
-    if (_cand / "neuralop" / "__init__.py").is_file():
-        sys.path.insert(0, str(_cand))
-        break
-# ---------------------------------------------------------------------------
+from neuralop_setup import prefer_local_neuralop
+
+prefer_local_neuralop()
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from neuralop.models import FNO
@@ -44,6 +31,8 @@ import neuralop as _neuralop
 print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
 from dataset import SliceCache, split_by_cone
+from losses import AbsoluteLoss, WeightedLoss
+from modeling import TrainerModel
 
 
 # ------------------------------------------------------------------ config
@@ -68,75 +57,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 SPLIT_SEED = 42
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
-
-
-# ------------------------------------------------------------------ wrapper
-class AbsLoss:
-    """Wrap a neuralop loss to call its ``.abs()`` (absolute) instead of
-    ``.rel()`` (relative), and swallow extra kwargs from the Trainer.
-    """
-
-    def __init__(self, loss):
-        self.loss = loss
-
-    def __call__(self, out, y, **kwargs):
-        return self.loss.abs(out, y)
-
-
-class RelLoss:
-    """Wrap a neuralop loss to call its ``.rel()`` (relative) and swallow
-    extra kwargs from the Trainer.  Relative losses normalize per sample, so
-    near-constant target maps no longer dominate the objective.
-    """
-
-    def __init__(self, loss):
-        self.loss = loss
-
-    def __call__(self, out, y, **kwargs):
-        return self.loss.rel(out, y)
-
-
-class WeightedSumLoss:
-    """Weighted sum of ``(weight, loss)`` terms; passes kwargs through."""
-
-    def __init__(self, *terms):
-        self.terms = terms  # iterable of (float weight, callable loss)
-
-    def __call__(self, out, y, **kwargs):
-        return sum(w * loss(out, y, **kwargs) for w, loss in self.terms)
-
-
-class SilentFNO(nn.Module):
-    """Thin wrapper that discards extra kwargs injected by the Trainer.
-
-    The Trainer calls ``model(**sample)`` where *sample* contains both
-    ``x`` and ``y``.  ``FNO.forward`` only accepts ``x``, so this wrapper
-    swallows the rest and avoids a warning on every batch.
-
-    Delegates other attribute access (``save_checkpoint``, etc.) to the
-    underlying FNO model.  Submodule/parameter/buffer lookup via
-    ``nn.Module``'s own ``_modules``/``_parameters``/``_buffers`` dicts
-    is preserved (and falls through to the outer wrapper, which has no
-    such entries since everything lives on ``self.fno``).
-    """
-
-    def __init__(self, fno: FNO):
-        super().__init__()
-        self.fno = fno
-
-    def forward(self, x, **kwargs):
-        return self.fno(x)
-
-    def __getattr__(self, name):
-        # Replicate nn.Module's standard lookup (params, buffers, modules).
-        # Without this, ``self.fno`` itself cannot be resolved because
-        # PyTorch stores it in ``_modules``, not ``__dict__``.
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            pass
-        # Delegate anything not on the wrapper to the underlying FNO.
-        return getattr(self._modules["fno"], name)
 
 
 # ------------------------------------------------------------------ main
@@ -180,7 +100,7 @@ def main():
         projection_channel_ratio=2,
         positional_embedding="grid",
     )
-    model = SilentFNO(fno).to(DEVICE)
+    model = TrainerModel(fno).to(DEVICE)
     print(f"Model: {count_model_params(model.fno):,} parameters")
     print(model)
 
@@ -196,11 +116,14 @@ def main():
     # discourages the model from collapsing to a constant prediction.
     l2_loss = LpLoss(d=2, p=2)
     h1_loss = H1Loss(d=2)
-    train_loss_fn = WeightedSumLoss(
-        (0.5, AbsLoss(l2_loss)),
-        (0.5, AbsLoss(h1_loss)),
+    train_loss_fn = WeightedLoss(
+        (0.5, AbsoluteLoss(l2_loss)),
+        (0.5, AbsoluteLoss(h1_loss)),
     )
-    eval_losses = {"l2": AbsLoss(l2_loss), "h1": AbsLoss(h1_loss)}
+    eval_losses = {
+        "l2": AbsoluteLoss(l2_loss),
+        "h1": AbsoluteLoss(h1_loss),
+    }
 
     # ------------------------------------------------- 8. trainer
     trainer = Trainer(

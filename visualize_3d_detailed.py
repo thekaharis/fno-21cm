@@ -20,20 +20,21 @@ Variant of ``visualize_3d.py`` with two deliberate differences:
      max(std)`` -- so the rendered z-slices land where the model's
      predictions actually have something to be right or wrong about.
 
-Everything else (plot functions, model loader, prediction code, cone
-selection by reionization behavior) is reused unchanged from
-``visualize_3d``.  Output goes to ``figures/detailed/`` so the standard
-4-cone summary plots are not overwritten.
+The standard plot functions are reused with a shared low-z crop derived from
+the displayed cones' global x_HI history. Model loading, prediction, and cone
+selection by reionization behavior still come from ``visualize_3d``.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from torch.utils.data import Subset
 
 # Reuse the standard viz machinery.  We override a couple of constants
 # (N_CONES_PER_SPLIT) and add the active-z picker; everything else --
@@ -45,13 +46,15 @@ from visualize_3d import (
     DEVICE, CUBES_CACHE, DATA_DIR, FILE_GLOB,
     N_Z, Z_MIN, Z_MAX, STRATIFY_Z,
     SPLIT_SEED, VAL_FRACTION, TEST_FRACTION,
+    INPUT_FEATURES, PARAMETER_NORMALIZATION, RUN_METADATA,
     FIGURES_BASE, VIZ_TAG, make_run_folder,
     load_model, predict_cube,
     plot_z_slices, plot_lightcone_strip, plot_scatter,
     plot_lightcone_summary_grid,
     pick_cones_by_reion_behavior,
 )
-from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
+from dataset_3d import LightconeCubeDataset, LightconeCubeCache, resolve_split
+from metrics_21cm import find_low_z_cutoff_index
 
 # Pull the CHECKPOINT path lazily so MODEL_KIND env-var changes are still
 # honored (visualize_3d evaluates CHECKPOINT at module import time, which
@@ -63,6 +66,7 @@ N_CONES_PER_SPLIT = 16             # was 4 in visualize_3d
 N_SLICES_PER_CONE = 6              # was 4; with active-z each slice is more
                                    # information-dense, so a few more is fine
 ACTIVE_VAR_FRAC = 0.05             # active window = transverse std > 5% of max
+LOW_Z_MIN_CHANGE = 0.01            # 1 percentage-point change in global x_HI
 
 
 # ---------------------------------------------------- active-z slice picker
@@ -120,6 +124,25 @@ def pick_active_z_slices(truth: np.ndarray, n_slices: int,
     return sorted(dict.fromkeys(picks.tolist()))   # dedupe, preserve order
 
 
+def choose_plot_z_start(per_cone: list, target_z: np.ndarray) -> int:
+    """Choose one low-z crop shared by every plot in a split."""
+    override = os.environ.get("PLOT_Z_MIN")
+    if override is not None:
+        requested = float(override)
+        return min(
+            len(target_z) - 1,
+            int(np.searchsorted(target_z, requested, side="left")),
+        )
+
+    histories = [truth.mean(axis=(0, 1)) for _, _, _, truth, _ in per_cone]
+    aggregate_history = np.mean(histories, axis=0)
+    return find_low_z_cutoff_index(
+        aggregate_history,
+        target_z,
+        min_change=LOW_Z_MIN_CHANGE,
+    )
+
+
 # ------------------------------------------------------------------ main
 def main():
     print(f"[visualize_3d_detailed]  MODEL_KIND={MODEL_KIND}  "
@@ -132,7 +155,10 @@ def main():
 
     if CUBES_CACHE.exists():
         print(f"Using pre-computed cube cache: {CUBES_CACHE}")
-        dataset = LightconeCubeCache(CUBES_CACHE)
+        dataset = LightconeCubeCache(
+            CUBES_CACHE,
+            input_features=INPUT_FEATURES,
+        )
     else:
         print(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
               f"from {DATA_DIR}")
@@ -144,13 +170,31 @@ def main():
         dataset = LightconeCubeDataset(
             file_paths=files, n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
             preload=False,
+            input_features=INPUT_FEATURES,
         )
-    _, val_ds, test_ds, (_, val_idx, test_idx) = split_cubes(
-        dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
-        seed=SPLIT_SEED,
+    # Prefer the split recorded at training time (cone ids when available)
+    # over recomputing it -- see dataset_3d.resolve_split.
+    train_idx, val_idx, test_idx, split_source = resolve_split(
+        dataset, RUN_METADATA,
+        val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
+    val_ds = Subset(dataset, val_idx)
+    test_ds = Subset(dataset, test_idx)
+    print(f"Split source: {split_source}")
+    normalization = PARAMETER_NORMALIZATION
+    if INPUT_FEATURES.use_params and normalization is None:
+        if RUN_METADATA is not None:
+            raise RuntimeError(
+                "run metadata is missing parameter normalization statistics"
+            )
+        print(
+            "WARNING: legacy checkpoint has no run metadata; fitting "
+            "train-split parameter statistics for visualization"
+        )
+        normalization = dataset.fit_parameter_normalization(train_idx)
+    dataset.set_parameter_normalization(normalization)
 
-    model = load_model(in_channels=getattr(dataset, "in_channels", 2))
+    model = load_model(in_channels=dataset.in_channels)
     print("Model loaded.")
 
     target_z = dataset.target_z
@@ -162,7 +206,7 @@ def main():
     figures_dir = make_run_folder(FIGURES_BASE, tag=f"{VIZ_TAG}-detailed")
     print(f"Writing figures to: {figures_dir}")
 
-    for split_ds, split_idx, split_name in [
+    for split_ds, split_rows, split_name in [
         (val_ds, val_idx, "validation"),
         (test_ds, test_idx, "test"),
     ]:
@@ -170,16 +214,18 @@ def main():
             print(f"No cones in {split_name} split; skipping")
             continue
 
+        # Labels use global cone ids, not cache row positions.
+        split_cone_ids = [int(dataset.cone_ids[r]) for r in split_rows]
         print(f"--- {split_name}: picking {N_CONES_PER_SPLIT} cones "
               f"by reionization behavior at z={STRATIFY_Z} ---")
         picks = pick_cones_by_reion_behavior(
-            split_ds, split_idx, target_z,
+            split_ds, split_cone_ids, target_z,
             n_cones=N_CONES_PER_SPLIT, stratify_z=STRATIFY_Z,
         )
         for idx_in_split, cone_id, summ in picks:
             print(f"  cone {cone_id:4d}  <x_HI>(z={STRATIFY_Z}) = {summ:.3f}")
 
-        # Per-cone figures + accumulator for the summary grid.
+        # Predict first so every figure in this split can share one z cutoff.
         per_cone_for_grid: list = []
         for idx_in_split, cone_id, summ in picks:
             print(f"--- {split_name} cone {cone_id} "
@@ -188,8 +234,33 @@ def main():
             dens, truth, pred = predict_cube(model, sample)
             per_cone_for_grid.append((cone_id, summ, dens, truth, pred))
 
+        z_start_idx = choose_plot_z_start(per_cone_for_grid, target_z)
+        z_min = float(target_z[z_start_idx])
+        print(
+            f"--- {split_name}: plotting z >= {z_min:.2f} "
+            f"(index {z_start_idx}; PLOT_Z_MIN="
+            f"{os.environ.get('PLOT_Z_MIN', 'auto')}) ---"
+        )
+        with (figures_dir / "z_cutoffs.txt").open("a") as handle:
+            mode = (
+                f"manual PLOT_Z_MIN={os.environ['PLOT_Z_MIN']}"
+                if "PLOT_Z_MIN" in os.environ
+                else f"auto global_xHI_change>={LOW_Z_MIN_CHANGE:.3f}"
+            )
+            handle.write(
+                f"{split_name}: z_min={z_min:.6f}, index={z_start_idx}, "
+                f"criterion={mode}\n"
+            )
+
+        for cone_id, summ, dens, truth, pred in per_cone_for_grid:
             # Active-z slice picker (the headline change vs visualize_3d).
             active_idxs = pick_active_z_slices(truth, N_SLICES_PER_CONE)
+            active_idxs = [i for i in active_idxs if i >= z_start_idx]
+            if not active_idxs:
+                active_idxs = np.linspace(
+                    z_start_idx, len(target_z) - 1, N_SLICES_PER_CONE,
+                    dtype=int,
+                ).tolist()
             print(f"  active-z slices (z indices): {active_idxs}")
             print(f"  -> z values: "
                   f"{[float(f'{target_z[i]:.2f}') for i in active_idxs]}")
@@ -201,20 +272,17 @@ def main():
             plt.close(fig)
             print(f"  saved {out}")
 
-            # The xz lightcone strip is global by construction (it shows the
-            # full LOS), so no active-z analog needed.  Same plot function
-            # as visualize_3d.
             fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
-                                       split_name)
+                                       split_name, z_start_idx=z_start_idx)
             out = figures_dir / f"lightcone_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"  saved {out}")
 
-            # Scatter is a voxel histogram over the whole cube -- volume-
-            # weighted by the easy regions; not very different per-cone
-            # at 16 cones.  Keep for completeness.
-            fig = plot_scatter(truth, pred, cone_id, split_name)
+            fig = plot_scatter(
+                truth, pred, cone_id, split_name,
+                z_start_idx=z_start_idx, z_min=z_min,
+            )
             out = figures_dir / f"scatter_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
@@ -224,7 +292,8 @@ def main():
         # the canonical "compare across 16 reionization regimes" figure.
         if per_cone_for_grid:
             fig = plot_lightcone_summary_grid(per_cone_for_grid, target_z,
-                                              split_name)
+                                              split_name,
+                                              z_start_idx=z_start_idx)
             out = figures_dir / f"lightcone_grid_3d_{split_name}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)

@@ -11,53 +11,83 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from pathlib import Path
 
-# ---- Prefer a vendored neuralop checkout if one is available ---------------
-# Search order:
-#   ./neuraloperator/         (checkout vendored inside the repo)
-#   ../neuraloperator/        (checkout sibling to the repo: project/{data,
-#                              neuraloperator, fno-21cm} layout)
-#   ./                        (neuralop dropped straight into the repo)
-# If none has a valid __init__.py, fall back to an installed `neuralop`.
-_HERE = Path(__file__).resolve().parent
-for _cand in (_HERE / "neuraloperator",
-              _HERE.parent / "neuraloperator",
-              _HERE):
-    if (_cand / "neuralop" / "__init__.py").is_file():
-        sys.path.insert(0, str(_cand))
-        break
-# ---------------------------------------------------------------------------
+from neuralop_setup import prefer_local_neuralop
+
+prefer_local_neuralop()
 
 import numpy as np
 import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-
-from neuralop.models import FNO
+from torch.utils.data import Subset
 
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
-from dataset_3d import LightconeCubeDataset, LightconeCubeCache, split_cubes
-
-# Pull the architecture constants from the training script so the two stay in
-# sync automatically -- if you bump HIDDEN_CHANNELS or N_MODES there, viz
-# loads the matching checkpoint without a second edit here.
-from fno_21cm_3d import (
-    N_MODES, HIDDEN_CHANNELS, N_LAYERS,
-    UFNO_WIDTH, UFNO_NORM, UFNO_UNET_VARIANT, UFNO_GLOBAL_RESIDUAL,
-    MODEL_KIND,
+from dataset_3d import (
+    InputFeatures,
+    LightconeCubeDataset,
+    LightconeCubeCache,
+    ParameterNormalization,
+    resolve_split,
 )
+from modeling import (
+    ModelConfig,
+    TrainerModel,
+    build_3d_model,
+    load_checkpoint,
+)
+from metrics_21cm import compute_physical_metrics
+from run_metadata import load_run_metadata, resolve_checkpoint
 
 # ------------------------------------------------------------------ config
-# Default checkpoint path mirrors the training script's MODEL_KIND-aware
-# CHECKPOINT_DIR so viz auto-loads from the matching directory.
-_DEFAULT_CKPT = ("checkpoints_3d" if MODEL_KIND == "fno"
-                 else "checkpoints_3d_ufno")
-CHECKPOINT = os.environ.get("CHECKPOINT",
-                            f"{_DEFAULT_CKPT}/model_state_dict.pt")
+_ENV_MODEL_CONFIG = ModelConfig.from_env()
+CHECKPOINT_DIR = Path(
+    os.environ.get("CHECKPOINT_DIR", _ENV_MODEL_CONFIG.default_checkpoint_dir)
+)
+CHECKPOINT = resolve_checkpoint(CHECKPOINT_DIR)
+RUN_METADATA = (
+    load_run_metadata(CHECKPOINT.parent)
+    or load_run_metadata(CHECKPOINT_DIR)
+)
+MODEL_CONFIG = (
+    ModelConfig.from_dict(RUN_METADATA["model_config"])
+    if RUN_METADATA and "model_config" in RUN_METADATA
+    else _ENV_MODEL_CONFIG
+)
+INPUT_FEATURES = InputFeatures(
+    RUN_METADATA["input_features"]["name"]
+    if RUN_METADATA and "input_features" in RUN_METADATA
+    else os.environ.get("INPUT_FEATURES", "density_z_params").lower()
+)
+PARAMETER_NORMALIZATION = (
+    ParameterNormalization.from_dict(RUN_METADATA["parameter_normalization"])
+    if RUN_METADATA and RUN_METADATA.get("parameter_normalization")
+    else None
+)
+CHECKPOINT_TYPE = (
+    "best" if CHECKPOINT.name.startswith("best_")
+    else "final" if CHECKPOINT.name.startswith("final_")
+    else "legacy/custom"
+)
+CHECKPOINT_EPOCH = None
+if RUN_METADATA:
+    training_metadata = RUN_METADATA.get("training", {})
+    if CHECKPOINT_TYPE == "best":
+        CHECKPOINT_EPOCH = training_metadata.get("best_epoch")
+    elif CHECKPOINT_TYPE == "final":
+        CHECKPOINT_EPOCH = training_metadata.get("final_epoch")
+MODEL_KIND = MODEL_CONFIG.kind
+N_MODES = MODEL_CONFIG.modes
+HIDDEN_CHANNELS = MODEL_CONFIG.hidden_channels
+N_LAYERS = MODEL_CONFIG.n_layers
+UFNO_WIDTH = MODEL_CONFIG.ufno_width
+UFNO_NORM = MODEL_CONFIG.ufno_norm
+UFNO_UNET_VARIANT = MODEL_CONFIG.ufno_unet_variant
+UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
 
 # Base directory for all viz outputs.  Each call to main() creates a fresh
 # uniquely-named subfolder under this base (see make_run_folder), so
@@ -141,6 +171,9 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
         f"job_id:       {job_id or '(local, no SLURM)'}",
         f"MODEL_KIND:   {MODEL_KIND}",
         f"CHECKPOINT:   {CHECKPOINT}",
+        f"CKPT_TYPE:    {CHECKPOINT_TYPE}",
+        f"CKPT_EPOCH:   {CHECKPOINT_EPOCH}",
+        f"INPUT:        {INPUT_FEATURES.name}",
         f"CUBES_CACHE:  {CUBES_CACHE}",
         f"N_MODES:      {N_MODES}",
         f"HIDDEN_CHAN:  {HIDDEN_CHANNELS}",
@@ -154,29 +187,8 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
     return folder
 
 
-# ------------------------------------------------------------------ wrapper
-class SilentFNO(nn.Module):
-    def __init__(self, fno):
-        super().__init__()
-        self.fno = fno
-
-    def forward(self, x, **kwargs):
-        return self.fno(x)
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            pass
-        return getattr(self._modules["fno"], name)
-
-
-def _strip_prefix(k: str, prefix: str) -> str:
-    return k[len(prefix):] if k.startswith(prefix) else k
-
-
 # ------------------------------------------------------------------ helpers
-def load_model(in_channels: int = 2) -> nn.Module:
+def load_model(in_channels: int = 2) -> torch.nn.Module:
     """Reconstruct the FNO architecture and load the latest checkpoint.
 
     Robust to multiple checkpoint formats:
@@ -192,77 +204,14 @@ def load_model(in_channels: int = 2) -> nn.Module:
     ``dataset.in_channels`` from the caller so parameter-conditioned runs
     (where in_channels=13) load the correct lifting layer.
     """
-    raw_sd = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
-    raw_sd = {k: v for k, v in raw_sd.items() if k != "_metadata"}
-
-    if MODEL_KIND == "ufno":
-        # U-FNO: SilentFNO wraps UFNOWrapped, which wraps Wen et al.'s
-        # SimpleBlock3d.  Same in/out conventions; same prefix-detection
-        # logic below handles the DDP module. prefix.
-        from models_ufno import UFNOWrapped
-        fno = UFNOWrapped(
-            modes1=N_MODES[0], modes2=N_MODES[1], modes3=N_MODES[2],
-            width=UFNO_WIDTH,
-            in_channels=in_channels,
-            out_channels=1,
-            sigmoid=True,
-            norm=UFNO_NORM,                     # must match training time
-            unet_variant=UFNO_UNET_VARIANT,     # must match training time
-            global_residual=UFNO_GLOBAL_RESIDUAL,
-        )
-    else:
-        fno = FNO(n_modes=N_MODES, hidden_channels=HIDDEN_CHANNELS,
-                  in_channels=in_channels, out_channels=1, n_layers=N_LAYERS,
-                  projection_channel_ratio=2, positional_embedding="grid")
-    model = SilentFNO(fno)
-    target_keys = set(model.state_dict().keys())
-
-    candidates = [
-        ("as-is",
-            raw_sd),
-        ("add fno.",
-            {f"fno.{k}": v for k, v in raw_sd.items()}),
-        ("strip module.",
-            {_strip_prefix(k, "module."): v for k, v in raw_sd.items()}),
-        ("strip module. + add fno.",
-            {f"fno.{_strip_prefix(k, 'module.')}": v for k, v in raw_sd.items()}),
-    ]
-
-    def _matches(d: dict) -> int:
-        # A key matches only if the name is present AND the tensor shape
-        # agrees with the model's parameter at that key.
-        n = 0
-        target_sd = model.state_dict()
-        for k, v in d.items():
-            if k in target_sd and target_sd[k].shape == v.shape:
-                n += 1
-        return n
-
-    best_name, best_sd = max(candidates, key=lambda c: _matches(c[1]))
-    n_matched = _matches(best_sd)
-    n_target = len(target_keys)
-
-    print(f"[load_model] checkpoint keys: {len(raw_sd)}; "
-          f"best transform: {best_name!r}  "
-          f"matched {n_matched}/{n_target} model params "
+    model = TrainerModel(build_3d_model(MODEL_CONFIG, in_channels))
+    report = load_checkpoint(model, CHECKPOINT)
+    print(f"[load_model] transform: {report.transform!r}; "
+          f"matched {report.matched}/{report.total} model params "
           f"(in_channels={in_channels})")
-
-    if n_matched == 0:
-        raise RuntimeError(
-            f"No checkpoint keys match the model after trying all transforms. "
-            f"Sample raw key: {next(iter(raw_sd))!r}; "
-            f"sample target key: {next(iter(target_keys))!r}. "
-            f"Architecture mismatch -- the model was trained with a different "
-            f"in_channels/N_MODES/HIDDEN_CHANNELS than what viz is constructing."
-        )
-
-    # strict=False here because the checkpoint may contain optimizer/scheduler
-    # state under arbitrary extra keys -- those should be ignored.  But the
-    # n_matched check above guarantees we're not silently loading nothing.
-    missing, unexpected = model.load_state_dict(best_sd, strict=False)
-    if missing:
-        print(f"[load_model] WARNING: {len(missing)} parameters left at random "
-              f"init: {sorted(missing)[:3]}...")
+    if report.missing:
+        print(f"[load_model] WARNING: {len(report.missing)} parameters left at "
+              f"random init: {sorted(report.missing)[:3]}...")
     return model.to(DEVICE).eval()
 
 
@@ -288,6 +237,15 @@ def predict_cube(model, sample) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
           f"{truth.min():+.3f} / {truth.mean():+.3f} / {truth.max():+.3f} / "
           f"{truth.std():.3f}")
     return dens, truth, pred
+
+
+def xy_transpose_error(model, sample, pred: np.ndarray) -> float:
+    """Measure prediction consistency under exchange of transverse axes."""
+    x_transposed = sample["x"].transpose(1, 2).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        pred_transposed = model(x=x_transposed).cpu().numpy()[0, 0]
+    pred_transposed = pred_transposed.transpose(1, 0, 2)
+    return float(np.sqrt(np.mean((pred - pred_transposed) ** 2)))
 
 
 # --------------------------------------------------------- z-slice panel
@@ -337,17 +295,27 @@ def plot_z_slices(dens, truth, pred, target_z, idxs, cone_id, split):
 
 
 # ----------------------------------------------------- xz lightcone strip
-def plot_lightcone_strip(dens, truth, pred, target_z, cone_id, split):
-    """Edge-on xz panel at y = Ny // 2 spanning the full LOS extent."""
+def plot_lightcone_strip(
+    dens, truth, pred, target_z, cone_id, split, z_start_idx=0
+):
+    """Edge-on xz panel at y = Ny // 2 over the selected LOS extent."""
+    z_start_idx = int(z_start_idx)
+    if not 0 <= z_start_idx < len(target_z):
+        raise ValueError("z_start_idx is outside target_z")
     ny = dens.shape[1]
     j = ny // 2
-    d_strip = dens[:, j, :]
-    t_strip = truth[:, j, :]
-    p_strip = pred[:, j, :]
+    d_strip = dens[:, j, z_start_idx:]
+    t_strip = truth[:, j, z_start_idx:]
+    p_strip = pred[:, j, z_start_idx:]
     e_strip = p_strip - t_strip
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 8), sharex=True)
-    extent = [float(target_z[0]), float(target_z[-1]), 0, d_strip.shape[0]]
+    extent = [
+        float(target_z[z_start_idx]),
+        float(target_z[-1]),
+        0,
+        d_strip.shape[0],
+    ]
 
     axes[0].imshow(d_strip, cmap="plasma", aspect="auto",
                    origin="lower", extent=extent)
@@ -377,10 +345,12 @@ def plot_lightcone_strip(dens, truth, pred, target_z, cone_id, split):
 
 
 # --------------------------------------------------------------- scatter
-def plot_scatter(truth, pred, cone_id, split):
+def plot_scatter(
+    truth, pred, cone_id, split, z_start_idx=0, z_min=None
+):
     fig, ax = plt.subplots(figsize=(5, 5))
-    t_flat = truth.ravel()
-    p_flat = pred.ravel()
+    t_flat = truth[..., int(z_start_idx):].ravel()
+    p_flat = pred[..., int(z_start_idx):].ravel()
 
     max_pts = 50_000
     if len(t_flat) > max_pts:
@@ -397,7 +367,8 @@ def plot_scatter(truth, pred, cone_id, split):
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_aspect("equal")
-    ax.set_title(f"Scatter - {split} (cone {cone_id})")
+    z_note = "" if z_min is None else f", z >= {float(z_min):.2f}"
+    ax.set_title(f"Scatter - {split} (cone {cone_id}{z_note})")
     ax.legend()
 
     r2 = float(np.corrcoef(t_flat, p_flat)[0, 1] ** 2)
@@ -408,17 +379,43 @@ def plot_scatter(truth, pred, cone_id, split):
     return fig
 
 
+def plot_physical_diagnostics(metrics: dict, cone_id: int, split: str):
+    """Plot global history, power spectra, and Fourier cross-correlation."""
+    fourier = metrics["fourier"]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    axes[0].plot(metrics["target_z"], metrics["global_xhi_truth"], label="truth")
+    axes[0].plot(metrics["target_z"], metrics["global_xhi_pred"], label="prediction")
+    axes[0].set(xlabel="redshift z", ylabel="global x_HI", ylim=(0, 1))
+    axes[0].legend()
+
+    axes[1].loglog(fourier["k_grid"], fourier["power_truth"], label="truth")
+    axes[1].loglog(fourier["k_grid"], fourier["power_pred"], label="prediction")
+    axes[1].set(xlabel="k [grid units]", ylabel="P_xHI(k)")
+    axes[1].legend()
+
+    axes[2].semilogx(fourier["k_grid"], fourier["cross_correlation"])
+    axes[2].set(
+        xlabel="k [grid units]",
+        ylabel="Fourier cross-correlation",
+        ylim=(-1.05, 1.05),
+    )
+    fig.suptitle(f"Physical diagnostics - {split} cone {cone_id}")
+    fig.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------- cone-picker by behavior
-def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
+def pick_cones_by_reion_behavior(split_ds, split_cone_ids, target_z,
                                  n_cones: int,
                                  stratify_z: float) -> list[tuple[int, int, float]]:
     """Pick *n_cones* cones from the split that span the reionization range.
 
     Ranks every cone in the split by its mean truth-x_HI at the LOS slice
-    closest to *stratify_z* (a single 2-D slice per cone, cheap to read),
-    then samples at evenly spaced percentiles of that ranking.  Returns a
-    list of ``(idx_in_split, global_cone_id, summary_xhi)`` tuples,
-    ordered from most-reionized (low summary) to least (high summary).
+    closest to *stratify_z*, then samples at evenly spaced percentiles of
+    that ranking.  ``split_cone_ids`` carries the global cone id (file
+    index) of each split position, used purely for labelling.  Returns a
+    list of ``(idx_in_split, cone_id, summary_xhi)`` tuples, ordered from
+    most-reionized (low summary) to least (high summary).
 
     Picking a single "first cone" -- the previous behavior -- gave wildly
     different visuals run to run because LHS-sampled parameter draws produce
@@ -461,11 +458,13 @@ def pick_cones_by_reion_behavior(split_ds, split_idx, target_z,
     # Sort by summary x_HI so the rendered figures step cleanly from
     # most-reionized (low <x_HI>) to least (high).
     order.sort(key=lambda i: summaries[i])
-    return [(i, int(split_idx[i]), float(summaries[i])) for i in order]
+    return [(i, int(split_cone_ids[i]), float(summaries[i])) for i in order]
 
 
 # ------------------------------------------------- multi-cone summary plot
-def plot_lightcone_summary_grid(per_cone, target_z, split_name):
+def plot_lightcone_summary_grid(
+    per_cone, target_z, split_name, z_start_idx=0
+):
     """One xz lightcone strip per cone, stacked vertically.
 
     *per_cone* is a list of ``(cone_id, summary_xhi, dens, truth, pred)``.
@@ -477,14 +476,22 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
     image shows how the same model handles cones with qualitatively different
     reionization histories.
     """
+    z_start_idx = int(z_start_idx)
+    if not 0 <= z_start_idx < len(target_z):
+        raise ValueError("z_start_idx is outside target_z")
     n = len(per_cone)
     fig, axes = plt.subplots(n, 3, figsize=(18, 2.0 * n + 1), squeeze=False)
-    extent = [float(target_z[0]), float(target_z[-1]), 0, per_cone[0][2].shape[0]]
+    extent = [
+        float(target_z[z_start_idx]),
+        float(target_z[-1]),
+        0,
+        per_cone[0][2].shape[0],
+    ]
 
     for row, (cone_id, summ, dens, truth, pred) in enumerate(per_cone):
         j = truth.shape[1] // 2
-        t_strip = truth[:, j, :]
-        p_strip = pred[:, j, :]
+        t_strip = truth[:, j, z_start_idx:]
+        p_strip = pred[:, j, z_start_idx:]
         e_strip = p_strip - t_strip
 
         axes[row, 0].imshow(t_strip, cmap="viridis", aspect="auto",
@@ -512,7 +519,8 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
                 axes[row, c].set_xticklabels([])
 
     fig.suptitle(f"Lightcone-strip grid across {n} reionization regimes  "
-                 f"({split_name})", y=1.0, fontsize=11)
+                 f"({split_name}, z >= {float(target_z[z_start_idx]):.2f})",
+                 y=1.0, fontsize=11)
     fig.tight_layout()
     return fig
 
@@ -520,13 +528,20 @@ def plot_lightcone_summary_grid(per_cone, target_z, split_name):
 # ------------------------------------------------------------------ main
 def main():
     print(f"Device: {DEVICE}")
-    if not Path(CHECKPOINT).exists():
+    print(
+        f"Checkpoint: {CHECKPOINT} "
+        f"(type={CHECKPOINT_TYPE}, epoch={CHECKPOINT_EPOCH})"
+    )
+    if not CHECKPOINT.exists():
         print(f"Checkpoint not found: {CHECKPOINT}", file=sys.stderr)
         sys.exit(1)
 
     if CUBES_CACHE.exists():
         print(f"Using pre-computed cube cache: {CUBES_CACHE}")
-        dataset = LightconeCubeCache(CUBES_CACHE)
+        dataset = LightconeCubeCache(
+            CUBES_CACHE,
+            input_features=INPUT_FEATURES,
+        )
     else:
         print(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
               f"from {DATA_DIR}")
@@ -539,12 +554,32 @@ def main():
             file_paths=files,
             n_z=N_Z, z_min=Z_MIN, z_max=Z_MAX,
             preload=False,
+            input_features=INPUT_FEATURES,
         )
-    _, val_ds, test_ds, (_, val_idx, test_idx) = split_cubes(
-        dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
+    # Prefer the split recorded at training time (cone ids when available)
+    # over recomputing it -- recomputation silently drifts if the dataset
+    # length or cache row order differs from training.
+    train_idx, val_idx, test_idx, split_source = resolve_split(
+        dataset, RUN_METADATA,
+        val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
     )
-    print(f"Val cones: {val_idx}")
-    print(f"Test cones: {test_idx}")
+    val_ds = Subset(dataset, val_idx)
+    test_ds = Subset(dataset, test_idx)
+    print(f"Split source: {split_source}")
+    normalization = PARAMETER_NORMALIZATION
+    if INPUT_FEATURES.use_params and normalization is None:
+        if RUN_METADATA is not None:
+            raise RuntimeError(
+                "run metadata is missing parameter normalization statistics"
+            )
+        print(
+            "WARNING: legacy checkpoint has no run metadata; fitting "
+            "train-split parameter statistics for visualization"
+        )
+        normalization = dataset.fit_parameter_normalization(train_idx)
+    dataset.set_parameter_normalization(normalization)
+    print(f"Val cones (cone_id): {[int(dataset.cone_ids[r]) for r in val_idx]}")
+    print(f"Test cones (cone_id): {[int(dataset.cone_ids[r]) for r in test_idx]}")
 
     model = load_model(in_channels=getattr(dataset, "in_channels", 2))
     print("Model loaded.")
@@ -556,8 +591,9 @@ def main():
     # Detailed viz appends "-detailed" downstream.
     figures_dir = make_run_folder(FIGURES_BASE, tag=VIZ_TAG)
     print(f"Writing figures to: {figures_dir}")
+    physical_records = []
 
-    for split_ds, split_idx, split_name in [
+    for split_ds, split_rows, split_name in [
         (val_ds, val_idx, "validation"),
         (test_ds, test_idx, "test"),
     ]:
@@ -565,11 +601,13 @@ def main():
             print(f"No cones in {split_name} split; skipping")
             continue
 
-        # Pick N cones spanning the reionization-behavior range.
+        # Pick N cones spanning the reionization-behavior range.  Labels use
+        # global cone ids, not cache row positions.
+        split_cone_ids = [int(dataset.cone_ids[r]) for r in split_rows]
         print(f"--- {split_name}: picking {N_CONES_PER_SPLIT} cones "
               f"by reionization behavior at z={STRATIFY_Z} ---")
         picks = pick_cones_by_reion_behavior(
-            split_ds, split_idx, target_z,
+            split_ds, split_cone_ids, target_z,
             n_cones=N_CONES_PER_SPLIT, stratify_z=STRATIFY_Z,
         )
         for idx_in_split, cone_id, summ in picks:
@@ -583,6 +621,21 @@ def main():
             sample = split_ds[idx_in_split]
             dens, truth, pred = predict_cube(model, sample)
             per_cone_for_grid.append((cone_id, summ, dens, truth, pred))
+            physical = compute_physical_metrics(truth, pred, target_z)
+            physical["xy_transpose_rmse"] = xy_transpose_error(
+                model, sample, pred
+            )
+            physical_records.append({
+                "split": split_name,
+                "cone_id": cone_id,
+                **physical,
+            })
+            print(
+                f"  XY transpose RMSE: {physical['xy_transpose_rmse']:.5f}; "
+                f"edge/interior RMSE: "
+                f"{physical['transverse_edge_rmse']:.5f}/"
+                f"{physical['transverse_interior_rmse']:.5f}"
+            )
 
             # z-slice grid (one PNG per cone)
             idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE,
@@ -590,6 +643,14 @@ def main():
             fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
                                 split_name)
             out = figures_dir / f"comparison_3d_{split_name}_cone{cone_id}.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  saved {out}")
+
+            fig = plot_physical_diagnostics(
+                physical, cone_id=cone_id, split=split_name
+            )
+            out = figures_dir / f"physical_3d_{split_name}_cone{cone_id}.png"
             fig.savefig(out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"  saved {out}")
@@ -620,6 +681,9 @@ def main():
             plt.close(fig)
             print(f"Saved {out}")
 
+    metrics_path = figures_dir / "physical_metrics.json"
+    metrics_path.write_text(json.dumps(physical_records, indent=2) + "\n")
+    print(f"Saved {metrics_path}")
     print("Done.")
 
 

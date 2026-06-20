@@ -10,10 +10,9 @@ Two pipelines live side by side:
   200 Mpc box) at a fixed redshift and predicts `x_HI` on the same grid.
 - **v3 — 3-D, full lightcone.** Takes an entire lightcone cube, interpolates
   the LOS axis down to a fixed 256-cell grid, and predicts the whole `x_HI`
-  cube in a single forward pass. Inputs carry both the density and an explicit
-  `1/(1+z)` channel so the model has direct access to cosmic time along the
-  line of sight; the FNO's grid positional embedding supplies the (x, y, z)
-  coordinates.
+  cube in a single forward pass. The default input carries density, explicit
+  `1/(1+z)`, and the 11 sampled simulation parameters. `INPUT_FEATURES`
+  selects controlled conditioning ablations.
 
 ## Repository layout
 
@@ -23,9 +22,14 @@ Two pipelines live side by side:
 .
 ├── fno_21cm.py, fno_21cm_3d.py    # training entry points (v2, v3)
 ├── dataset.py, dataset_3d.py      # PyTorch Datasets
+├── modeling.py, losses.py         # shared model factory and Trainer adapters
+├── neuralop_setup.py              # local/installed neuralop resolution
+├── lightcone_params.py            # shared conditioning-parameter schema
 ├── build_trainset.py              # v2 slice cache builder
 ├── build_cubes.py                 # v3 cube cache builder
-├── visualize.py, visualize_3d.py  # checkpoint -> plots
+├── visualize.py, visualize_3d.py  # checkpoint -> prediction plots
+├── visualize_spectral_weights.py  # epoch -> Fourier-weight diagnostics
+├── visualize_spectral_weights_z.py # Z/LOS-only Fourier-weight diagnostics
 ├── loader.py                      # shared HDF5 lightcone reader
 ├── slurm/                         # all sbatch scripts (cluster)
 ├── figures/                       # all generated plots
@@ -49,7 +53,9 @@ Two pipelines live side by side:
 | `fno_21cm_3d.py` | 3-D training entry point (full lightcone in / full cube out). Auto-detects the cube cache; falls back to streaming. |
 | `dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
 | `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
-| `visualize_3d.py` | Loads a 3-D checkpoint; renders z-slice grid, edge-on xz lightcone strip, and voxel scatter into `figures/`. |
+| `visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
+| `visualize_spectral_weights.py` | Plots per-layer Fourier-weight magnitudes over training epochs, selected-epoch profiles, and high-mode/low-mode cutoff ratios. |
+| `visualize_spectral_weights_z.py` | Compact version that renders only the LOS/Z modes and writes a Z-only CSV. |
 
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
@@ -63,10 +69,14 @@ Two pipelines live side by side:
 | `slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints_3d_ufno_v3_los1d/`. |
 | `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
 | `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
-| `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, per-cone active-z slice picker that focuses on the partial-reionization window. FNO checkpoint. |
+| `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
+| `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
+| `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
+| `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
 
-All four viz scripts write into a per-run subfolder under `figures/` whose
+The prediction-visualization scripts write into a per-run subfolder under
+`figures/` whose
 name encodes the model variant, timestamp, and (when running under SLURM)
 the job id — e.g. `figures/ufno_20260606-143022_job3965704/`. A
 `run_info.txt` is dropped in each folder summarising the config so old
@@ -144,24 +154,76 @@ python build_cubes.py --data "$LIGHTCONE_DIR" --out cubes_3d.h5
 # visualization use it automatically; otherwise they stream raw lightcones.
 python fno_21cm_3d.py
 
-# Visualize predictions from the latest 3-D checkpoint
+# Visualize the best-validation checkpoint (set CHECKPOINT_KIND=final for
+# the final epoch instead).
 python visualize_3d.py
+
+# Plot Fourier weight evolution from initialization through every epoch.
+python visualize_spectral_weights.py
+
+# Plot only the Z/LOS Fourier modes.
+python visualize_spectral_weights_z.py
 ```
+
+For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary
+`RUN_SEED`. This changes model initialization and training order while using
+the same train/validation/test cones:
+
+```bash
+RUN_SEED=41 CHECKPOINT_DIR=checkpoints_3d_ufno_z32_seed41 python fno_21cm_3d.py
+RUN_SEED=42 CHECKPOINT_DIR=checkpoints_3d_ufno_z32_seed42 python fno_21cm_3d.py
+RUN_SEED=43 CHECKPOINT_DIR=checkpoints_3d_ufno_z32_seed43 python fno_21cm_3d.py
+```
+
+Set `DETERMINISTIC_RUN=true` when bitwise repeatability is more important
+than maximum training throughput. Every seed must use its own
+`CHECKPOINT_DIR`.
 
 Each lightcone is interpolated along the LOS axis from its native ~2340 cells
 down to `N_Z = 256` (configurable) so a full cube fits on an A30 (24 GB) at
-`BATCH_SIZE = 1`. The input has two physical channels (density / 10 and
-`1/(1+z)`); the FNO's `positional_embedding="grid"` adds normalized
-(x, y, z) coordinate channels, where z doubles as normalized comoving
-distance because the native LOS cells are uniform in comoving distance.
+`BATCH_SIZE = 1`. `INPUT_FEATURES` accepts `density`, `params`, `density_z`,
+or `density_z_params` (default). Parameter statistics are fitted only on
+training cones and stored in `run_metadata.json`, so cached and raw loading
+use the same held-out transformation. The FNO's grid positional embedding
+adds normalized (x, y, grid-z) coordinates. The cache is sampled uniformly
+in redshift, so grid-z is normalized redshift rather than comoving distance.
+
+Each training run writes `best_model_state_dict.pt` (lowest globally reduced
+`val_l2`), `final_model_state_dict.pt`, `run_metadata.json`, and a compact
+`spectral_weight_history.npz`. The latter stores channel-aggregated RMS
+complex-weight magnitudes for every Fourier layer at initialization and after
+every epoch. `visualize_spectral_weights.py` turns it into mode/epoch heatmaps,
+selected-epoch profiles, a high-mode/low-mode cutoff ratio, and a CSV export.
+The transverse axes fold positive and negative frequencies into absolute
+mode index; the LOS axis follows the non-negative real-FFT convention. Thus,
+for NeuralOperator `n_modes=(16,16,16)`, the plots show absolute transverse
+indices `0..8` and LOS indices `0..8`, rather than 16 distinct positive
+wavenumbers. The Wen et al. U-FNO implementation retains separate positive
+and negative transverse slices, so `modes=(16,16,16)` spans absolute
+transverse indices `0..16` and LOS indices `0..15`.
+Visualization
+defaults to the best checkpoint and reproduces the recorded model and input
+configuration. Its `physical_metrics.json` includes global `x_HI(z)`,
+active-window errors, isotropic power spectra, Fourier cross-correlation, and
+ionized-region size summaries. It also reports X/Y transpose consistency and
+transverse edge-versus-interior residuals for boundary diagnostics.
 
 Key hyperparameters at the top of `fno_21cm_3d.py`:
 `N_MODES = (16, 16, 16)`, `HIDDEN_CHANNELS = 32`, `N_LAYERS = 4`,
 `BATCH_SIZE = 1`, `LEARNING_RATE = 5e-4`, `N_EPOCHS = 100`.
 
-Loss: `0.5 * absL2 + 0.5 * absH1` with `d=3` (the 3-D H1 term adds gradient
-sensitivity along all three axes — particularly useful for bubble edges
-along the line of sight, which the 2-D model could not see at all).
+Loss: `0.5 * absL2 + 0.5 * absH1` with `d=3`. H1 uses periodic finite
+differences in the transverse X/Y plane and centered differences on interior
+LOS cells. The value term still covers the complete cube, but the unrelated
+`z=5` and `z=25` endpoints are excluded from the LOS derivative term.
+
+For U-FNO, training starts with the L2 term and linearly introduces H1 over
+five epochs. Its default base learning rate is `1e-4` and gradients are clipped
+to norm `1.0`, preventing the output sigmoid from collapsing to all zero.
+Override these safeguards with `UFNO_LEARNING_RATE`,
+`UFNO_H1_WARMUP_EPOCHS`, and `UFNO_GRAD_CLIP_NORM`. Metrics include
+`val/test_pred_mean`, `pred_std`, and saturation fractions so output collapse
+is visible after the first epoch.
 
 ### 2-D (legacy, kept for comparison)
 

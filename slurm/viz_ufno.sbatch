@@ -59,7 +59,7 @@ export PYTHONUNBUFFERED=1
 # The single switch that distinguishes this viz sbatch from the FNO one.
 # visualize_3d.py reads MODEL_KIND at import time (via fno_21cm_3d) and:
 #   * picks UFNOWrapped in load_model() instead of neuralop.FNO
-#   * auto-selects CHECKPOINT="checkpoints_3d_ufno/model_state_dict.pt"
+#   * auto-selects CHECKPOINT="checkpoints_3d_ufno/best_model_state_dict.pt"
 #     (unless CHECKPOINT is overridden in this env block).
 export MODEL_KIND=ufno
 

@@ -36,8 +36,12 @@ Layout produced::
       params            (N, 11)           float32   gzip
       attrs: n_z, z_min, z_max, param_names
 
-The cone_id matches the global ``sorted(...glob(...))`` ordering, so the same
-file index identifies the same cone across raw and cached pipelines.
+The cone_id matches the global ``sorted(...glob(...))`` ordering.  ``merge``
+writes rows sorted by cone_id, so row index == cone_id whenever no source
+file was skipped and positional splits agree between the raw-streaming and
+cached pipelines.  Caches merged before this ordering existed have
+shard-interleaved rows; downstream tools should map through the ``cone_id``
+dataset rather than trust row positions (see dataset_3d.resolve_split).
 """
 
 from __future__ import annotations
@@ -49,34 +53,10 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from lightcone_params import PARAM_NAMES, read_sampled_params
 from loader import LightconeFile
 
-# 11 LHS-sampled parameters (stored per cone for later conditioning / analysis).
-# Matches build_trainset.py so the two caches are interchangeable downstream.
-PARAMS = [
-    "F_ESC10", "F_STAR10", "ALPHA_ESC", "ALPHA_STAR", "L_X", "NU_X_THRESH",
-    "M_TURN", "t_STAR", "X_RAY_SPEC_INDEX", "OMm", "SIGMA_8",
-]
-
-
-# ------------------------------------------------------------------- params
-def read_params(f: h5py.File, wanted: list[str]) -> np.ndarray:
-    """Best-effort read of the sampled parameters (NaN-filled on mismatch).
-
-    Parameters are not needed for the basic density->x_HI training, only for
-    later conditioning, so a layout mismatch must NOT abort the cluster pass.
-    """
-    try:
-        g = f["params"]
-        names = [n.decode() if isinstance(n, (bytes, bytearray)) else str(n)
-                 for n in np.asarray(g["names"])]
-        values = np.asarray(g["values"], dtype=np.float32).ravel()
-        lut = dict(zip(names, values))
-        return np.array([lut.get(w, np.nan) for w in wanted], dtype=np.float32)
-    except Exception as exc:                              # noqa: BLE001
-        print(f"  [warn] could not read params ({exc}); storing NaNs",
-              file=sys.stderr)
-        return np.full(len(wanted), np.nan, dtype=np.float32)
+PARAMS = list(PARAM_NAMES)
 
 
 # --------------------------------------------------------------- per-cone IO
@@ -87,7 +67,7 @@ def interp_one(path: Path, target_z: np.ndarray
         dens = lf.read_interpolated("density", target_z)
         xhi = lf.read_interpolated("neutral_fraction", target_z)
     with h5py.File(path, "r") as f:
-        params = read_params(f, PARAMS)
+        params = read_sampled_params(f)
     return dens, xhi, params
 
 
@@ -182,15 +162,15 @@ def build(data_dir: Path, out: Path, n_z: int, z_min: float, z_max: float,
 
 # --------------------------------------------------------- direct chunk copy
 def _copy_chunks_direct(src_dset: h5py.Dataset, dst_dset: h5py.Dataset,
-                        dst_offset: int, n: int) -> int:
-    """Copy *n* per-cone chunks from ``src_dset`` to ``dst_dset`` byte-for-byte.
+                        dst_rows: np.ndarray) -> int:
+    """Copy per-cone chunks from ``src_dset`` to ``dst_dset`` byte-for-byte.
 
     The chunks are *(1, Nx, Ny, Nz)*, so chunk *j* of the source maps to chunk
-    *(dst_offset + j)* of the destination.  We use h5py's low-level direct
-    chunk API (``read_direct_chunk`` / ``write_direct_chunk``), which moves the
+    *dst_rows[j]* of the destination.  We use h5py's low-level direct chunk
+    API (``read_direct_chunk`` / ``write_direct_chunk``), which moves the
     compressed bytes through unchanged -- no gzip decode + re-encode, no numpy
     round-trip.  On a typical ~40 MB gzip-4 cube this is ~5-10x faster than the
-    classic ``dst[offset+j] = src[j]`` pattern and is the difference between
+    classic ``dst[row] = src[j]`` pattern and is the difference between
     fitting the full 33-shard merge in walltime or not.
 
     Falls back to the classic copy for any chunk that the direct API rejects
@@ -202,18 +182,18 @@ def _copy_chunks_direct(src_dset: h5py.Dataset, dst_dset: h5py.Dataset,
     n_fast = 0
     src_id = src_dset.id
     dst_id = dst_dset.id
-    for j in range(n):
+    for j, dst_row in enumerate(dst_rows):
         try:
             filter_mask, chunk_bytes = src_id.read_direct_chunk((j, 0, 0, 0))
             dst_id.write_direct_chunk(
-                (dst_offset + j, 0, 0, 0),
+                (int(dst_row), 0, 0, 0),
                 chunk_bytes,
                 filter_mask=filter_mask,
             )
             n_fast += 1
-        except Exception as exc:                          # noqa: BLE001
+        except Exception:                                 # noqa: BLE001
             # Fall back to decompress + recompress for this chunk.
-            dst_dset[dst_offset + j] = src_dset[j]
+            dst_dset[int(dst_row)] = src_dset[j]
     return n_fast
 
 
@@ -224,18 +204,52 @@ def merge(out: Path, num_shards: int, compress: bool) -> None:
     if missing:
         sys.exit(f"Missing shards: {[s.name for s in missing]}")
 
-    # First pass: gather per-shard counts and cube shape
+    # First pass: gather per-shard counts, cube shape, and cone ids.  The
+    # shards were built as ``files[shard::num_shards]``, so concatenating
+    # them naively produces shard-interleaved rows ([0, 33, 66, ..., 1, 34,
+    # ...]).  Sort destination rows by cone_id instead so row index ==
+    # cone_id (when no file was skipped) and positional splits agree with
+    # the raw-streaming pipeline.
     counts: list[int] = []
     nx = ny = n_z = None
+    shard_cone_ids: list[np.ndarray] = []
     for s in shards:
         with h5py.File(s, "r") as f:
             shp = f["density"].shape
             counts.append(int(shp[0]))
             if nx is None:
                 _, nx, ny, n_z = shp
-    n_total = sum(counts)
+            shard_cone_ids.append(np.asarray(f["cone_id"][:], dtype=np.int64))
+    all_ids = np.concatenate(shard_cone_ids)
+    n_total = int(all_ids.size)
+
+    # Validate uniqueness and completeness.  Cone ids are global file indices
+    # from the sorted glob; the merged cache is only canonical if every id
+    # in 0..N-1 appears exactly once.  Fail loudly rather than write a cache
+    # that silently duplicates or omits physical cones.
+    sorted_ids = np.sort(all_ids)
+    expected = np.arange(n_total, dtype=all_ids.dtype)
+    if not np.array_equal(sorted_ids, expected):
+        ids_set = set(int(i) for i in all_ids)
+        missing = sorted(set(range(n_total)) - ids_set)
+        extra = sorted(ids_set - set(range(n_total)))
+        duplicates = sorted({
+            int(i) for i, count in zip(*np.unique(all_ids, return_counts=True))
+            if count > 1
+        })
+        raise ValueError(
+            f"Shard cone_ids are not a complete permutation of 0..{n_total - 1}. "
+            f"missing={missing[:10]}{'...' if len(missing) > 10 else ''}, "
+            f"extra={extra[:10]}{'...' if len(extra) > 10 else ''}, "
+            f"duplicates={duplicates[:10]}{'...' if len(duplicates) > 10 else ''}"
+        )
+
+    # Destination row of each global source position = rank in cone_id order.
+    order = np.argsort(all_ids, kind="stable")
+    dst_of_src = np.empty(n_total, dtype=np.int64)
+    dst_of_src[order] = np.arange(n_total)
     print(f"[merge] {num_shards} shards -> {n_total} cones "
-          f"of shape ({nx}, {ny}, {n_z})", flush=True)
+          f"of shape ({nx}, {ny}, {n_z}), rows sorted by cone_id", flush=True)
 
     shape = (n_total, nx, ny, n_z)
     with h5py.File(out, "w") as o:
@@ -253,14 +267,15 @@ def merge(out: Path, num_shards: int, compress: bool) -> None:
         n_total_chunks = 0
         offset = 0
         for shard_path, count in zip(shards, counts):
+            dst_rows = dst_of_src[offset:offset + count]
             with h5py.File(shard_path, "r") as f:
                 n_fast_total += _copy_chunks_direct(
-                    f["density"], dset_d, offset, count)
+                    f["density"], dset_d, dst_rows)
                 n_fast_total += _copy_chunks_direct(
-                    f["neutral_fraction"], dset_x, offset, count)
+                    f["neutral_fraction"], dset_x, dst_rows)
                 n_total_chunks += 2 * count
-                cone_ids[offset:offset + count] = f["cone_id"][:]
-                params_arr[offset:offset + count] = f["params"][:]
+                cone_ids[dst_rows] = f["cone_id"][:]
+                params_arr[dst_rows] = f["params"][:]
                 if target_z is None:
                     target_z = f["target_z"][:]
                     z_min = float(f.attrs["z_min"])
