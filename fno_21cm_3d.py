@@ -19,7 +19,7 @@ import random
 import sys
 from pathlib import Path
 
-from neuralop_setup import prefer_local_neuralop
+from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
 
@@ -39,7 +39,7 @@ from neuralop.utils import count_model_params
 import neuralop as _neuralop
 print(f"[fno_21cm_3d] using neuralop from {_neuralop.__file__}")
 
-from dataset_3d import (
+from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeDataset,
     LightconeCubeCache,
@@ -53,8 +53,8 @@ from losses import (
     WeightedLoss,
 )
 from modeling import ModelConfig, TrainerModel, build_3d_model
-from run_metadata import write_run_metadata
-from spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
+from util.run_metadata import write_run_metadata
+from util.spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
 
 
 # ------------------------------------------------------------------ config
@@ -64,7 +64,7 @@ from spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
 DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 
-# Pre-computed cube cache (built by build_cubes.py).  Env var CUBES_CACHE
+# Pre-computed cube cache (built by dataset/build_cubes.py). Env var CUBES_CACHE
 # overrides; default is ./cubes_3d.h5 next to the script.  If the cache file
 # exists at startup, the training script uses LightconeCubeCache (fast,
 # pre-interpolated cubes); otherwise it falls back to LightconeCubeDataset
@@ -537,7 +537,7 @@ def main():
                    "consistent.")
     else:
         rprint(f"No cube cache at {CUBES_CACHE}; streaming raw lightcones "
-               f"from {DATA_DIR}. Run build_cubes.py to precompute and speed "
+               f"from {DATA_DIR}. Run python -m dataset.build_cubes to precompute and speed "
                f"up training ~10x.")
         files = sorted(DATA_DIR.glob(FILE_GLOB))
         if not files:
@@ -772,7 +772,7 @@ def main():
             "val_indices": val_idx,
             "test_indices": test_idx,
             # Cone ids are invariant to cache row ordering; downstream
-            # tooling (dataset_3d.resolve_split) prefers these over the
+            # tooling (dataset.dataset_3d.resolve_split) prefers these over the
             # row indices above.
             "train_cone_ids": [int(dataset.cone_ids[i]) for i in train_idx],
             "val_cone_ids": [int(dataset.cone_ids[i]) for i in val_idx],

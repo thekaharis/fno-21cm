@@ -38,4 +38,4 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-${SLURM_JOB_ID:-local}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 mkdir -p "$MPLCONFIGDIR"
 
-python visualize_spectral_weights_z.py
+python -m viz.visualize_spectral_weights_z

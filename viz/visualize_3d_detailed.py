@@ -41,8 +41,8 @@ from torch.utils.data import Subset
 # load_model, predict_cube, plot_z_slices, plot_lightcone_strip,
 # plot_scatter, plot_lightcone_summary_grid, pick_cones_by_reion_behavior,
 # make_run_folder -- comes from visualize_3d unchanged.
-import visualize_3d
-from visualize_3d import (
+from viz import visualize_3d
+from viz.visualize_3d import (
     DEVICE, CUBES_CACHE, DATA_DIR, FILE_GLOB,
     N_Z, Z_MIN, Z_MAX, STRATIFY_Z,
     SPLIT_SEED, VAL_FRACTION, TEST_FRACTION,
@@ -53,13 +53,13 @@ from visualize_3d import (
     plot_lightcone_summary_grid,
     pick_cones_by_reion_behavior,
 )
-from dataset_3d import LightconeCubeDataset, LightconeCubeCache, resolve_split
-from metrics_21cm import find_low_z_cutoff_index
+from dataset.dataset_3d import LightconeCubeDataset, LightconeCubeCache, resolve_split
+from util.metrics_21cm import find_low_z_cutoff_index
 
 # Pull the CHECKPOINT path lazily so MODEL_KIND env-var changes are still
 # honored (visualize_3d evaluates CHECKPOINT at module import time, which
 # means MODEL_KIND must be set before this script is imported).
-from visualize_3d import CHECKPOINT, MODEL_KIND
+from viz.visualize_3d import CHECKPOINT, MODEL_KIND
 
 # ------------------------------------------------------------------ config
 N_CONES_PER_SPLIT = 16             # was 4 in visualize_3d

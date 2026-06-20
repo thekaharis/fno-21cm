@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from neuralop_setup import prefer_local_neuralop
+from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
 
@@ -25,7 +25,7 @@ from neuralop.models import FNO
 import neuralop as _neuralop
 print(f"[visualize] using neuralop from {_neuralop.__file__}")
 
-from dataset import SliceCache, split_by_cone
+from dataset.dataset import SliceCache, split_by_cone
 from modeling import TrainerModel, load_checkpoint
 
 # ------------------------------------------------------------------ config
@@ -162,7 +162,7 @@ def main():
 
     # Gather data from the same slice cache + cone split used for training.
     if not CACHE_FILE.exists():
-        print(f"Slice cache {CACHE_FILE} not found. Run build_trainset.py first.",
+        print(f"Slice cache {CACHE_FILE} not found. Run python -m dataset.build_trainset first.",
               file=sys.stderr)
         sys.exit(1)
     cache = SliceCache(CACHE_FILE)

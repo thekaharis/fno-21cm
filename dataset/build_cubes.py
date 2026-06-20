@@ -19,12 +19,12 @@ min on the same A30.
 Run it ONCE.  Parallelize across files with a SLURM array, then merge:
 
     # serial (small)
-    python build_cubes.py --data /path/to/lightcones --out cubes_3d.h5
+    python -m dataset.build_cubes --data /path/to/lightcones --out cubes_3d.h5
 
     # parallel: array of N tasks each writing a shard, then one merge
-    python build_cubes.py --data /path/to/lightcones --out cubes_3d.h5 \
+    python -m dataset.build_cubes --data /path/to/lightcones --out cubes_3d.h5 \
         --shard "$SLURM_ARRAY_TASK_ID" --num-shards 33
-    python build_cubes.py --out cubes_3d.h5 --merge --num-shards 33
+    python -m dataset.build_cubes --out cubes_3d.h5 --merge --num-shards 33
 
 Layout produced::
 
@@ -41,7 +41,7 @@ writes rows sorted by cone_id, so row index == cone_id whenever no source
 file was skipped and positional splits agree between the raw-streaming and
 cached pipelines.  Caches merged before this ordering existed have
 shard-interleaved rows; downstream tools should map through the ``cone_id``
-dataset rather than trust row positions (see dataset_3d.resolve_split).
+dataset rather than trust row positions (see dataset.dataset_3d.resolve_split).
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from lightcone_params import PARAM_NAMES, read_sampled_params
-from loader import LightconeFile
+from dataset.lightcone_params import PARAM_NAMES, read_sampled_params
+from dataset.loader import LightconeFile
 
 PARAMS = list(PARAM_NAMES)
 

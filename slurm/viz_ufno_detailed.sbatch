@@ -8,7 +8,7 @@
 #     sbatch slurm/viz_ufno_detailed.sbatch
 #
 # Differences vs slurm/viz_ufno.sbatch:
-#   * Runs visualize_3d_detailed.py instead of visualize_3d.py
+#   * Runs viz/visualize_3d_detailed.py instead of viz/visualize_3d.py
 #   * 16 cones per split (vs 4); active-z slice picker per cone.
 #   * Output goes to a per-run subfolder under figures/ (e.g.
 #     figures/ufno-detailed_20260606-143022_job12345/).
@@ -56,8 +56,8 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 # --- Model selection --------------------------------------------------------
-# Must be exported before python imports fno_21cm_3d (visualize_3d_detailed
-# imports visualize_3d which imports MODEL_KIND at import time).
+# Must be exported before Python imports viz.visualize_3d_detailed
+# (which imports viz.visualize_3d and reads MODEL_KIND at import time).
 export MODEL_KIND=ufno
 
 # --- Data paths -------------------------------------------------------------
@@ -76,4 +76,4 @@ nvidia-smi -L || echo "(nvidia-smi unavailable)"
 echo "================================================="
 
 # --- Render -----------------------------------------------------------------
-python visualize_3d_detailed.py
+python -m viz.visualize_3d_detailed

@@ -84,13 +84,13 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 # it (so progress shows up in real time under `tail -f`, not in 8 KB chunks).
 export PYTHONUNBUFFERED=1
 
-# Lightcone directory (read by fno_21cm_3d.py / visualize_3d.py). Keep this in
+# Lightcone directory (read by fno_21cm_3d.py / viz/visualize_3d.py). Keep this in
 # sync with DATA_DIR in build.sbatch. The 2-D pipeline ignores this -- it reads
 # the pre-built trainset.h5 from the submission directory.
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
 
-# Pre-computed cube cache (built by build_cubes.py / build_cubes.sbatch).
-# If this file exists, fno_21cm_3d.py and visualize_3d.py use it directly --
+# Pre-computed cube cache (built by dataset/build_cubes.py / build_cubes.sbatch).
+# If this file exists, fno_21cm_3d.py and viz/visualize_3d.py use it directly --
 # ~10x faster than streaming the raw lightcones.  If it doesn't exist yet,
 # the scripts auto-fall-back to streaming from LIGHTCONE_DIR.
 PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5

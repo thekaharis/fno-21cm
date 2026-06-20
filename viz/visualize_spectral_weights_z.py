@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 
 from modeling import ModelConfig
-from spectral_weights import HISTORY_FILENAME
-from visualize_spectral_weights import (
+from util.spectral_weights import HISTORY_FILENAME
+from viz.visualize_spectral_weights import (
     load_history,
     plot_cutoff_ratios,
     plot_evolution,

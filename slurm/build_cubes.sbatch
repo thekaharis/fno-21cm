@@ -57,7 +57,7 @@ NUM_SHARDS=33                       # MUST equal the array width above
 OUT_PATH=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
 
 echo "shard ${SLURM_ARRAY_TASK_ID}/${NUM_SHARDS} on $(hostname)"
-python build_cubes.py \
+python -m dataset.build_cubes \
     --data "$LIGHTCONE_DIR" \
     --out "$OUT_PATH" \
     --n-z 256 --z-min 5.0 --z-max 25.0 \

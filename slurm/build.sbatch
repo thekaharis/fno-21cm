@@ -50,7 +50,7 @@ DATA_DIR=/pfs/10/work/hd_id260-fno_training/data/data   # dir with the 6600 .h5 
 NUM_SHARDS=33                                       # MUST equal the array width
 
 echo "shard ${SLURM_ARRAY_TASK_ID}/${NUM_SHARDS} on $(hostname)"
-python build_trainset.py \
+python -m dataset.build_trainset \
     --data "$DATA_DIR" \
     --out trainset.h5 \
     --k 6 \

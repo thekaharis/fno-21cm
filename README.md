@@ -21,17 +21,21 @@ Two pipelines live side by side:
 ```
 .
 ├── fno_21cm.py, fno_21cm_3d.py    # training entry points (v2, v3)
-├── dataset.py, dataset_3d.py      # PyTorch Datasets
 ├── modeling.py, losses.py         # shared model factory and Trainer adapters
-├── neuralop_setup.py              # local/installed neuralop resolution
-├── lightcone_params.py            # shared conditioning-parameter schema
-├── build_trainset.py              # v2 slice cache builder
-├── build_cubes.py                 # v3 cube cache builder
-├── visualize.py, visualize_3d.py  # checkpoint -> prediction plots
-├── visualize_spectral_weights.py  # epoch -> Fourier-weight diagnostics
-├── visualize_spectral_weights_z.py # Z/LOS-only Fourier-weight diagnostics
-├── loader.py                      # shared HDF5 lightcone reader
+├── models_ufno.py, ufno.py        # network architectures
+├── dataset/                       # readers, PyTorch datasets, cache builders
+│   ├── dataset.py, dataset_3d.py
+│   ├── loader.py, lightcone_params.py
+│   └── build_trainset.py, build_cubes.py
+├── viz/                           # prediction and spectral-weight plots
+│   ├── visualize.py, visualize_3d.py
+│   ├── visualize_3d_detailed.py
+│   └── visualize_spectral_weights.py, visualize_spectral_weights_z.py
+├── util/                          # metadata, diagnostics, setup helpers
+│   ├── neuralop_setup.py, run_metadata.py
+│   └── metrics_21cm.py, spectral_weights.py
 ├── slurm/                         # all sbatch scripts (cluster)
+├── tests/                         # unit and integration tests
 ├── figures/                       # all generated plots
 ├── data/                          # raw lightcone .h5 files (gitignored)
 ├── checkpoints/, checkpoints_3d/  # trained models (gitignored)
@@ -42,20 +46,20 @@ Two pipelines live side by side:
 | File | Purpose |
 |------|---------|
 | `fno_21cm.py` | 2-D training entry point. |
-| `dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
-| `build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
-| `visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
+| `dataset/dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
+| `dataset/build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
+| `viz/visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
 | `figures/comparison_*.png`, `figures/scatter_*.png` | Example outputs from the v2 run. |
 
 ### 3-D pipeline (v3)
 | File | Purpose |
 |------|---------|
 | `fno_21cm_3d.py` | 3-D training entry point (full lightcone in / full cube out). Auto-detects the cube cache; falls back to streaming. |
-| `dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
-| `build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
-| `visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
-| `visualize_spectral_weights.py` | Plots per-layer Fourier-weight magnitudes over training epochs, selected-epoch profiles, and high-mode/low-mode cutoff ratios. |
-| `visualize_spectral_weights_z.py` | Compact version that renders only the LOS/Z modes and writes a Z-only CSV. |
+| `dataset/dataset_3d.py` | `LightconeCubeDataset` (streamed) and `LightconeCubeCache` (pre-computed) — both expose the same one-cube-per-index interface. |
+| `dataset/build_cubes.py` | One-time pass: pre-interpolate every lightcone to a fixed z-grid; writes `cubes_3d.h5`. ~10x faster training reads. |
+| `viz/visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
+| `viz/visualize_spectral_weights.py` | Plots per-layer Fourier-weight magnitudes over training epochs, selected-epoch profiles, and high-mode/low-mode cutoff ratios. |
+| `viz/visualize_spectral_weights_z.py` | Compact version that renders only the LOS/Z modes and writes a Z-only CSV. |
 
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
@@ -92,7 +96,7 @@ project root is the conventional usage).
 ### Shared
 | File | Purpose |
 |------|---------|
-| `loader.py` | `LightconeFile` — h5py reader for 21cmFAST `raw_lightcone_v2.0` files (used by both pipelines). |
+| `dataset/loader.py` | `LightconeFile` — h5py reader for 21cmFAST `raw_lightcone_v2.0` files (used by both pipelines). |
 
 **Not included in the repo** (see `.gitignore`):
 - `data/` — the 21cmFAST lightcone HDF5 files. Provide your own.
@@ -148,7 +152,7 @@ export LIGHTCONE_DIR=/path/to/21cmfast_11d_sample_h5_files
 #     AID=$(sbatch --parsable slurm/build_cubes.sbatch)
 #     sbatch --dependency=afterok:"$AID" slurm/build_cubes_merge.sbatch
 # Locally:
-python build_cubes.py --data "$LIGHTCONE_DIR" --out cubes_3d.h5
+python -m dataset.build_cubes --data "$LIGHTCONE_DIR" --out cubes_3d.h5
 
 # If the cache exists at ./cubes_3d.h5 (or $CUBES_CACHE), training and
 # visualization use it automatically; otherwise they stream raw lightcones.
@@ -156,13 +160,13 @@ python fno_21cm_3d.py
 
 # Visualize the best-validation checkpoint (set CHECKPOINT_KIND=final for
 # the final epoch instead).
-python visualize_3d.py
+python -m viz.visualize_3d
 
 # Plot Fourier weight evolution from initialization through every epoch.
-python visualize_spectral_weights.py
+python -m viz.visualize_spectral_weights
 
 # Plot only the Z/LOS Fourier modes.
-python visualize_spectral_weights_z.py
+python -m viz.visualize_spectral_weights_z
 ```
 
 For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary
@@ -192,7 +196,7 @@ Each training run writes `best_model_state_dict.pt` (lowest globally reduced
 `val_l2`), `final_model_state_dict.pt`, `run_metadata.json`, and a compact
 `spectral_weight_history.npz`. The latter stores channel-aggregated RMS
 complex-weight magnitudes for every Fourier layer at initialization and after
-every epoch. `visualize_spectral_weights.py` turns it into mode/epoch heatmaps,
+every epoch. `viz/visualize_spectral_weights.py` turns it into mode/epoch heatmaps,
 selected-epoch profiles, a high-mode/low-mode cutoff ratio, and a CSV export.
 The transverse axes fold positive and negative frequencies into absolute
 mode index; the LOS axis follows the non-negative real-FFT convention. Thus,
@@ -229,13 +233,13 @@ is visible after the first epoch.
 
 ```bash
 # 1. Build the compact slice cache (once)
-python build_trainset.py --data ./data --out trainset.h5
+python -m dataset.build_trainset --data ./data --out trainset.h5
 
 # 2. Train (expects trainset.h5 in the project root)
 python fno_21cm.py
 
 # 3. Visualize predictions from the latest 2-D checkpoint
-python visualize.py
+python -m viz.visualize
 ```
 
 Key hyperparameters are constants at the top of `fno_21cm.py`

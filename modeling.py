@@ -10,7 +10,7 @@ from typing import Mapping
 import torch
 import torch.nn as nn
 
-from neuralop_setup import prefer_local_neuralop
+from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
 
