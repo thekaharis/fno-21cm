@@ -69,6 +69,34 @@ def test_siren_fno_preserves_unpadded_lightcone_shape() -> None:
     assert torch.isfinite(output).all()
 
 
+def test_temperature_scaled_sigmoid_bounds_output() -> None:
+    model = SirenFNO3d(
+        n_modes=(2, 2, 2),
+        hidden_channels=4,
+        in_channels=2,
+        n_layers=1,
+        padding=(0, 0, 0),
+        siren_hidden_dim=8,
+        siren_feature_dim=8,
+        output_sigmoid=True,
+        sigmoid_temperature=2.0,
+    )
+    output = model(torch.randn(1, 2, 8, 8, 8))
+
+    assert torch.all(output > 0)
+    assert torch.all(output < 1)
+
+
+def test_sigmoid_temperature_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="sigmoid_temperature"):
+        SirenFNO3d(
+            n_modes=(2, 2, 2),
+            hidden_channels=4,
+            in_channels=2,
+            sigmoid_temperature=0.0,
+        )
+
+
 def test_model_factory_builds_sirenfno_and_profiles_generated_weights() -> None:
     config = ModelConfig(
         kind="sirenfno",

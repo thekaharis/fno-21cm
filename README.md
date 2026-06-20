@@ -67,7 +67,7 @@ Two pipelines live side by side:
 |------|---------|
 | `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
-| `slurm/train_sirenfno_h200_4gpu.sbatch` | 4-GPU H200 DDP training for SirenFNO with explicit SIREN defaults and a separate `checkpoints_3d_sirenfno/` output directory. |
+| `slurm/train_sirenfno_h200_4gpu.sbatch` | Stability-tuned 4-GPU H200 SirenFNO training at `(64,64,64)`, writing to `checkpoints_3d_sirenfno_m64_stable/` by default. |
 | `slurm/train_ufno_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v1** (3 FNO + 3 U-Fourier blocks; BatchNorm + SyncBN; modes (16,16,16); 0.5/0.5 L²/H¹). |
 | `slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints_3d_ufno_v2/`. |
 | `slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints_3d_ufno_v3_anisoz/`. |
@@ -189,14 +189,42 @@ sbatch slurm/viz_sirenfno.sbatch
 sbatch slurm/viz_sirenfno_detailed.sbatch
 ```
 
-The SirenFNO defaults to retained modes `(16,16,16)`, four residual layers,
-width 32, SIREN hidden width 64, 16 Fourier features, and eight replicated
-cells of non-periodic LOS padding. Its spectral weights are generated only
-for the four retained signed X/Y FFT quadrants rather than for the complete
-lightcone FFT grid. Set retained modes with `N_MODES_X/Y/Z`; override the
-SIREN-specific settings with `SIREN_HIDDEN_DIM`,
+The SirenFNO model defaults to retained modes `(16,16,16)`, four residual
+layers, width 32, SIREN hidden width 64, 16 Fourier features, and eight
+replicated cells of non-periodic LOS padding. The dedicated H200 training
+script defaults to the validated `(64,64,64)` configuration. Its spectral
+weights are generated only for the four retained signed X/Y FFT quadrants
+rather than for the complete lightcone FFT grid. Set retained modes with
+`N_MODES_X/Y/Z`; override the SIREN-specific settings with `SIREN_HIDDEN_DIM`,
 `SIREN_OMEGA`, `SIREN_N_HIDDEN`, `SIREN_FEATURE_DIM`, `SIREN_FF_SIGMA`,
-`SIREN_LEARNABLE_FF`, `SIREN_PADDING_X/Y/Z`, and `SIREN_MLP_DROPOUT`.
+`SIREN_LEARNABLE_FF`, `SIREN_PADDING_X/Y/Z`, `SIREN_MLP_DROPOUT`,
+`SIREN_OUTPUT_SIGMOID`, and `SIREN_SIGMOID_TEMPERATURE`.
+
+The stability-tuned SirenFNO training defaults are a base learning rate of
+`1e-4` (`2e-4` after square-root scaling across four GPUs), a five-epoch H1
+warmup, gradient clipping at norm `1.0`, and `sigmoid(logits / 2.0)` output.
+The job defaults to 70 epochs so it fits within its 24-hour allocation.
+Override them with `SIRENFNO_LEARNING_RATE`,
+`SIRENFNO_H1_WARMUP_EPOCHS`, and `SIRENFNO_GRAD_CLIP_NORM`.
+
+For experiments that keep the same output transformation, a short feasibility
+run can warm-start a new run through `INIT_CHECKPOINT`. Use a new output
+directory so the benchmark artifacts remain intact:
+
+```bash
+sbatch --export=ALL,N_MODES_X=64,N_MODES_Y=64,N_MODES_Z=64,N_EPOCHS=100,\
+INIT_CHECKPOINT=checkpoints_3d_sirenfno_m64_test/final_model_state_dict.pt,\
+CHECKPOINT_DIR=checkpoints_3d_sirenfno_m64 \
+  slurm/train_sirenfno_h200_4gpu.sbatch
+```
+
+This loads the learned model weights but starts a fresh optimizer and
+100-epoch cosine schedule. That is preferable to restoring the scheduler from
+a one-epoch benchmark, where `T_max=1` has already exhausted the schedule.
+
+Do not warm-start the new sigmoid-output stability experiment from the older
+unconstrained-output checkpoint: applying a sigmoid changes the represented
+function immediately. Start the tuned run fresh for a controlled comparison.
 
 For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary
 `RUN_SEED`. This changes model initialization and training order while using

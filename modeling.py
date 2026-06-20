@@ -46,6 +46,10 @@ class ModelConfig:
     siren_learnable_ff: bool = True
     siren_padding: tuple[int, int, int] = (0, 0, 8)
     siren_mlp_dropout: float = 0.0
+    # False preserves the behavior of legacy metadata that predates this
+    # option. Fresh environment-driven SirenFNO runs default to True below.
+    siren_output_sigmoid: bool = False
+    siren_sigmoid_temperature: float = 2.0
 
     def __post_init__(self) -> None:
         if self.kind not in {"fno", "ufno", "sirenfno"}:
@@ -73,6 +77,8 @@ class ModelConfig:
             raise ValueError("siren_feature_dim must be a positive even integer")
         if self.siren_n_hidden < 1:
             raise ValueError("siren_n_hidden must be at least 1")
+        if self.siren_sigmoid_temperature <= 0:
+            raise ValueError("siren_sigmoid_temperature must be positive")
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -101,6 +107,10 @@ class ModelConfig:
                 int(os.environ.get("SIREN_PADDING_Z", "8")),
             ),
             siren_mlp_dropout=float(os.environ.get("SIREN_MLP_DROPOUT", "0.0")),
+            siren_output_sigmoid=_env_bool("SIREN_OUTPUT_SIGMOID", True),
+            siren_sigmoid_temperature=float(
+                os.environ.get("SIREN_SIGMOID_TEMPERATURE", "2.0")
+            ),
         )
 
     @classmethod
@@ -132,6 +142,8 @@ class ModelConfig:
             "siren_learnable_ff": self.siren_learnable_ff,
             "siren_padding": list(self.siren_padding),
             "siren_mlp_dropout": self.siren_mlp_dropout,
+            "siren_output_sigmoid": self.siren_output_sigmoid,
+            "siren_sigmoid_temperature": self.siren_sigmoid_temperature,
         }
 
     @property
@@ -153,7 +165,9 @@ class ModelConfig:
             return (
                 f"SirenFNO modes={self.modes} hidden={self.hidden_channels} "
                 f"layers={self.n_layers} siren-hidden={self.siren_hidden_dim} "
-                f"features={self.siren_feature_dim} padding={self.siren_padding}"
+                f"features={self.siren_feature_dim} padding={self.siren_padding} "
+                f"sigmoid={self.siren_output_sigmoid} "
+                f"temperature={self.siren_sigmoid_temperature:g}"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
         return (
@@ -219,6 +233,8 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             siren_ff_sigma=config.siren_ff_sigma,
             siren_learnable_ff=config.siren_learnable_ff,
             mlp_dropout=config.siren_mlp_dropout,
+            output_sigmoid=config.siren_output_sigmoid,
+            sigmoid_temperature=config.siren_sigmoid_temperature,
         )
     return FNO(
         n_modes=config.modes,

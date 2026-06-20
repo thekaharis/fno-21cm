@@ -298,6 +298,8 @@ class SirenFNO3d(nn.Module):
         siren_ff_sigma: float = 128.0,
         siren_learnable_ff: bool = True,
         mlp_dropout: float = 0.0,
+        output_sigmoid: bool = False,
+        sigmoid_temperature: float = 2.0,
     ):
         super().__init__()
         if len(padding) != 3 or any(int(value) < 0 for value in padding):
@@ -307,6 +309,8 @@ class SirenFNO3d(nn.Module):
             )
         if n_layers <= 0:
             raise ValueError("n_layers must be positive")
+        if sigmoid_temperature <= 0:
+            raise ValueError("sigmoid_temperature must be positive")
         self.n_modes = tuple(int(value) for value in n_modes)
         self.hidden_channels = int(hidden_channels)
         self.in_channels = int(in_channels)
@@ -314,6 +318,8 @@ class SirenFNO3d(nn.Module):
         self.n_layers = int(n_layers)
         self.padding = tuple(int(value) for value in padding)
         self.add_grid = bool(add_grid)
+        self.output_sigmoid = bool(output_sigmoid)
+        self.sigmoid_temperature = float(sigmoid_temperature)
 
         lift_channels = self.in_channels + (3 if self.add_grid else 0)
         self.lifting = nn.Conv3d(lift_channels, self.hidden_channels, kernel_size=1)
@@ -408,7 +414,10 @@ class SirenFNO3d(nn.Module):
 
         if any(self.padding):
             x = x[:, :, :nx, :ny, :nz]
-        return self.projection(x)
+        x = self.projection(x)
+        if self.output_sigmoid:
+            x = torch.sigmoid(x / self.sigmoid_temperature)
+        return x
 
     def save_checkpoint(self, save_folder, save_name: str) -> None:
         save_folder = Path(save_folder)

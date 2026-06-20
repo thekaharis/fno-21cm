@@ -52,7 +52,7 @@ from losses import (
     ScheduledWeightedLoss,
     WeightedLoss,
 )
-from modeling import ModelConfig, TrainerModel, build_3d_model
+from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
 from util.run_metadata import write_run_metadata
 from util.spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
 
@@ -92,6 +92,9 @@ LEARNING_RATE = 5e-4
 # Use a more conservative base LR than the plain FNO; still apply the DDP
 # scaling rule below. Both values remain environment-overridable.
 UFNO_LEARNING_RATE = float(os.environ.get("UFNO_LEARNING_RATE", "1e-4"))
+SIRENFNO_LEARNING_RATE = float(
+    os.environ.get("SIRENFNO_LEARNING_RATE", "1e-4")
+)
 WEIGHT_DECAY = 1e-5
 # N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
@@ -110,6 +113,12 @@ LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
 # output before derivative matching begins.
 UFNO_H1_WARMUP_EPOCHS = int(os.environ.get("UFNO_H1_WARMUP_EPOCHS", "5"))
 UFNO_GRAD_CLIP_NORM = float(os.environ.get("UFNO_GRAD_CLIP_NORM", "1.0"))
+SIRENFNO_H1_WARMUP_EPOCHS = int(
+    os.environ.get("SIRENFNO_H1_WARMUP_EPOCHS", "5")
+)
+SIRENFNO_GRAD_CLIP_NORM = float(
+    os.environ.get("SIRENFNO_GRAD_CLIP_NORM", "1.0")
+)
 
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
@@ -143,6 +152,10 @@ _DEFAULT_CKPT = str(MODEL_CONFIG.default_checkpoint_dir)
 CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", _DEFAULT_CKPT)
 METRICS_PATH = f"{CHECKPOINT_DIR}/metrics.jsonl"
 SPECTRAL_HISTORY_PATH = f"{CHECKPOINT_DIR}/{HISTORY_FILENAME}"
+# Optional model-only warm start. This intentionally does not restore the
+# optimizer or scheduler, which is useful after a short feasibility run whose
+# cosine schedule used a tiny N_EPOCHS (for example T_max=1).
+INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT")
 
 # Learning-rate scaling rule for multi-GPU DDP runs.  "sqrt" is conservative
 # and rarely diverges; "linear" extracts more wall-clock speed but may need
@@ -636,6 +649,13 @@ def main():
     # would confuse count_model_params).
     n_params = count_model_params(fno)
     model = TrainerModel(fno).to(device)
+    if INIT_CHECKPOINT:
+        report = load_checkpoint(model, INIT_CHECKPOINT)
+        rprint(
+            f"Warm-started from {INIT_CHECKPOINT}: "
+            f"{report.matched}/{report.total} parameters matched "
+            f"({report.transform})"
+        )
     if is_distributed:
         # SyncBatchNorm: convert every BatchNormNd in the model to its
         # synchronised counterpart BEFORE the DDP wrap.  Without this, each
@@ -655,9 +675,11 @@ def main():
 
     # -------------------------------------------- 5. optimizer / scheduler
     # LR scaling rule for the effective global batch (BATCH_SIZE * world_size).
-    base_lr = (
-        UFNO_LEARNING_RATE if MODEL_KIND == "ufno" else LEARNING_RATE
-    )
+    base_lr = {
+        "fno": LEARNING_RATE,
+        "ufno": UFNO_LEARNING_RATE,
+        "sirenfno": SIRENFNO_LEARNING_RATE,
+    }[MODEL_KIND]
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
         if LR_SCALE_RULE == "linear":
@@ -669,10 +691,15 @@ def main():
         scaled_lr = base_lr
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=scaled_lr, weight_decay=WEIGHT_DECAY)
-    if MODEL_KIND == "ufno" and UFNO_GRAD_CLIP_NORM > 0:
+    grad_clip_norm = {
+        "fno": 0.0,
+        "ufno": UFNO_GRAD_CLIP_NORM,
+        "sirenfno": SIRENFNO_GRAD_CLIP_NORM,
+    }[MODEL_KIND]
+    if grad_clip_norm > 0:
         def _clip_before_step(optim, args, kwargs):
             norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=UFNO_GRAD_CLIP_NORM
+                model.parameters(), max_norm=grad_clip_norm
             )
             # Avoid synchronizing CUDA on every batch. The epoch logger
             # converts only the final recorded norm to a Python float.
@@ -696,11 +723,16 @@ def main():
         (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
         (LOSS_BCE_WEIGHT, bce_loss),
     )
-    if MODEL_KIND == "ufno":
+    h1_warmup_epochs = {
+        "fno": 0,
+        "ufno": UFNO_H1_WARMUP_EPOCHS,
+        "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
+    }[MODEL_KIND]
+    if h1_warmup_epochs > 0:
         train_loss_fn = ScheduledWeightedLoss(
             *loss_terms,
             warmup_terms=(1,),
-            warmup_epochs=UFNO_H1_WARMUP_EPOCHS,
+            warmup_epochs=h1_warmup_epochs,
         )
     else:
         train_loss_fn = WeightedLoss(*loss_terms)
@@ -737,6 +769,7 @@ def main():
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Model: {MODEL_CONFIG.describe()}")
     rprint(f"Run seed: {RUN_SEED}  deterministic={DETERMINISTIC_RUN}")
+    rprint(f"Initial checkpoint: {INIT_CHECKPOINT or '(fresh initialization)'}")
     rprint(f"Input ablation: {INPUT_FEATURES.name}")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
@@ -745,6 +778,14 @@ def main():
     if MODEL_KIND == "ufno":
         rprint(f"UFNO stability: H1 warmup={UFNO_H1_WARMUP_EPOCHS} epochs, "
                f"gradient clip={UFNO_GRAD_CLIP_NORM:g}")
+    elif MODEL_KIND == "sirenfno":
+        rprint(
+            "SirenFNO stability: "
+            f"H1 warmup={SIRENFNO_H1_WARMUP_EPOCHS} epochs, "
+            f"gradient clip={SIRENFNO_GRAD_CLIP_NORM:g}, "
+            f"output sigmoid={MODEL_CONFIG.siren_output_sigmoid}, "
+            f"temperature={MODEL_CONFIG.siren_sigmoid_temperature:g}"
+        )
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
@@ -782,6 +823,7 @@ def main():
             "epochs": N_EPOCHS,
             "run_seed": RUN_SEED,
             "deterministic": DETERMINISTIC_RUN,
+            "init_checkpoint": INIT_CHECKPOINT,
             "base_learning_rate": base_lr,
             "scaled_learning_rate": scaled_lr,
             "lr_scale_rule": LR_SCALE_RULE,
@@ -790,6 +832,16 @@ def main():
             ),
             "ufno_grad_clip_norm": (
                 UFNO_GRAD_CLIP_NORM if MODEL_KIND == "ufno" else None
+            ),
+            "sirenfno_h1_warmup_epochs": (
+                SIRENFNO_H1_WARMUP_EPOCHS
+                if MODEL_KIND == "sirenfno"
+                else 0
+            ),
+            "sirenfno_grad_clip_norm": (
+                SIRENFNO_GRAD_CLIP_NORM
+                if MODEL_KIND == "sirenfno"
+                else None
             ),
             "best_metric_name": "val_l2",
             "best_metric": None,

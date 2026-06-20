@@ -79,6 +79,8 @@ class ModelConfigTests(unittest.TestCase):
             "SIREN_FEATURE_DIM": "32",
             "SIREN_PADDING_Z": "12",
             "SIREN_LEARNABLE_FF": "false",
+            "SIREN_OUTPUT_SIGMOID": "true",
+            "SIREN_SIGMOID_TEMPERATURE": "1.5",
         }
         with patch.dict(os.environ, env, clear=True):
             config = ModelConfig.from_env()
@@ -88,6 +90,17 @@ class ModelConfigTests(unittest.TestCase):
         self.assertEqual(config.siren_feature_dim, 32)
         self.assertEqual(config.siren_padding, (0, 0, 12))
         self.assertFalse(config.siren_learnable_ff)
+        self.assertTrue(config.siren_output_sigmoid)
+        self.assertEqual(config.siren_sigmoid_temperature, 1.5)
+
+    def test_legacy_siren_metadata_keeps_unconstrained_output(self):
+        config = ModelConfig.from_dict(
+            {
+                "kind": "sirenfno",
+                "modes": [16, 16, 16],
+            }
+        )
+        self.assertFalse(config.siren_output_sigmoid)
 
 
 class WeightedLossTests(unittest.TestCase):

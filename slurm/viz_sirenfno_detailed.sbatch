@@ -40,13 +40,13 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 export MODEL_KIND=sirenfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_sirenfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_sirenfno_m64_stable}"
 export CHECKPOINT_KIND="${CHECKPOINT_KIND:-best}"
 export VIZ_TAG="${VIZ_TAG:-sirenfno}"
 
-export N_MODES_X="${N_MODES_X:-16}"
-export N_MODES_Y="${N_MODES_Y:-16}"
-export N_MODES_Z="${N_MODES_Z:-16}"
+export N_MODES_X="${N_MODES_X:-64}"
+export N_MODES_Y="${N_MODES_Y:-64}"
+export N_MODES_Z="${N_MODES_Z:-64}"
 export SIREN_HIDDEN_DIM="${SIREN_HIDDEN_DIM:-64}"
 export SIREN_OMEGA="${SIREN_OMEGA:-30.0}"
 export SIREN_N_HIDDEN="${SIREN_N_HIDDEN:-1}"
@@ -57,6 +57,8 @@ export SIREN_PADDING_X="${SIREN_PADDING_X:-0}"
 export SIREN_PADDING_Y="${SIREN_PADDING_Y:-0}"
 export SIREN_PADDING_Z="${SIREN_PADDING_Z:-8}"
 export SIREN_MLP_DROPOUT="${SIREN_MLP_DROPOUT:-0.0}"
+export SIREN_OUTPUT_SIGMOID="${SIREN_OUTPUT_SIGMOID:-true}"
+export SIREN_SIGMOID_TEMPERATURE="${SIREN_SIGMOID_TEMPERATURE:-2.0}"
 
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
 export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5}"
