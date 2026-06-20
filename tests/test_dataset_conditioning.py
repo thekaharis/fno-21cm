@@ -3,13 +3,13 @@ from __future__ import annotations
 import h5py
 import numpy as np
 
-from dataset_3d import (
+from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeCache,
     LightconeCubeDataset,
     ParameterNormalization,
 )
-from lightcone_params import PARAM_NAMES
+from dataset.lightcone_params import PARAM_NAMES
 
 
 def _write_raw(path, density, xhi, target_z, params):

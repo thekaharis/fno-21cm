@@ -4,13 +4,13 @@ import h5py
 import numpy as np
 import pytest
 
-from dataset_3d import (
+from dataset.dataset_3d import (
     LightconeCubeCache,
     make_file_split,
     resolve_split,
     rows_for_cone_ids,
 )
-from lightcone_params import PARAM_NAMES
+from dataset.lightcone_params import PARAM_NAMES
 
 
 def _write_cache(path, cone_ids):

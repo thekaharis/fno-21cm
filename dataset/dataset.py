@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 
-from loader import LightconeFile
+from dataset.loader import LightconeFile
 
 
 def _interp_field(lf: LightconeFile, field: str,
@@ -175,7 +175,7 @@ def make_file_split(
 
 # ===================================================================== cache
 # The classes below consume the compact ``trainset.h5`` produced by the
-# one-time ``build_trainset.py`` pass (few slices per cone, many cones).  They
+# one-time ``dataset/build_trainset.py`` pass (few slices per cone, many cones). They
 # replace the on-the-fly ``LightconeSliceDataset`` for large datasets that
 # cannot be preloaded from raw lightcones.
 
@@ -183,7 +183,7 @@ def make_file_split(
 class SliceCache(Dataset):
     """In-memory dataset of pre-extracted 2-D slices.
 
-    Reads the compact HDF5 cache written by ``build_trainset.py`` (datasets
+    Reads the compact HDF5 cache written by ``dataset/build_trainset.py`` (datasets
     ``x``, ``y``, ``z``, ``xHI_mean``, ``cone_id``, ``params``) fully into RAM.
     Each item is one slice ``{"x": density / scale, "y": x_HI}`` of shape
     ``(1, 140, 140)`` -- the same interface ``LightconeSliceDataset`` exposed,

@@ -14,7 +14,7 @@ import sys
 import json
 from pathlib import Path
 
-from neuralop_setup import prefer_local_neuralop
+from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
 
@@ -27,7 +27,7 @@ from torch.utils.data import Subset
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
-from dataset_3d import (
+from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeDataset,
     LightconeCubeCache,
@@ -40,8 +40,8 @@ from modeling import (
     build_3d_model,
     load_checkpoint,
 )
-from metrics_21cm import compute_physical_metrics
-from run_metadata import load_run_metadata, resolve_checkpoint
+from util.metrics_21cm import compute_physical_metrics
+from util.run_metadata import load_run_metadata, resolve_checkpoint
 
 # ------------------------------------------------------------------ config
 _ENV_MODEL_CONFIG = ModelConfig.from_env()

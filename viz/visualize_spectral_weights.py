@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from modeling import ModelConfig
-from spectral_weights import HISTORY_FILENAME, HISTORY_FORMAT_VERSION
+from util.spectral_weights import HISTORY_FILENAME, HISTORY_FORMAT_VERSION
 
 
 AXES = ("x", "y", "z", "shell")

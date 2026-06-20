@@ -40,5 +40,5 @@ export PYTHONUNBUFFERED=1
 
 NUM_SHARDS=33                                       # MUST match build.sbatch
 
-python build_trainset.py --out trainset.h5 --merge --num-shards "$NUM_SHARDS"
+python -m dataset.build_trainset --out trainset.h5 --merge --num-shards "$NUM_SHARDS"
 echo "merge complete -> trainset.h5"

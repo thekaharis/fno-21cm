@@ -89,4 +89,4 @@ nvidia-smi -L || echo "(nvidia-smi unavailable)"
 echo "================================================="
 
 # --- Render -----------------------------------------------------------------
-python visualize_3d.py
+python -m viz.visualize_3d

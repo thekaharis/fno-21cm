@@ -12,7 +12,7 @@ def prefer_local_neuralop(project_dir: Path | None = None) -> Path | None:
     Returns the selected checkout root, or ``None`` when the installed package
     should be used.
     """
-    root = project_dir or Path(__file__).resolve().parent
+    root = project_dir or Path(__file__).resolve().parents[1]
     candidates = (root / "neuraloperator", root.parent / "neuraloperator", root)
     for candidate in candidates:
         if (candidate / "neuralop" / "__init__.py").is_file():

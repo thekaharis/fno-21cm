@@ -7,7 +7,7 @@
 #     sbatch slurm/viz_ufno.sbatch
 #
 # Differences vs slurm/viz.sbatch (the plain-FNO variant):
-#   * Exports MODEL_KIND=ufno so visualize_3d.py constructs the U-FNO
+#   * Exports MODEL_KIND=ufno so viz/visualize_3d.py constructs the U-FNO
 #     architecture in load_model() and looks for the checkpoint in
 #     ./checkpoints_3d_ufno/ instead of ./checkpoints_3d/.
 #   * Distinct job-name and log-output paths so the FNO and U-FNO viz jobs
@@ -57,7 +57,7 @@ export PYTHONUNBUFFERED=1
 
 # --- Model selection --------------------------------------------------------
 # The single switch that distinguishes this viz sbatch from the FNO one.
-# visualize_3d.py reads MODEL_KIND at import time (via fno_21cm_3d) and:
+# viz/visualize_3d.py reads MODEL_KIND at import time and:
 #   * picks UFNOWrapped in load_model() instead of neuralop.FNO
 #   * auto-selects CHECKPOINT="checkpoints_3d_ufno/best_model_state_dict.pt"
 #     (unless CHECKPOINT is overridden in this env block).
@@ -79,4 +79,4 @@ nvidia-smi -L || echo "(nvidia-smi unavailable)"
 echo "================================================="
 
 # --- Render -----------------------------------------------------------------
-python visualize_3d.py
+python -m viz.visualize_3d

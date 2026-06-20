@@ -4,8 +4,8 @@ import h5py
 import numpy as np
 import pytest
 
-from build_cubes import merge
-from lightcone_params import PARAM_NAMES
+from dataset.build_cubes import merge
+from dataset.lightcone_params import PARAM_NAMES
 
 
 def _write_shard(path, cone_ids, nx=2, ny=2, n_z=4):

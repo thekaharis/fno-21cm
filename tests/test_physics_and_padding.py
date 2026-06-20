@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from metrics_21cm import compute_physical_metrics, find_low_z_cutoff_index
+from util.metrics_21cm import compute_physical_metrics, find_low_z_cutoff_index
 from models_ufno import UFNOWrapped, pad_ufno_spatial
 
 

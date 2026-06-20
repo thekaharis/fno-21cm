@@ -24,11 +24,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Subset
 
-from lightcone_params import (
+from dataset.lightcone_params import (
     PARAM_NAMES as LIGHTCONE_PARAM_NAMES,
     read_sampled_params,
 )
-from loader import LightconeFile
+from dataset.loader import LightconeFile
 
 
 @dataclass(frozen=True)
@@ -163,7 +163,7 @@ class LightconeCubeDataset(Dataset):
     ):
         self.file_paths = [Path(p) for p in file_paths]
         # Global cone id == position in the sorted file list (the same
-        # ordering build_cubes.py records in the cache's `cone_id` dataset).
+        # ordering dataset/build_cubes.py records in the cache's `cone_id` dataset).
         self.cone_ids = np.arange(len(self.file_paths), dtype=np.int64)
         self.n_z = int(n_z)
         self.target_z = np.linspace(float(z_min), float(z_max), self.n_z,
@@ -269,7 +269,7 @@ class LightconeCubeDataset(Dataset):
 
 # ===================================================================== cache
 # The class below consumes the compact cube cache produced by the one-time
-# ``build_cubes.py`` pass.  It replaces the on-the-fly ``LightconeCubeDataset``
+# ``dataset/build_cubes.py`` pass. It replaces the on-the-fly ``LightconeCubeDataset``
 # for runs where the raw HDF5 reads become the bottleneck (cluster project FS
 # at ~370 MB/cone is the typical case).  Cubes are stored pre-interpolated to
 # the same (Nx, Ny, n_z) grid the model trains on, so each per-sample read is
@@ -279,7 +279,7 @@ class LightconeCubeDataset(Dataset):
 class LightconeCubeCache(Dataset):
     """In-memory or lazy dataset of pre-extracted 3-D cubes.
 
-    Reads the compact HDF5 cache written by ``build_cubes.py`` (datasets
+    Reads the compact HDF5 cache written by ``dataset/build_cubes.py`` (datasets
     ``density``, ``neutral_fraction``, ``cone_id``, ``target_z``, ``params``).
 
     Each item is one cube ``{"x": (C, Nx, Ny, Nz), "y": (1, Nx, Ny, Nz)}``,
@@ -306,7 +306,7 @@ class LightconeCubeCache(Dataset):
     """
 
     # Names of the 11 LHS-sampled parameters in the cache, in column order.
-    # Matches build_cubes.PARAMS exactly.
+    # Matches dataset.build_cubes.PARAMS exactly.
     PARAM_NAMES = LIGHTCONE_PARAM_NAMES
 
     def __init__(self, cache_path: str | Path,
@@ -350,9 +350,9 @@ class LightconeCubeCache(Dataset):
             if self.params is None:
                 raise ValueError(
                     f"use_params=True but {self.cache_path} has no `params` "
-                    "dataset -- rebuild the cache with build_cubes.py.")
+                    "dataset -- rebuild the cache with python -m dataset.build_cubes.")
             if np.isnan(self.params).any():
-                # NaNs come from build_cubes.read_params() when a lightcone
+                # NaNs come from dataset.build_cubes.read_params() when a lightcone
                 # has an unexpected param layout; we can't condition on those.
                 bad = np.where(np.isnan(self.params).any(axis=1))[0]
                 raise ValueError(

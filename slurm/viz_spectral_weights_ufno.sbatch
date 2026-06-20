@@ -47,4 +47,4 @@ echo "CHECKPOINT_DIR:     ${CHECKPOINT_DIR}"
 echo "SPECTRAL_HISTORY:   ${CHECKPOINT_DIR}/spectral_weight_history.npz"
 echo "OUTPUT_DIR:         ${OUTPUT_DIR}"
 
-python visualize_spectral_weights.py --output-dir "$OUTPUT_DIR"
+python -m viz.visualize_spectral_weights --output-dir "$OUTPUT_DIR"

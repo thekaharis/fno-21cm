@@ -8,7 +8,7 @@
 #     sbatch slurm/viz_detailed.sbatch
 #
 # Differences vs slurm/viz.sbatch:
-#   * Runs visualize_3d_detailed.py instead of visualize_3d.py
+#   * Runs viz/visualize_3d_detailed.py instead of viz/visualize_3d.py
 #     -> 16 cones per split (vs 4) at evenly spaced percentiles of
 #        per-cone mean ionization
 #     -> per-cone active-z slice picker (skips fully-neutral / fully-
@@ -70,4 +70,4 @@ nvidia-smi -L || echo "(nvidia-smi unavailable)"
 echo "================================================="
 
 # --- Render -----------------------------------------------------------------
-python visualize_3d_detailed.py
+python -m viz.visualize_3d_detailed

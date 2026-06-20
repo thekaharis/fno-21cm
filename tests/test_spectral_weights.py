@@ -5,12 +5,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from spectral_weights import (
+from util.spectral_weights import (
     SpectralWeightHistory,
     extract_spectral_weight_profiles,
 )
-from visualize_spectral_weights import high_low_ratio, load_history
-from visualize_spectral_weights import (
+from viz.visualize_spectral_weights import high_low_ratio, load_history
+from viz.visualize_spectral_weights import (
     plot_cutoff_ratios,
     plot_evolution,
     plot_profiles,

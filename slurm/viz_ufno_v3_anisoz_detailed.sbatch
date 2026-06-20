@@ -8,7 +8,7 @@
 #     sbatch slurm/viz_ufno_v3_anisoz_detailed.sbatch
 #
 # Differences vs slurm/viz_ufno_v3_anisoz.sbatch:
-#   * Runs visualize_3d_detailed.py instead of visualize_3d.py
+#   * Runs viz/visualize_3d_detailed.py instead of viz/visualize_3d.py
 #   * 16 cones per split (vs 4); per-cone active-z slice picker.
 #   * Walltime bumped to 60 min to render the larger figure set.
 #
@@ -85,4 +85,4 @@ nvidia-smi -L || echo "(nvidia-smi unavailable)"
 echo "================================================="
 
 # --- Render -----------------------------------------------------------------
-python visualize_3d_detailed.py
+python -m viz.visualize_3d_detailed
