@@ -97,7 +97,7 @@ UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
 FIGURES_BASE = Path("figures")
 
 # Tag used for the per-run figures folder + run_info breadcrumb.  Defaults
-# to MODEL_KIND ("fno"/"ufno") for back-compat with the v1 / v2 sbatches.
+# to MODEL_KIND for backward compatibility with older sbatches.
 # For v3 (D/E/F) variants, the matching viz sbatch sets VIZ_TAG explicitly
 # so figures land in e.g. ``figures/ufno-v3-anisoz_<timestamp>_job...`` --
 # essential when several variants' renders pile up in figures/ side by
@@ -170,6 +170,7 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
         f"timestamp:    {ts}",
         f"job_id:       {job_id or '(local, no SLURM)'}",
         f"MODEL_KIND:   {MODEL_KIND}",
+        f"MODEL:        {MODEL_CONFIG.describe()}",
         f"CHECKPOINT:   {CHECKPOINT}",
         f"CKPT_TYPE:    {CHECKPOINT_TYPE}",
         f"CKPT_EPOCH:   {CHECKPOINT_EPOCH}",

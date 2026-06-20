@@ -71,6 +71,24 @@ class ModelConfigTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(first_weight, second_weight))
 
+    def test_reads_sirenfno_environment(self):
+        env = {
+            "MODEL_KIND": "sirenfno",
+            "N_MODES_Z": "24",
+            "SIREN_HIDDEN_DIM": "48",
+            "SIREN_FEATURE_DIM": "32",
+            "SIREN_PADDING_Z": "12",
+            "SIREN_LEARNABLE_FF": "false",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = ModelConfig.from_env()
+        self.assertEqual(config.kind, "sirenfno")
+        self.assertEqual(config.modes, (16, 16, 24))
+        self.assertEqual(config.siren_hidden_dim, 48)
+        self.assertEqual(config.siren_feature_dim, 32)
+        self.assertEqual(config.siren_padding, (0, 0, 12))
+        self.assertFalse(config.siren_learnable_ff)
+
 
 class WeightedLossTests(unittest.TestCase):
     def test_skips_disabled_terms(self):

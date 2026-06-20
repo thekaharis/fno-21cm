@@ -42,6 +42,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ufno import SimpleBlock3d
+from util.spatial import pad_lightcone_spatial
 
 
 def _replace_bn_with_groupnorm(module: nn.Module, num_groups: int = 8) -> int:
@@ -522,12 +523,4 @@ def pad_ufno_spatial(
     pad_z: int,
 ) -> torch.Tensor:
     """Pad channels-first cubes with periodic X/Y and non-periodic Z."""
-    if pad_x or pad_y:
-        x = F.pad(
-            x,
-            (0, 0, 0, int(pad_y), 0, int(pad_x)),
-            mode="circular",
-        )
-    if pad_z:
-        x = F.pad(x, (0, int(pad_z), 0, 0, 0, 0), mode="replicate")
-    return x
+    return pad_lightcone_spatial(x, pad_x=pad_x, pad_y=pad_y, pad_z=pad_z)

@@ -38,10 +38,23 @@ class ModelConfig:
     ufno_norm: str = "batchnorm"
     ufno_unet_variant: str = "default"
     ufno_global_residual: bool = False
+    siren_hidden_dim: int = 64
+    siren_omega: float = 30.0
+    siren_n_hidden: int = 1
+    siren_feature_dim: int = 16
+    siren_ff_sigma: float = 128.0
+    siren_learnable_ff: bool = True
+    siren_padding: tuple[int, int, int] = (0, 0, 8)
+    siren_mlp_dropout: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.kind not in {"fno", "ufno"}:
-            raise ValueError(f"kind must be 'fno' or 'ufno', got {self.kind!r}")
+        if self.kind not in {"fno", "ufno", "sirenfno"}:
+            raise ValueError(
+                "kind must be 'fno', 'ufno', or 'sirenfno', "
+                f"got {self.kind!r}"
+            )
+        if len(self.modes) != 3 or any(int(value) <= 0 for value in self.modes):
+            raise ValueError("modes must contain three positive values")
         if self.ufno_norm not in {"batchnorm", "groupnorm"}:
             raise ValueError(
                 "ufno_norm must be 'batchnorm' or 'groupnorm', "
@@ -52,18 +65,42 @@ class ModelConfig:
                 "ufno_unet_variant must be 'default', 'anisotropic_z', or "
                 f"'los1d', got {self.ufno_unet_variant!r}"
             )
+        if len(self.siren_padding) != 3 or any(
+            int(value) < 0 for value in self.siren_padding
+        ):
+            raise ValueError("siren_padding must contain three non-negative values")
+        if self.siren_feature_dim <= 0 or self.siren_feature_dim % 2:
+            raise ValueError("siren_feature_dim must be a positive even integer")
+        if self.siren_n_hidden < 1:
+            raise ValueError("siren_n_hidden must be at least 1")
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
         """Read the experiment switches used by the SLURM scripts."""
         return cls(
             kind=os.environ.get("MODEL_KIND", "fno").lower(),
-            modes=(16, 16, int(os.environ.get("N_MODES_Z", "16"))),
+            modes=(
+                int(os.environ.get("N_MODES_X", "16")),
+                int(os.environ.get("N_MODES_Y", "16")),
+                int(os.environ.get("N_MODES_Z", "16")),
+            ),
             ufno_norm=os.environ.get("UFNO_NORM", "batchnorm").lower(),
             ufno_unet_variant=os.environ.get(
                 "UFNO_UNET_VARIANT", "default"
             ).lower(),
             ufno_global_residual=_env_bool("UFNO_GLOBAL_RESIDUAL"),
+            siren_hidden_dim=int(os.environ.get("SIREN_HIDDEN_DIM", "64")),
+            siren_omega=float(os.environ.get("SIREN_OMEGA", "30.0")),
+            siren_n_hidden=int(os.environ.get("SIREN_N_HIDDEN", "1")),
+            siren_feature_dim=int(os.environ.get("SIREN_FEATURE_DIM", "16")),
+            siren_ff_sigma=float(os.environ.get("SIREN_FF_SIGMA", "128.0")),
+            siren_learnable_ff=_env_bool("SIREN_LEARNABLE_FF", True),
+            siren_padding=(
+                int(os.environ.get("SIREN_PADDING_X", "0")),
+                int(os.environ.get("SIREN_PADDING_Y", "0")),
+                int(os.environ.get("SIREN_PADDING_Z", "8")),
+            ),
+            siren_mlp_dropout=float(os.environ.get("SIREN_MLP_DROPOUT", "0.0")),
         )
 
     @classmethod
@@ -71,6 +108,10 @@ class ModelConfig:
         values = dict(values)
         if "modes" in values:
             values["modes"] = tuple(int(value) for value in values["modes"])
+        if "siren_padding" in values:
+            values["siren_padding"] = tuple(
+                int(value) for value in values["siren_padding"]
+            )
         return cls(**values)
 
     def to_dict(self) -> dict:
@@ -83,11 +124,23 @@ class ModelConfig:
             "ufno_norm": self.ufno_norm,
             "ufno_unet_variant": self.ufno_unet_variant,
             "ufno_global_residual": self.ufno_global_residual,
+            "siren_hidden_dim": self.siren_hidden_dim,
+            "siren_omega": self.siren_omega,
+            "siren_n_hidden": self.siren_n_hidden,
+            "siren_feature_dim": self.siren_feature_dim,
+            "siren_ff_sigma": self.siren_ff_sigma,
+            "siren_learnable_ff": self.siren_learnable_ff,
+            "siren_padding": list(self.siren_padding),
+            "siren_mlp_dropout": self.siren_mlp_dropout,
         }
 
     @property
     def default_checkpoint_dir(self) -> Path:
-        suffix = "" if self.kind == "fno" else "_ufno"
+        suffix = {
+            "fno": "",
+            "ufno": "_ufno",
+            "sirenfno": "_sirenfno",
+        }[self.kind]
         return Path(f"checkpoints_3d{suffix}")
 
     def describe(self) -> str:
@@ -95,6 +148,12 @@ class ModelConfig:
             return (
                 f"FNO modes={self.modes} hidden={self.hidden_channels} "
                 f"layers={self.n_layers} pos-emb=grid"
+            )
+        if self.kind == "sirenfno":
+            return (
+                f"SirenFNO modes={self.modes} hidden={self.hidden_channels} "
+                f"layers={self.n_layers} siren-hidden={self.siren_hidden_dim} "
+                f"features={self.siren_feature_dim} padding={self.siren_padding}"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
         return (
@@ -141,6 +200,25 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             norm=config.ufno_norm,
             unet_variant=config.ufno_unet_variant,
             global_residual=config.ufno_global_residual,
+        )
+    if config.kind == "sirenfno":
+        from siren_fno_3d import SirenFNO3d
+
+        return SirenFNO3d(
+            n_modes=config.modes,
+            hidden_channels=config.hidden_channels,
+            in_channels=in_channels,
+            out_channels=1,
+            n_layers=config.n_layers,
+            padding=config.siren_padding,
+            add_grid=True,
+            siren_hidden_dim=config.siren_hidden_dim,
+            siren_omega=config.siren_omega,
+            siren_n_hidden=config.siren_n_hidden,
+            siren_feature_dim=config.siren_feature_dim,
+            siren_ff_sigma=config.siren_ff_sigma,
+            siren_learnable_ff=config.siren_learnable_ff,
+            mlp_dropout=config.siren_mlp_dropout,
         )
     return FNO(
         n_modes=config.modes,

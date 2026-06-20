@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Train a 3-D Fourier Neural Operator on full 21cm lightcone cubes.
+"""Train a configurable 3-D neural operator on full 21cm lightcone cubes.
 
 Mapping:  matter density cube  ->  neutral fraction (x_HI) cube.
 
 Each lightcone is interpolated along the LOS axis to a fixed n_z grid so the
 whole cube fits in a single forward pass on an A30 (24 GB) at batch=1.  The
 input tensor carries the density (normalized by a fixed constant) and an
-explicit ``1/(1+z)`` channel.  The FNO's ``positional_embedding="grid"`` option
-then appends normalized grid coordinates as additional channels. Because the
-cube cache is sampled uniformly in redshift, the third grid coordinate is
-normalized redshift, not comoving distance.
+explicit ``1/(1+z)`` channel. FNO and SirenFNO append normalized grid
+coordinates as additional channels. Because the cube cache is sampled
+uniformly in redshift, the third grid coordinate is normalized redshift,
+not comoving distance.
 """
 
 from __future__ import annotations

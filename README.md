@@ -22,7 +22,8 @@ Two pipelines live side by side:
 .
 ├── fno_21cm.py, fno_21cm_3d.py    # training entry points (v2, v3)
 ├── modeling.py, losses.py         # shared model factory and Trainer adapters
-├── models_ufno.py, ufno.py        # network architectures
+├── siren_fno_3d.py                # 3-D SirenFNO architecture
+├── models_ufno.py, ufno.py        # U-FNO network architecture
 ├── dataset/                       # readers, PyTorch datasets, cache builders
 │   ├── dataset.py, dataset_3d.py
 │   ├── loader.py, lightcone_params.py
@@ -66,6 +67,7 @@ Two pipelines live side by side:
 |------|---------|
 | `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
+| `slurm/train_sirenfno_h200_4gpu.sbatch` | 4-GPU H200 DDP training for SirenFNO with explicit SIREN defaults and a separate `checkpoints_3d_sirenfno/` output directory. |
 | `slurm/train_ufno_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v1** (3 FNO + 3 U-Fourier blocks; BatchNorm + SyncBN; modes (16,16,16); 0.5/0.5 L²/H¹). |
 | `slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints_3d_ufno_v2/`. |
 | `slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints_3d_ufno_v3_anisoz/`. |
@@ -74,6 +76,8 @@ Two pipelines live side by side:
 | `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
 | `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints_3d_ufno/`. |
 | `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
+| `slurm/viz_sirenfno.sbatch` | Standard SirenFNO prediction visualization using the best checkpoint by default. |
+| `slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
@@ -168,6 +172,31 @@ python -m viz.visualize_spectral_weights
 # Plot only the Z/LOS Fourier modes.
 python -m viz.visualize_spectral_weights_z
 ```
+
+Select the 3-D architecture with `MODEL_KIND`:
+
+```bash
+MODEL_KIND=fno python fno_21cm_3d.py
+MODEL_KIND=ufno python fno_21cm_3d.py
+MODEL_KIND=sirenfno python fno_21cm_3d.py
+```
+
+On the four-GPU H200 job:
+
+```bash
+sbatch slurm/train_sirenfno_h200_4gpu.sbatch
+sbatch slurm/viz_sirenfno.sbatch
+sbatch slurm/viz_sirenfno_detailed.sbatch
+```
+
+The SirenFNO defaults to retained modes `(16,16,16)`, four residual layers,
+width 32, SIREN hidden width 64, 16 Fourier features, and eight replicated
+cells of non-periodic LOS padding. Its spectral weights are generated only
+for the four retained signed X/Y FFT quadrants rather than for the complete
+lightcone FFT grid. Set retained modes with `N_MODES_X/Y/Z`; override the
+SIREN-specific settings with `SIREN_HIDDEN_DIM`,
+`SIREN_OMEGA`, `SIREN_N_HIDDEN`, `SIREN_FEATURE_DIM`, `SIREN_FF_SIGMA`,
+`SIREN_LEARNABLE_FF`, `SIREN_PADDING_X/Y/Z`, and `SIREN_MLP_DROPOUT`.
 
 For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary
 `RUN_SEED`. This changes model initialization and training order while using
