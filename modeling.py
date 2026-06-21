@@ -50,11 +50,16 @@ class ModelConfig:
     # option. Fresh environment-driven SirenFNO runs default to True below.
     siren_output_sigmoid: bool = False
     siren_sigmoid_temperature: float = 2.0
+    localfno_window: tuple[int, int, int] = (16, 16, 32)
+    localfno_modes: tuple[int, int, int] = (6, 6, 12)
+    localfno_base_width: int = 16
+    localfno_spectral_rank: int = 16
+    localfno_patch_chunk_size: int = 128
 
     def __post_init__(self) -> None:
-        if self.kind not in {"fno", "ufno", "sirenfno"}:
+        if self.kind not in {"fno", "ufno", "sirenfno", "localfno"}:
             raise ValueError(
-                "kind must be 'fno', 'ufno', or 'sirenfno', "
+                "kind must be 'fno', 'ufno', 'sirenfno', or 'localfno', "
                 f"got {self.kind!r}"
             )
         if len(self.modes) != 3 or any(int(value) <= 0 for value in self.modes):
@@ -79,6 +84,38 @@ class ModelConfig:
             raise ValueError("siren_n_hidden must be at least 1")
         if self.siren_sigmoid_temperature <= 0:
             raise ValueError("siren_sigmoid_temperature must be positive")
+        if len(self.localfno_window) != 3 or any(
+            int(value) <= 0 for value in self.localfno_window
+        ):
+            raise ValueError("localfno_window must contain three positive values")
+        if any(int(value) % 4 for value in self.localfno_window):
+            raise ValueError("localfno_window values must be divisible by four")
+        if len(self.localfno_modes) != 3 or any(
+            int(value) <= 0 for value in self.localfno_modes
+        ):
+            raise ValueError("localfno_modes must contain three positive values")
+        if self.localfno_base_width <= 0:
+            raise ValueError("localfno_base_width must be positive")
+        if self.localfno_spectral_rank <= 0:
+            raise ValueError("localfno_spectral_rank must be positive")
+        if self.localfno_spectral_rank > self.localfno_base_width:
+            raise ValueError(
+                "localfno_spectral_rank cannot exceed localfno_base_width"
+            )
+        if self.localfno_patch_chunk_size <= 0:
+            raise ValueError("localfno_patch_chunk_size must be positive")
+        local_limits = (
+            self.localfno_window[0] // 2,
+            self.localfno_window[1] // 2,
+            self.localfno_window[2] // 2 + 1,
+        )
+        if any(
+            mode > limit
+            for mode, limit in zip(self.localfno_modes, local_limits)
+        ):
+            raise ValueError(
+                "localfno_modes exceeds the local-window FFT limits"
+            )
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -111,6 +148,25 @@ class ModelConfig:
             siren_sigmoid_temperature=float(
                 os.environ.get("SIREN_SIGMOID_TEMPERATURE", "2.0")
             ),
+            localfno_window=(
+                int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
+                int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
+                int(os.environ.get("LOCALFNO_WINDOW_Z", "32")),
+            ),
+            localfno_modes=(
+                int(os.environ.get("LOCALFNO_MODES_X", "6")),
+                int(os.environ.get("LOCALFNO_MODES_Y", "6")),
+                int(os.environ.get("LOCALFNO_MODES_Z", "12")),
+            ),
+            localfno_base_width=int(
+                os.environ.get("LOCALFNO_BASE_WIDTH", "16")
+            ),
+            localfno_spectral_rank=int(
+                os.environ.get("LOCALFNO_SPECTRAL_RANK", "16")
+            ),
+            localfno_patch_chunk_size=int(
+                os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "128")
+            ),
         )
 
     @classmethod
@@ -122,6 +178,9 @@ class ModelConfig:
             values["siren_padding"] = tuple(
                 int(value) for value in values["siren_padding"]
             )
+        for key in ("localfno_window", "localfno_modes"):
+            if key in values:
+                values[key] = tuple(int(value) for value in values[key])
         return cls(**values)
 
     def to_dict(self) -> dict:
@@ -144,6 +203,11 @@ class ModelConfig:
             "siren_mlp_dropout": self.siren_mlp_dropout,
             "siren_output_sigmoid": self.siren_output_sigmoid,
             "siren_sigmoid_temperature": self.siren_sigmoid_temperature,
+            "localfno_window": list(self.localfno_window),
+            "localfno_modes": list(self.localfno_modes),
+            "localfno_base_width": self.localfno_base_width,
+            "localfno_spectral_rank": self.localfno_spectral_rank,
+            "localfno_patch_chunk_size": self.localfno_patch_chunk_size,
         }
 
     @property
@@ -152,6 +216,7 @@ class ModelConfig:
             "fno": "",
             "ufno": "_ufno",
             "sirenfno": "_sirenfno",
+            "localfno": "_localfno",
         }[self.kind]
         return Path(f"checkpoints_3d{suffix}")
 
@@ -168,6 +233,17 @@ class ModelConfig:
                 f"features={self.siren_feature_dim} padding={self.siren_padding} "
                 f"sigmoid={self.siren_output_sigmoid} "
                 f"temperature={self.siren_sigmoid_temperature:g}"
+            )
+        if self.kind == "localfno":
+            return (
+                f"LocalFNO window={self.localfno_window} "
+                f"local-modes={self.localfno_modes} "
+                f"global-modes={self.modes} widths="
+                f"{self.localfno_base_width}/"
+                f"{2 * self.localfno_base_width}/"
+                f"{4 * self.localfno_base_width} "
+                f"rank={self.localfno_spectral_rank} "
+                f"chunk={self.localfno_patch_chunk_size} sigmoid-output"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
         return (
@@ -235,6 +311,20 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             mlp_dropout=config.siren_mlp_dropout,
             output_sigmoid=config.siren_output_sigmoid,
             sigmoid_temperature=config.siren_sigmoid_temperature,
+        )
+    if config.kind == "localfno":
+        from local_fno_3d import LocalFNO3d
+
+        return LocalFNO3d(
+            in_channels=in_channels,
+            out_channels=1,
+            base_width=config.localfno_base_width,
+            local_window=config.localfno_window,
+            local_modes=config.localfno_modes,
+            global_modes=config.modes,
+            spectral_rank=config.localfno_spectral_rank,
+            patch_chunk_size=config.localfno_patch_chunk_size,
+            output_sigmoid=True,
         )
     return FNO(
         n_modes=config.modes,

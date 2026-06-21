@@ -95,6 +95,9 @@ UFNO_LEARNING_RATE = float(os.environ.get("UFNO_LEARNING_RATE", "1e-4"))
 SIRENFNO_LEARNING_RATE = float(
     os.environ.get("SIRENFNO_LEARNING_RATE", "1e-4")
 )
+LOCALFNO_LEARNING_RATE = float(
+    os.environ.get("LOCALFNO_LEARNING_RATE", "1e-4")
+)
 WEIGHT_DECAY = 1e-5
 # N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
@@ -118,6 +121,12 @@ SIRENFNO_H1_WARMUP_EPOCHS = int(
 )
 SIRENFNO_GRAD_CLIP_NORM = float(
     os.environ.get("SIRENFNO_GRAD_CLIP_NORM", "1.0")
+)
+LOCALFNO_H1_WARMUP_EPOCHS = int(
+    os.environ.get("LOCALFNO_H1_WARMUP_EPOCHS", "5")
+)
+LOCALFNO_GRAD_CLIP_NORM = float(
+    os.environ.get("LOCALFNO_GRAD_CLIP_NORM", "1.0")
 )
 
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
@@ -348,6 +357,9 @@ class LoggingTrainer(Trainer):
             sampler.set_epoch(int(epoch))
         if hasattr(training_loss, "set_epoch"):
             training_loss.set_epoch(int(epoch))
+        trainer_device = torch.device(self.device)
+        if trainer_device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(trainer_device)
 
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, avg_lasso, t = out
@@ -366,6 +378,12 @@ class LoggingTrainer(Trainer):
             avg_loss=float(avg_loss_global),
             avg_lasso_loss=float(avg_lasso_global),
             epoch_train_time=float(t),
+            train_samples_per_second=float(
+                len(train_loader)
+                * int(getattr(train_loader, "batch_size", 1))
+                * self._world_size
+                / max(float(t), 1e-12)
+            ),
         )
         if hasattr(training_loss, "active_weights"):
             active = training_loss.active_weights
@@ -377,6 +395,10 @@ class LoggingTrainer(Trainer):
         grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
         if grad_norm is not None:
             self._last_train["last_grad_norm"] = float(grad_norm)
+        if trainer_device.type == "cuda":
+            self._last_train["peak_cuda_memory_gb"] = float(
+                torch.cuda.max_memory_allocated(trainer_device) / (1024 ** 3)
+            )
         if self.spectral_history is not None:
             self.spectral_history.record(int(epoch))
         if self.eval_interval and (epoch % self.eval_interval != 0):
@@ -679,6 +701,7 @@ def main():
         "fno": LEARNING_RATE,
         "ufno": UFNO_LEARNING_RATE,
         "sirenfno": SIRENFNO_LEARNING_RATE,
+        "localfno": LOCALFNO_LEARNING_RATE,
     }[MODEL_KIND]
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
@@ -695,6 +718,7 @@ def main():
         "fno": 0.0,
         "ufno": UFNO_GRAD_CLIP_NORM,
         "sirenfno": SIRENFNO_GRAD_CLIP_NORM,
+        "localfno": LOCALFNO_GRAD_CLIP_NORM,
     }[MODEL_KIND]
     if grad_clip_norm > 0:
         def _clip_before_step(optim, args, kwargs):
@@ -727,6 +751,7 @@ def main():
         "fno": 0,
         "ufno": UFNO_H1_WARMUP_EPOCHS,
         "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
+        "localfno": LOCALFNO_H1_WARMUP_EPOCHS,
     }[MODEL_KIND]
     if h1_warmup_epochs > 0:
         train_loss_fn = ScheduledWeightedLoss(
@@ -786,6 +811,15 @@ def main():
             f"output sigmoid={MODEL_CONFIG.siren_output_sigmoid}, "
             f"temperature={MODEL_CONFIG.siren_sigmoid_temperature:g}"
         )
+    elif MODEL_KIND == "localfno":
+        rprint(
+            "LocalFNO stability: "
+            f"H1 warmup={LOCALFNO_H1_WARMUP_EPOCHS} epochs, "
+            f"gradient clip={LOCALFNO_GRAD_CLIP_NORM:g}, "
+            f"window={MODEL_CONFIG.localfno_window}, "
+            f"local modes={MODEL_CONFIG.localfno_modes}, "
+            f"chunk={MODEL_CONFIG.localfno_patch_chunk_size}"
+        )
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
@@ -841,6 +875,16 @@ def main():
             "sirenfno_grad_clip_norm": (
                 SIRENFNO_GRAD_CLIP_NORM
                 if MODEL_KIND == "sirenfno"
+                else None
+            ),
+            "localfno_h1_warmup_epochs": (
+                LOCALFNO_H1_WARMUP_EPOCHS
+                if MODEL_KIND == "localfno"
+                else 0
+            ),
+            "localfno_grad_clip_norm": (
+                LOCALFNO_GRAD_CLIP_NORM
+                if MODEL_KIND == "localfno"
                 else None
             ),
             "best_metric_name": "val_l2",

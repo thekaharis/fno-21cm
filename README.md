@@ -179,6 +179,37 @@ Select the 3-D architecture with `MODEL_KIND`:
 MODEL_KIND=fno python fno_21cm_3d.py
 MODEL_KIND=ufno python fno_21cm_3d.py
 MODEL_KIND=sirenfno python fno_21cm_3d.py
+MODEL_KIND=localfno python fno_21cm_3d.py
+```
+
+`localfno` is a two-level 3-D U-Net built from overlapping local Fourier
+blocks. Its default windows are `(16,16,32)` with 50% overlap, retained local
+modes `(6,6,12)`, widths `16/32/64`, rank-16 spectral projections, alternating
+shifted window grids, and two whole-volume FNO blocks at the `35x35x64`
+bottleneck. X/Y patch boundaries are periodic, Z is replicated on input and
+masked during overlap-add, and the final output is sigmoid-bounded.
+
+Override the architecture with `LOCALFNO_WINDOW_X/Y/Z`,
+`LOCALFNO_MODES_X/Y/Z`, `LOCALFNO_BASE_WIDTH`,
+`LOCALFNO_SPECTRAL_RANK`, and `LOCALFNO_PATCH_CHUNK_SIZE`. The chunk size
+bounds patch FFT memory and can be reduced for A30 inference.
+
+Run the production and smoke jobs with:
+
+```bash
+sbatch slurm/smoke_localfno_h200_4gpu.sbatch
+sbatch slurm/train_localfno_h200_4gpu.sbatch
+sbatch slurm/viz_localfno.sbatch
+sbatch slurm/viz_localfno_detailed.sbatch
+```
+
+After training, compare bubble-wall fidelity on paired test cones:
+
+```bash
+python boundary_band_diagnostic.py --checkpoints \
+  ufno=checkpoints_3d_ufno/best_model_state_dict.pt \
+  localfno=checkpoints_3d_localfno/best_model_state_dict.pt \
+  --reference ufno --split test --n-cones 200 --out band_out/localfno
 ```
 
 On the four-GPU H200 job:

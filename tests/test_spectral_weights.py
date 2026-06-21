@@ -109,6 +109,15 @@ def test_high_low_ratio_detects_outer_mode_collapse():
     np.testing.assert_allclose(ratio, [[0.0625]])
 
 
+def test_high_low_ratio_ignores_padding_for_mixed_mode_counts():
+    values = np.asarray(
+        [[[8.0, 4.0, 1.0, 0.5, np.nan, np.nan]]],
+        dtype=np.float32,
+    )
+    ratio = high_low_ratio(values)
+    np.testing.assert_allclose(ratio, [[0.0625]])
+
+
 def test_history_renders_all_diagnostics(tmp_path):
     model = FakeFNO()
     history_path = tmp_path / "spectral_weight_history.npz"

@@ -191,12 +191,14 @@ class SpectralWeightHistory:
     def record(self, epoch: int) -> None:
         profiles = extract_spectral_weight_profiles(self.model)
         layers = np.asarray([profile.layer for profile in profiles], dtype=str)
-        current = {
-            axis: np.stack(
-                [getattr(profile, axis) for profile in profiles], axis=0
-            ).astype(np.float32)
-            for axis in ("x", "y", "z", "shell")
-        }
+        current = {}
+        for axis in ("x", "y", "z", "shell"):
+            values = [getattr(profile, axis) for profile in profiles]
+            width = max(len(value) for value in values)
+            padded = np.full((len(values), width), np.nan, dtype=np.float32)
+            for index, value in enumerate(values):
+                padded[index, :len(value)] = value
+            current[axis] = padded
 
         if self.path.exists():
             with np.load(self.path, allow_pickle=False) as saved:

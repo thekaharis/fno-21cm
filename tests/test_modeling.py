@@ -102,6 +102,24 @@ class ModelConfigTests(unittest.TestCase):
         )
         self.assertFalse(config.siren_output_sigmoid)
 
+    def test_reads_localfno_environment(self):
+        env = {
+            "MODEL_KIND": "localfno",
+            "LOCALFNO_WINDOW_Z": "24",
+            "LOCALFNO_MODES_Z": "10",
+            "LOCALFNO_BASE_WIDTH": "12",
+            "LOCALFNO_SPECTRAL_RANK": "8",
+            "LOCALFNO_PATCH_CHUNK_SIZE": "64",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = ModelConfig.from_env()
+        self.assertEqual(config.kind, "localfno")
+        self.assertEqual(config.localfno_window, (16, 16, 24))
+        self.assertEqual(config.localfno_modes, (6, 6, 10))
+        self.assertEqual(config.localfno_base_width, 12)
+        self.assertEqual(config.localfno_spectral_rank, 8)
+        self.assertEqual(config.localfno_patch_chunk_size, 64)
+
 
 class WeightedLossTests(unittest.TestCase):
     def test_skips_disabled_terms(self):
