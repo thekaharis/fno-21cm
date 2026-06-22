@@ -26,9 +26,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:h200:1
-#SBATCH --mem=128G
-#SBATCH --time=08:00:00
+#SBATCH --gres=gpu:a30:1
+#SBATCH --mem=64G
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/boundary-localfno-%j.out
 #SBATCH --error=logs/boundary-localfno-%j.err
 
@@ -79,7 +79,7 @@ BIN_MPC="${BIN_MPC:-1.5}"
 OUT_DIR="${OUT_DIR:-band_out/localfno-vs-ufno-${SLURM_JOB_ID:-local}}"
 
 # Reducing this value changes execution memory only, not checkpoint weights.
-export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-64}"
+export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-32}"
 
 # SAVE_CUBES=yes stores each prediction as compressed NPZ for later offline
 # re-analysis. For 200 cones and two models this can consume substantial space.

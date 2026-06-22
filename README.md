@@ -194,6 +194,21 @@ Override the architecture with `LOCALFNO_WINDOW_X/Y/Z`,
 `LOCALFNO_SPECTRAL_RANK`, and `LOCALFNO_PATCH_CHUNK_SIZE`. The chunk size
 bounds patch FFT memory and can be reduced for A30 inference.
 
+An optional one-sided ionized-wall loss penalizes excess predicted neutral
+fraction on the ionized side of true transverse bubble boundaries:
+
+```bash
+LOSS_IONIZED_WALL_WEIGHT=0.5
+IONIZED_WALL_KERNEL_SIZE=7
+IONIZED_WALL_THRESHOLD=0.5
+```
+
+The odd kernel dilates the true neutral mask periodically in X/Y. A value of
+`7` covers approximately three transverse cells, or 4.3 Mpc, into the ionized
+side. Z is excluded from the dilation because redshift evolution is not treated
+as ordinary spatial geometry. The default weight is zero, preserving existing
+training behavior.
+
 Run the production and smoke jobs with:
 
 ```bash

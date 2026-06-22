@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
 
 
 class AbsoluteLoss:
@@ -92,6 +93,67 @@ class BinaryCrossEntropyTerm:
     def __call__(self, out, y, **_):
         prediction = out.clamp(self.eps, 1.0 - self.eps)
         return torch.nn.functional.binary_cross_entropy(prediction, y)
+
+
+class IonizedWallRMSE:
+    """One-sided RMSE for excess neutral fraction near true bubble walls.
+
+    A transverse dilation of the target's neutral mask identifies ionized
+    voxels near a true boundary. Only positive residuals are penalized, so the
+    term specifically suppresses excess predicted neutral fraction on the
+    ionized side. X/Y dilation is periodic; Z is not part of the band geometry.
+    """
+
+    def __init__(
+        self,
+        band_kernel_size: int = 7,
+        threshold: float = 0.5,
+        eps: float = 1e-12,
+    ):
+        kernel = int(band_kernel_size)
+        if kernel <= 1 or kernel % 2 == 0:
+            raise ValueError("band_kernel_size must be an odd integer greater than 1")
+        if not 0.0 < float(threshold) < 1.0:
+            raise ValueError("threshold must lie strictly between 0 and 1")
+        self.band_kernel_size = kernel
+        self.threshold = float(threshold)
+        self.eps = float(eps)
+
+    def wall_mask(self, target: torch.Tensor) -> torch.Tensor:
+        if target.ndim != 5:
+            raise ValueError("IonizedWallRMSE expects (B, C, X, Y, Z) tensors")
+        neutral = target >= self.threshold
+        radius = self.band_kernel_size // 2
+        padded = F.pad(
+            neutral.to(dtype=target.dtype),
+            (0, 0, radius, radius, radius, radius),
+            mode="circular",
+        )
+        near_neutral = F.max_pool3d(
+            padded,
+            kernel_size=(self.band_kernel_size, self.band_kernel_size, 1),
+            stride=1,
+        ) > 0
+        return (target < self.threshold) & near_neutral
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(
+                f"prediction and target shapes differ: {out.shape} != {y.shape}"
+            )
+        mask = self.wall_mask(y)
+        excess_neutral = F.relu(out - y)
+        mask_float = mask.to(dtype=out.dtype)
+        count = mask_float.sum()
+        mean_squared_error = (
+            (excess_neutral.square() * mask_float).sum()
+            / count.clamp_min(1.0)
+        )
+        stable_rmse = (
+            torch.sqrt(mean_squared_error + self.eps)
+            - math.sqrt(self.eps)
+        )
+        return torch.where(count > 0, stable_rmse, out.sum() * 0.0)
 
 
 class LightconeH1Loss:

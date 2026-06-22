@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from fno_21cm_3d import LoggingTrainer, _build_h1_loss, _seed_everything
-from losses import ScheduledWeightedLoss
+from losses import IonizedWallRMSE, ScheduledWeightedLoss
 
 
 def test_logging_trainer_rejects_trainer_owned_ddp() -> None:
@@ -74,22 +74,54 @@ def test_scheduled_loss_ramps_only_h1_term() -> None:
         (0.5, constant),
         (0.5, constant),
         (0.0, constant),
+        (0.25, constant),
         warmup_terms=(1,),
         warmup_epochs=5,
     )
     prediction = torch.zeros(1)
 
     loss.set_epoch(0)
-    assert loss.active_weights == (0.5, 0.0, 0.0)
-    assert loss(prediction, prediction).item() == pytest.approx(0.5)
+    assert loss.active_weights == (0.5, 0.0, 0.0, 0.25)
+    assert loss(prediction, prediction).item() == pytest.approx(0.75)
 
     loss.set_epoch(2)
-    assert loss.active_weights == (0.5, 0.2, 0.0)
-    assert loss(prediction, prediction).item() == pytest.approx(0.7)
+    assert loss.active_weights == (0.5, 0.2, 0.0, 0.25)
+    assert loss(prediction, prediction).item() == pytest.approx(0.95)
 
     loss.set_epoch(5)
-    assert loss.active_weights == (0.5, 0.5, 0.0)
-    assert loss(prediction, prediction).item() == pytest.approx(1.0)
+    assert loss.active_weights == (0.5, 0.5, 0.0, 0.25)
+    assert loss(prediction, prediction).item() == pytest.approx(1.25)
+
+
+def test_ionized_wall_loss_penalizes_only_excess_on_ionized_side() -> None:
+    target = torch.zeros(1, 1, 7, 7, 3)
+    target[..., 3:, 3:, :] = 1.0
+    loss = IonizedWallRMSE(band_kernel_size=3, threshold=0.5)
+
+    prediction = target.clone()
+    prediction[..., 2, 3, 1] = 0.4
+    prediction[..., 1, 1, 1] = 0.9
+    prediction[..., 2, 2, 1] = -0.5
+
+    mask = loss.wall_mask(target)
+    assert mask[..., 2, 3, 1]
+    assert not mask[..., 1, 1, 1]
+    assert loss(prediction, target).item() > 0
+
+    underprediction = target.clone()
+    underprediction[..., 2, 3, 1] = -0.5
+    assert loss(underprediction, target).item() == pytest.approx(0.0)
+
+
+def test_ionized_wall_mask_wraps_periodic_xy_but_not_z() -> None:
+    target = torch.zeros(1, 1, 5, 5, 3)
+    target[..., 0, 0, 1] = 1.0
+    loss = IonizedWallRMSE(band_kernel_size=3)
+    mask = loss.wall_mask(target)
+
+    assert mask[..., -1, 0, 1]
+    assert mask[..., 0, -1, 1]
+    assert not mask[..., 0, 0, 0]
 
 
 def test_seed_everything_repeats_python_numpy_and_torch() -> None:

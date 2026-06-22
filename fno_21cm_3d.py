@@ -48,6 +48,7 @@ from dataset.dataset_3d import (
 from losses import (
     AbsoluteLoss,
     BinaryCrossEntropyTerm,
+    IonizedWallRMSE,
     LightconeH1Loss,
     ScheduledWeightedLoss,
     WeightedLoss,
@@ -110,6 +111,15 @@ N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
+LOSS_IONIZED_WALL_WEIGHT = float(
+    os.environ.get("LOSS_IONIZED_WALL_WEIGHT", "0.0")
+)
+IONIZED_WALL_KERNEL_SIZE = int(
+    os.environ.get("IONIZED_WALL_KERNEL_SIZE", "7")
+)
+IONIZED_WALL_THRESHOLD = float(
+    os.environ.get("IONIZED_WALL_THRESHOLD", "0.5")
+)
 
 # Stability controls for U-FNO. H1 starts at zero and ramps linearly to its
 # configured weight, allowing the L2 value term to establish a non-saturated
@@ -391,6 +401,7 @@ class LoggingTrainer(Trainer):
                 active_l2_weight=float(active[0]),
                 active_h1_weight=float(active[1]),
                 active_bce_weight=float(active[2]),
+                active_ionized_wall_weight=float(active[3]),
             )
         grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
         if grad_norm is not None:
@@ -742,10 +753,15 @@ def main():
     l2_loss = LpLoss(d=3, p=2)
     h1_loss = _build_h1_loss()
     bce_loss = BinaryCrossEntropyTerm()
+    ionized_wall_loss = IonizedWallRMSE(
+        band_kernel_size=IONIZED_WALL_KERNEL_SIZE,
+        threshold=IONIZED_WALL_THRESHOLD,
+    )
     loss_terms = (
         (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
         (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
         (LOSS_BCE_WEIGHT, bce_loss),
+        (LOSS_IONIZED_WALL_WEIGHT, ionized_wall_loss),
     )
     h1_warmup_epochs = {
         "fno": 0,
@@ -767,6 +783,7 @@ def main():
         "l2": AbsoluteLoss(l2_loss),
         "h1": AbsoluteLoss(h1_loss),
         "bce": bce_loss,
+        "ionized_wall": ionized_wall_loss,
     }
 
     # -------------------------------------------- 7. trainer
@@ -798,8 +815,14 @@ def main():
     rprint(f"Input ablation: {INPUT_FEATURES.name}")
     rprint(f"Out: x_HI")
     rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
-           f"+ {LOSS_BCE_WEIGHT}*BCE  "
+           f"+ {LOSS_BCE_WEIGHT}*BCE "
+           f"+ {LOSS_IONIZED_WALL_WEIGHT}*ionized-wall-RMSE  "
            f"(H1: periodic X/Y, centered interior-only Z)")
+    rprint(
+        "Ionized-wall mask: "
+        f"threshold={IONIZED_WALL_THRESHOLD:g}, "
+        f"transverse kernel={IONIZED_WALL_KERNEL_SIZE}"
+    )
     if MODEL_KIND == "ufno":
         rprint(f"UFNO stability: H1 warmup={UFNO_H1_WARMUP_EPOCHS} epochs, "
                f"gradient clip={UFNO_GRAD_CLIP_NORM:g}")
@@ -861,6 +884,14 @@ def main():
             "base_learning_rate": base_lr,
             "scaled_learning_rate": scaled_lr,
             "lr_scale_rule": LR_SCALE_RULE,
+            "loss_weights": {
+                "l2": LOSS_L2_WEIGHT,
+                "h1": LOSS_H1_WEIGHT,
+                "bce": LOSS_BCE_WEIGHT,
+                "ionized_wall": LOSS_IONIZED_WALL_WEIGHT,
+            },
+            "ionized_wall_kernel_size": IONIZED_WALL_KERNEL_SIZE,
+            "ionized_wall_threshold": IONIZED_WALL_THRESHOLD,
             "ufno_h1_warmup_epochs": (
                 UFNO_H1_WARMUP_EPOCHS if MODEL_KIND == "ufno" else 0
             ),
