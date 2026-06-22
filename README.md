@@ -212,6 +212,15 @@ python boundary_band_diagnostic.py --checkpoints \
   --reference ufno --split test --n-cones 200 --out band_out/localfno
 ```
 
+The equivalent cluster job is:
+
+```bash
+sbatch slurm/boundary_localfno_vs_ufno.sbatch
+```
+
+Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `OUT_DIR`, or
+the optional `Z_WINDOW_LOW`/`Z_WINDOW_HIGH` variables through `--export`.
+
 On the four-GPU H200 job:
 
 ```bash
