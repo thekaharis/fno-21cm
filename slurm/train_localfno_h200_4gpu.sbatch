@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:h200:4
 #SBATCH --mem=512G
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/localfno3d-4gpu-%j.out
 #SBATCH --error=logs/localfno3d-4gpu-%j.err
 
