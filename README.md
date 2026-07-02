@@ -67,6 +67,7 @@ Two pipelines live side by side:
 |------|---------|
 | `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
+| `slurm/train_localfno_a100_4gpu.sbatch` | 4-GPU A100 DDP training for the windowed Local-FNO U-Net; defaults to smaller patch chunks for A100 HBM headroom while keeping the same checkpoint directory as the H200 LocalFNO run. |
 | `slurm/train_sirenfno_h200_4gpu.sbatch` | Stability-tuned 4-GPU H200 SirenFNO training at `(64,64,64)`, writing to `checkpoints_3d_sirenfno_m64_stable/` by default. |
 | `slurm/train_ufno_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v1** (3 FNO + 3 U-Fourier blocks; BatchNorm + SyncBN; modes (16,16,16); 0.5/0.5 L²/H¹). |
 | `slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints_3d_ufno_v2/`. |
@@ -214,6 +215,7 @@ Run the production and smoke jobs with:
 ```bash
 sbatch slurm/smoke_localfno_h200_4gpu.sbatch
 sbatch slurm/train_localfno_h200_4gpu.sbatch
+sbatch slurm/train_localfno_a100_4gpu.sbatch
 sbatch slurm/viz_localfno.sbatch
 sbatch slurm/viz_localfno_detailed.sbatch
 ```
