@@ -30,17 +30,58 @@ class RelativeLoss:
 
 
 class WeightedLoss:
-    """Combine ``(weight, loss)`` terms while preserving Trainer kwargs."""
+    """Combine ``(weight, loss)`` terms while preserving Trainer kwargs.
 
-    def __init__(self, *terms: tuple[float, Callable]):
+    When ``term_names`` are given, every evaluated (non-zero-weight) term's
+    raw, *unweighted* value is accumulated per call; ``pop_term_means``
+    returns the per-term means since the previous pop and resets the
+    accumulator, which is how the trainer surfaces per-term training losses
+    once per epoch.
+    """
+
+    def __init__(
+        self,
+        *terms: tuple[float, Callable],
+        term_names: tuple[str, ...] | None = None,
+    ):
         self.terms = tuple((float(weight), loss) for weight, loss in terms)
+        if term_names is None:
+            term_names = tuple(f"term{i}" for i in range(len(self.terms)))
+        if len(term_names) != len(self.terms):
+            raise ValueError(
+                f"{len(self.terms)} loss terms require {len(self.terms)} "
+                f"names, got {len(term_names)}"
+            )
+        self.term_names = tuple(str(name) for name in term_names)
+        self._term_sums: dict[str, float] = {}
+        self._term_batches = 0
+
+    @property
+    def active_weights(self) -> tuple[float, ...]:
+        return tuple(weight for weight, _ in self.terms)
+
+    def pop_term_means(self) -> dict[str, float]:
+        """Return per-term mean raw values since the last pop, then reset."""
+        batches = max(self._term_batches, 1)
+        means = {name: total / batches for name, total in self._term_sums.items()}
+        self._term_sums = {}
+        self._term_batches = 0
+        return means
 
     def __call__(self, out, y, **kwargs):
-        return sum(
-            weight * loss(out, y, **kwargs)
-            for weight, loss in self.terms
-            if weight != 0.0
-        )
+        total = 0.0
+        for name, active_weight, (_, loss) in zip(
+            self.term_names, self.active_weights, self.terms, strict=True
+        ):
+            if active_weight == 0.0:
+                continue
+            value = loss(out, y, **kwargs)
+            self._term_sums[name] = (
+                self._term_sums.get(name, 0.0) + float(value.detach())
+            )
+            total = total + active_weight * value
+        self._term_batches += 1
+        return total
 
 
 class ScheduledWeightedLoss(WeightedLoss):
@@ -51,8 +92,9 @@ class ScheduledWeightedLoss(WeightedLoss):
         *terms: tuple[float, Callable],
         warmup_terms: tuple[int, ...] = (),
         warmup_epochs: int = 0,
+        term_names: tuple[str, ...] | None = None,
     ):
-        super().__init__(*terms)
+        super().__init__(*terms, term_names=term_names)
         self.warmup_terms = frozenset(int(index) for index in warmup_terms)
         self.warmup_epochs = max(0, int(warmup_epochs))
         self.epoch = 0
@@ -72,15 +114,6 @@ class ScheduledWeightedLoss(WeightedLoss):
         return tuple(
             weight * factor if index in self.warmup_terms else weight
             for index, (weight, _) in enumerate(self.terms)
-        )
-
-    def __call__(self, out, y, **kwargs):
-        return sum(
-            active_weight * loss(out, y, **kwargs)
-            for active_weight, (_, loss) in zip(
-                self.active_weights, self.terms, strict=True
-            )
-            if active_weight != 0.0
         )
 
 
@@ -240,13 +273,13 @@ class LightconeH1Loss:
 
         return terms(x), terms(y)
 
-    def abs(
+    def _squared_error_and_norm(
         self,
         x: torch.Tensor,
         y: torch.Tensor,
-        quadrature: tuple[float, float, float] | None = None,
-        take_root: bool = True,
-    ) -> torch.Tensor:
+        quadrature: tuple[float, float, float] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-sample squared H1 error and squared H1 norm of the target."""
         if quadrature is None:
             quadrature = self.uniform_quadrature(x)
         quadrature = tuple(float(value) for value in quadrature)
@@ -259,6 +292,42 @@ class LightconeH1Loss:
             )
             for index in range(4)
         )
+        norm = sum(
+            scale * torch.sum(terms_y[index].square(), dim=-1)
+            for index in range(4)
+        )
+        return error, norm
+
+    def abs(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        quadrature: tuple[float, float, float] | None = None,
+        take_root: bool = True,
+    ) -> torch.Tensor:
+        error, _ = self._squared_error_and_norm(x, y, quadrature)
         if take_root:
             error = error.sqrt()
         return self._reduce(error).squeeze()
+
+    def rel(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        quadrature: tuple[float, float, float] | None = None,
+        take_root: bool = True,
+        eps: float = 1e-12,
+    ) -> torch.Tensor:
+        """Relative H1 error, ``||x - y||_H1 / ||y||_H1`` per sample.
+
+        Dimensionless, so it is directly comparable with (and weightable
+        against) a relative L2 term. Full lightcones always contain a
+        neutral high-z region, so ``||y||_H1`` is never near zero for this
+        dataset; ``eps`` only guards degenerate inputs.
+        """
+        error, norm = self._squared_error_and_norm(x, y, quadrature)
+        if take_root:
+            ratio = error.sqrt() / norm.sqrt().clamp_min(eps)
+        else:
+            ratio = error / norm.clamp_min(eps)
+        return self._reduce(ratio).squeeze()

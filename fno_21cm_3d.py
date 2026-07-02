@@ -50,6 +50,7 @@ from losses import (
     BinaryCrossEntropyTerm,
     IonizedWallRMSE,
     LightconeH1Loss,
+    RelativeLoss,
     ScheduledWeightedLoss,
     WeightedLoss,
 )
@@ -111,6 +112,21 @@ N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
+
+# Norm mode per term. "absolute" (historical default) uses raw H1/L2 norms,
+# under which the H1 term is ~2 orders of magnitude larger than the L2 term
+# and the nominal weights above do not reflect the real balance. "relative"
+# divides by the target norm, making both terms dimensionless and the weights
+# directly interpretable.
+def _loss_mode(name: str) -> str:
+    mode = os.environ.get(name, "absolute").strip().lower()
+    if mode not in {"absolute", "relative"}:
+        raise ValueError(f"{name} must be 'absolute' or 'relative', got {mode!r}")
+    return mode
+
+
+LOSS_L2_MODE = _loss_mode("LOSS_L2_MODE")
+LOSS_H1_MODE = _loss_mode("LOSS_H1_MODE")
 LOSS_IONIZED_WALL_WEIGHT = float(
     os.environ.get("LOSS_IONIZED_WALL_WEIGHT", "0.0")
 )
@@ -403,6 +419,15 @@ class LoggingTrainer(Trainer):
                 active_bce_weight=float(active[2]),
                 active_ionized_wall_weight=float(active[3]),
             )
+        if hasattr(training_loss, "pop_term_means"):
+            # Raw (unweighted) per-term training losses, epoch-averaged.
+            # Weights are logged above, so the weighted contribution of each
+            # term is reconstructable. Terms skipped by a zero weight (e.g.
+            # H1 during warmup epoch 0) have no key in that row.
+            for name, value in training_loss.pop_term_means().items():
+                self._last_train[f"train_{name}_term"] = _all_reduce_mean(
+                    value, self._world_size
+                )
         grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
         if grad_norm is not None:
             self._last_train["last_grad_norm"] = float(grad_norm)
@@ -746,10 +771,13 @@ def main():
                                                            T_max=N_EPOCHS)
 
     # -------------------------------------------- 6. losses (3-D)
-    # L2 + H1 (both absolute, d=3) are the v2/v3 baseline.  Relative norms
-    # blow up over the all-ionized late-z portion of the cube where x_HI = 0,
-    # so absolute is mandatory here.  BCE is a confidence regulariser that
-    # rewards bimodal {0, 1} predictions -- see BCETerm docstring.
+    # L2 + H1 (both absolute, d=3) are the v2/v3 baseline.  Historical note:
+    # relative norms blew up on the v2 sub-cube pipeline, where an all-ionized
+    # late-z chunk has ||y|| = 0; full lightcones always retain a neutral
+    # high-z region, so LOSS_*_MODE=relative is safe here and makes the term
+    # weights dimensionless and directly comparable.  BCE is a confidence
+    # regulariser that rewards bimodal {0, 1} predictions -- see BCETerm
+    # docstring.
     l2_loss = LpLoss(d=3, p=2)
     h1_loss = _build_h1_loss()
     bce_loss = BinaryCrossEntropyTerm()
@@ -757,12 +785,14 @@ def main():
         band_kernel_size=IONIZED_WALL_KERNEL_SIZE,
         threshold=IONIZED_WALL_THRESHOLD,
     )
+    norm_wrapper = {"absolute": AbsoluteLoss, "relative": RelativeLoss}
     loss_terms = (
-        (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
-        (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
+        (LOSS_L2_WEIGHT, norm_wrapper[LOSS_L2_MODE](l2_loss)),
+        (LOSS_H1_WEIGHT, norm_wrapper[LOSS_H1_MODE](h1_loss)),
         (LOSS_BCE_WEIGHT, bce_loss),
         (LOSS_IONIZED_WALL_WEIGHT, ionized_wall_loss),
     )
+    loss_term_names = ("l2", "h1", "bce", "ionized_wall")
     h1_warmup_epochs = {
         "fno": 0,
         "ufno": UFNO_H1_WARMUP_EPOCHS,
@@ -774,14 +804,20 @@ def main():
             *loss_terms,
             warmup_terms=(1,),
             warmup_epochs=h1_warmup_epochs,
+            term_names=loss_term_names,
         )
     else:
-        train_loss_fn = WeightedLoss(*loss_terms)
+        train_loss_fn = WeightedLoss(*loss_terms, term_names=loss_term_names)
     # Eval losses are tracked separately in metrics.jsonl so we can see how
     # each component evolves.  Keys here become column names in JSONL.
+    # val_l2 / val_h1 stay absolute for continuity with every archived run;
+    # the *_rel columns track the dimensionless variants regardless of which
+    # mode the training loss uses.
     eval_losses = {
         "l2": AbsoluteLoss(l2_loss),
         "h1": AbsoluteLoss(h1_loss),
+        "l2_rel": RelativeLoss(l2_loss),
+        "h1_rel": RelativeLoss(h1_loss),
         "bce": bce_loss,
         "ionized_wall": ionized_wall_loss,
     }
@@ -814,7 +850,9 @@ def main():
     rprint(f"Initial checkpoint: {INIT_CHECKPOINT or '(fresh initialization)'}")
     rprint(f"Input ablation: {INPUT_FEATURES.name}")
     rprint(f"Out: x_HI")
-    rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
+    l2_tag = "relL2" if LOSS_L2_MODE == "relative" else "absL2"
+    h1_tag = "relH1" if LOSS_H1_MODE == "relative" else "absH1"
+    rprint(f"Loss: {LOSS_L2_WEIGHT}*{l2_tag} + {LOSS_H1_WEIGHT}*{h1_tag} "
            f"+ {LOSS_BCE_WEIGHT}*BCE "
            f"+ {LOSS_IONIZED_WALL_WEIGHT}*ionized-wall-RMSE  "
            f"(H1: periodic X/Y, centered interior-only Z)")
@@ -889,6 +927,10 @@ def main():
                 "h1": LOSS_H1_WEIGHT,
                 "bce": LOSS_BCE_WEIGHT,
                 "ionized_wall": LOSS_IONIZED_WALL_WEIGHT,
+            },
+            "loss_modes": {
+                "l2": LOSS_L2_MODE,
+                "h1": LOSS_H1_MODE,
             },
             "ionized_wall_kernel_size": IONIZED_WALL_KERNEL_SIZE,
             "ionized_wall_threshold": IONIZED_WALL_THRESHOLD,
