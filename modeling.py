@@ -267,6 +267,27 @@ class TrainerModel(nn.Module):
     def forward(self, x, **_):
         return self.fno(x)
 
+    def save_checkpoint(self, save_folder, save_name: str) -> None:
+        """Save with ``fno.``-prefixed keys, matching DDP-branch checkpoints.
+
+        ``neuralop.training.save_training_state`` calls this for non-DDP
+        models. Implementing it here (rather than per architecture) keeps
+        single-GPU checkpoints byte-compatible with the multi-GPU runs, which
+        save ``model.module.state_dict()`` of this same wrapper.
+        """
+        save_folder = Path(save_folder)
+        save_folder.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            self.state_dict(),
+            (save_folder / f"{save_name}_state_dict.pt").as_posix(),
+        )
+
+    def load_checkpoint(self, save_folder, save_name: str, map_location=None) -> None:
+        path = Path(save_folder) / f"{save_name}_state_dict.pt"
+        self.load_state_dict(
+            torch.load(path, map_location=map_location, weights_only=False)
+        )
+
     def __getattr__(self, name):
         try:
             return super().__getattr__(name)

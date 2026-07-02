@@ -18,6 +18,48 @@ class TrainerModelTests(unittest.TestCase):
         x = torch.randn(2, 3)
         self.assertTrue(torch.equal(model(x=x, y=torch.zeros_like(x)), x))
 
+    def test_save_checkpoint_round_trips_with_ddp_key_layout(self):
+        # neuralop's save_training_state calls model.save_checkpoint() for
+        # non-DDP models; every wrapped architecture (incl. LocalFNO3d, which
+        # has no save_checkpoint of its own) must save `fno.`-prefixed keys
+        # identical to the DDP branch's model.module.state_dict().
+        from local_fno_3d import LocalFNO3d
+
+        model = TrainerModel(LocalFNO3d(
+            in_channels=2,
+            out_channels=1,
+            base_width=4,
+            local_window=(4, 4, 4),
+            local_modes=(2, 2, 3),
+            global_modes=(2, 2, 2),
+            spectral_rank=4,
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            model.save_checkpoint(tmp, "best_model")
+            path = os.path.join(tmp, "best_model_state_dict.pt")
+            self.assertTrue(os.path.exists(path))
+
+            saved = torch.load(path, weights_only=False)
+            self.assertTrue(all(key.startswith("fno.") for key in saved))
+            self.assertEqual(saved.keys(), model.state_dict().keys())
+
+            report = load_checkpoint(model, path)
+            self.assertEqual(report.transform, "as-is")
+            self.assertEqual(report.matched, report.total)
+
+            reloaded = TrainerModel(LocalFNO3d(
+                in_channels=2,
+                out_channels=1,
+                base_width=4,
+                local_window=(4, 4, 4),
+                local_modes=(2, 2, 3),
+                global_modes=(2, 2, 2),
+                spectral_rank=4,
+            ))
+            reloaded.load_checkpoint(tmp, "best_model")
+            for key, value in reloaded.state_dict().items():
+                self.assertTrue(torch.equal(value, saved[key]))
+
     def test_loads_supported_checkpoint_prefixes(self):
         reference = TrainerModel(nn.Linear(3, 2))
         wrapped_state = reference.state_dict()
