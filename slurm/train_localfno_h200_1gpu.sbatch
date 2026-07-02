@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:h200:1
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --time=72:00:00
 #SBATCH --output=logs/localfno3d-1gpu-%j.out
 #SBATCH --error=logs/localfno3d-1gpu-%j.err
@@ -31,6 +31,10 @@ conda activate fno-env
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
+
+# 8 workers keep a single GPU fed from local scratch; 32 (the 4-GPU sizing)
+# made the prefetch queue alone ~72 GB at batch size 4 and OOM-killed the job.
+export NUM_WORKERS="${NUM_WORKERS:-8}"
 
 export MODEL_KIND=localfno
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_localfno_1gpu}"

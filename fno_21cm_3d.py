@@ -158,8 +158,12 @@ LOCALFNO_GRAD_CLIP_NORM = float(
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
 # allocated CPUs gets the GPU fed.  Defaults to SLURM_CPUS_PER_TASK on the
-# cluster and 0 locally.
-NUM_WORKERS = int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+# cluster and 0 locally; override with NUM_WORKERS when the prefetch queue
+# (num_workers x prefetch_factor x batch_size samples of ~280 MB) must fit a
+# tighter host-memory budget.
+NUM_WORKERS = int(
+    os.environ.get("NUM_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+)
 
 # Per-step progress logging cadence (set to 0 to disable).
 LOG_EVERY = 25
