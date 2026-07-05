@@ -94,9 +94,36 @@ def _create_cube_dataset(o: h5py.File, name: str,
     return o.create_dataset(name, shape=shape, **kwargs)
 
 
+def load_target_z(path: Path, key: str | None) -> np.ndarray:
+    """Load an explicit target_z grid from .npz (needs key), .npy, or text.
+
+    Non-uniform grids let the LOS budget follow the reionization signal
+    instead of redshift (see los_grid_evaluation.py); a uniform-z grid is
+    coarsest in comoving distance exactly where the fronts live.
+    """
+    if path.suffix == ".npz":
+        with np.load(path) as f:
+            if key is None or key not in f:
+                raise SystemExit(
+                    f"--target-z-key must be one of {sorted(f.files)} "
+                    f"for {path}")
+            grid = np.asarray(f[key], dtype=np.float64)
+    elif path.suffix == ".npy":
+        grid = np.asarray(np.load(path), dtype=np.float64)
+    else:
+        grid = np.loadtxt(path, dtype=np.float64)
+    grid = np.atleast_1d(grid.squeeze())
+    if grid.ndim != 1 or len(grid) < 2 or not np.all(np.diff(grid) > 0):
+        raise SystemExit(f"target_z from {path} must be 1-D strictly "
+                         f"increasing, got shape {grid.shape}")
+    return grid
+
+
 # ------------------------------------------------------------------- build
 def build(data_dir: Path, out: Path, n_z: int, z_min: float, z_max: float,
-          shard: int, num_shards: int, compress: bool) -> None:
+          shard: int, num_shards: int, compress: bool,
+          target_z: np.ndarray | None = None,
+          target_z_source: str = "") -> None:
     files = sorted(Path(data_dir).glob("21cmfast_11d_sample*.h5"))
     if not files:
         sys.exit(f"No lightcone files found in {data_dir}")
@@ -105,12 +132,18 @@ def build(data_dir: Path, out: Path, n_z: int, z_min: float, z_max: float,
     todo = list(enumerate(files))
     if num_shards > 1:
         todo = todo[shard::num_shards]
-    print(f"[build] {len(todo)}/{len(files)} cones (shard {shard}/{num_shards})"
-          f", n_z={n_z}, z in [{z_min}, {z_max}], compress={compress}",
-          flush=True)
 
-    target_z = np.linspace(float(z_min), float(z_max), int(n_z),
-                           dtype=np.float64)
+    if target_z is not None:
+        n_z = len(target_z)
+        z_min, z_max = float(target_z[0]), float(target_z[-1])
+        grid_desc = f"explicit grid from {target_z_source}"
+    else:
+        target_z = np.linspace(float(z_min), float(z_max), int(n_z),
+                               dtype=np.float64)
+        grid_desc = "uniform in z"
+    print(f"[build] {len(todo)}/{len(files)} cones (shard {shard}/{num_shards})"
+          f", n_z={n_z} ({grid_desc}), z in [{z_min}, {z_max}], "
+          f"compress={compress}", flush=True)
 
     # Determine cube shape from the first file
     with LightconeFile(files[0]) as lf:
@@ -154,6 +187,8 @@ def build(data_dir: Path, out: Path, n_z: int, z_min: float, z_max: float,
         o.attrs["n_z"] = int(n_z)
         o.attrs["z_min"] = float(z_min)
         o.attrs["z_max"] = float(z_max)
+        if target_z_source:
+            o.attrs["target_z_source"] = target_z_source
         o.attrs["param_names"] = np.array(PARAMS, dtype="S")
 
     print(f"[done] {out_path}  ({n_local} cones, {n_skipped} skipped)",
@@ -312,6 +347,13 @@ def main() -> None:
                     help="LOS resolution after interpolation (default 256)")
     ap.add_argument("--z-min", type=float, default=5.0)
     ap.add_argument("--z-max", type=float, default=25.0)
+    ap.add_argument("--target-z-file", type=Path,
+                    help="explicit (possibly non-uniform) target_z grid: "
+                         ".npz (with --target-z-key), .npy, or text; "
+                         "overrides --n-z/--z-min/--z-max")
+    ap.add_argument("--target-z-key",
+                    help="array name inside --target-z-file when it is .npz "
+                         "(e.g. warped_512 from los_grid_evaluation.py)")
     ap.add_argument("--no-compress", action="store_true",
                     help="skip gzip on cube datasets (2-3x larger on disk, "
                          "but faster reads at training time)")
@@ -327,8 +369,15 @@ def main() -> None:
         return
     if args.data is None:
         ap.error("--data is required unless --merge is given")
+    target_z = None
+    target_z_source = ""
+    if args.target_z_file is not None:
+        target_z = load_target_z(args.target_z_file, args.target_z_key)
+        target_z_source = args.target_z_file.name + (
+            f":{args.target_z_key}" if args.target_z_key else "")
     build(args.data, args.out, args.n_z, args.z_min, args.z_max,
-          args.shard, args.num_shards, compress)
+          args.shard, args.num_shards, compress,
+          target_z=target_z, target_z_source=target_z_source)
 
 
 if __name__ == "__main__":

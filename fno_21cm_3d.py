@@ -456,7 +456,10 @@ class LoggingTrainer(Trainer):
         self._pred_sum += sampled.sum()
         self._pred_sq_sum += sampled.square().sum()
         self._pred_low_count += (sampled <= 1e-4).sum()
-        self._pred_high_count += (sampled >= 1.0 - 1e-4).sum()
+        # The simulated x_HI never reaches 1 (residual ionized floor caps it
+        # at ~0.99983), so a 1-1e-4 cutoff counts only unphysical clipping.
+        # At 0.999 the truth fraction is ~0.74, making this comparable.
+        self._pred_high_count += (sampled >= 0.999).sum()
         self._pred_count += sampled.numel()
         return losses, output if return_output else None
 
