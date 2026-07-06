@@ -61,7 +61,7 @@ Two pipelines live side by side:
 | `viz/visualize_3d.py` | Loads a 3-D checkpoint and its run metadata; renders image comparisons plus global-history, power-spectrum, Fourier-correlation, and bubble-size diagnostics. |
 | `viz/visualize_spectral_weights.py` | Plots per-layer Fourier-weight magnitudes over training epochs, selected-epoch profiles, and high-mode/low-mode cutoff ratios. |
 | `viz/visualize_spectral_weights_z.py` | Compact version that renders only the LOS/Z modes and writes a Z-only CSV. |
-| `power_spectrum_evaluation.py` | Scale- and redshift-resolved P(k) evaluation: transverse power ratio `P_pred/P_true` and cross-correlation `r(k)` per k bin, per redshift slab, and per reionization stage, aggregated over test cones (median + 16–84% band). Same `--checkpoints name=path` / `--manifest` / `--selftest` interface as `boundary_band_diagnostic.py`. |
+| `power_spectrum_evaluation.py` | Scale- and redshift-resolved P(k) evaluation: transverse power ratio `P_pred/P_true` and cross-correlation `r(k)` per k bin, as cylindrical `(k⊥, k∥)` maps at selected redshift chunks (default z = 7, 9, 11; log-log wavenumber axes), and per reionization stage, aggregated over test cones (median + 16–84% band). Same `--checkpoints name=path` / `--manifest` / `--selftest` interface as `boundary_band_diagnostic.py`. |
 
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
@@ -84,7 +84,7 @@ Two pipelines live side by side:
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
 | `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
-| `slurm/power_spectrum_eval.sbatch` | Paired power-spectrum evaluation (Local-FNO vs U-FNO by default): P(k) ratio and r(k) curves, (k, z) heatmaps, per-stage CSV, and a reduced-results NPZ. Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `OUT_DIR` via `--export`. |
+| `slurm/power_spectrum_eval.sbatch` | Paired power-spectrum evaluation (Local-FNO vs U-FNO by default): P(k) ratio and r(k) curves, cylindrical `(k⊥, k∥)` maps, per-stage CSV, and a reduced-results NPZ. Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `CHUNK_Z`, `OUT_DIR` via `--export`. |
 
 The prediction-visualization scripts write into a per-run subfolder under
 `figures/` whose
@@ -252,8 +252,10 @@ python power_spectrum_evaluation.py --checkpoints \
 
 or on the cluster `sbatch slurm/power_spectrum_eval.sbatch`. It writes the
 headline overlay (active-slice `Δ²(k)`, `P_pred/P_true`, `r(k)` with 16–84%
-cone bands), per-model `(k, z)` heatmaps of ratio and `r`, per-stage curves
-binned by the slice's transverse-mean `x_HI`, a `ps_metrics.csv` summary, and
+cone bands), cylindrical `(k⊥, k∥)` maps of ratio and `r` from Hann-windowed
+LOS chunks centred on `CHUNK_Z` (default z = 7, 9, 11; `k∥` in comoving
+Mpc⁻¹ via flat ΛCDM), per-stage curves binned by the slice's transverse-mean
+`x_HI`, a `ps_metrics.csv` summary, and
 a `ps_results.npz` with the reduced arrays for thesis re-plotting. Both
 diagnostics accept the same saved-cube NPZ manifests, so predictions computed
 once (`--save-cubes`) can be re-analyzed offline by either tool.

@@ -22,8 +22,12 @@ Design choices specific to this lightcone
   is built from **2-D transverse spectra of individual LOS slices** and then
   aggregated two ways:
 
-  - by **redshift slab** -> ``ratio(k, z)`` / ``r(k, z)`` heatmaps that show
-    where in the (scale, epoch) plane each model degrades;
+  - as **cylindrical maps** ``ratio(k_perp, k_par)`` / ``r(k_perp, k_par)``
+    from Hann-windowed LOS chunks centred on selected redshifts (default
+    z = 7, 9, 11) -- log-log wavenumber planes in the style of standard
+    21-cm cylindrical power-spectrum comparisons.  The chunk's redshift
+    sampling is converted to comoving Mpc with flat LCDM (``OMEGA_M``,
+    ``H0_KM_S_MPC`` below), so ``k_par`` is physical and chunk-dependent;
   - by **reionization stage** (the slice's transverse-mean x_HI) -> curves
     that compare cones with different reionization timings fairly.
 
@@ -81,13 +85,15 @@ N_TRANSVERSE = 140       # transverse cells
 class SpectrumConfig:
     """Binning configuration for the transverse power-spectrum diagnostic."""
     box_mpc: float = BOX_MPC
-    n_bins: int = 15                    # log-spaced k bins fundamental..Nyquist
-    z_slab: int = 8                     # LOS slices pooled per (k, z) map row
+    n_bins: int = 15                    # log-spaced k_perp bins fundamental..Nyquist
+    # cylindrical (k_perp, k_par) maps: LOS chunks centred on these redshifts
+    chunk_z_centers: tuple[float, ...] = (7.0, 9.0, 11.0)
+    chunk_cells: int = 32               # LOS cells per chunk (Hann-windowed FFT)
     # slice stages by transverse-mean x_HI; outside [first, last] is excluded
     stage_edges: tuple[float, ...] = (0.02, 0.2, 0.4, 0.6, 0.8, 0.98)
     active_range: tuple[float, float] = (0.05, 0.95)  # headline "active" slices
     min_stage_slices: int = 2           # cone contributes to a stage only if
-    slab_min_std: float = 1e-3          # mask slab cells with ~uniform truth
+    min_truth_std: float = 1e-3         # mask chunks with ~uniform truth
 
     @property
     def n_stages(self) -> int:
@@ -155,6 +161,58 @@ class KBinner:
         return cross[self.valid].T @ self.matrix
 
 
+# Flat LCDM used to convert the LOS redshift sampling into comoving distance
+# (21cmFAST / Planck-18 defaults).  Only enters through k_par's physical units.
+OMEGA_M = 0.3096
+H0_KM_S_MPC = 67.66
+C_KM_S = 299792.458
+
+
+def los_cell_size_mpc(z: float, dz_cell: float) -> float:
+    """Comoving size of one LOS cell at redshift z:  dD = c dz / H(z)."""
+    e_z = np.sqrt(OMEGA_M * (1.0 + z) ** 3 + (1.0 - OMEGA_M))
+    return C_KM_S / (H0_KM_S_MPC * e_z) * dz_cell
+
+
+@dataclass(frozen=True)
+class ZChunk:
+    """One Hann-windowed LOS chunk for the cylindrical (k_perp, k_par) maps."""
+    z_center: float
+    start: int
+    stop: int
+    los_cell_mpc: float
+    kpar_centers: np.ndarray     # discrete rfft wavenumbers, DC excluded
+    kpar_edges: np.ndarray       # pcolormesh edges (all positive, log-safe)
+    window: np.ndarray           # Hann taper (the chunk is not LOS-periodic)
+
+
+def build_chunks(cfg: SpectrumConfig, z_grid: np.ndarray | None,
+                 nz: int) -> list[ZChunk]:
+    """LOS chunks centred on cfg.chunk_z_centers; out-of-range ones skipped."""
+    if z_grid is None:
+        print("[chunks] no z grid available; skipping cylindrical maps")
+        return []
+    z = np.asarray(z_grid, dtype=float)
+    dz = float(z[1] - z[0])
+    chunks = []
+    for zc in cfg.chunk_z_centers:
+        i = int(np.argmin(np.abs(z - zc)))
+        start = i - cfg.chunk_cells // 2
+        stop = start + cfg.chunk_cells
+        if start < 0 or stop > nz:
+            print(f"[chunks] z={zc:g}: chunk exceeds the LOS range; skipped")
+            continue
+        cell = los_cell_size_mpc(zc, dz)
+        f = 2 * np.pi * np.fft.rfftfreq(cfg.chunk_cells, d=cell)
+        df = float(f[1])
+        edges = np.concatenate([[f[1] - df / 2], f[1:] + df / 2])
+        chunks.append(ZChunk(z_center=float(zc), start=start, stop=stop,
+                             los_cell_mpc=cell, kpar_centers=f[1:],
+                             kpar_edges=edges,
+                             window=np.hanning(cfg.chunk_cells)))
+    return chunks
+
+
 def _demean_slices(field: np.ndarray) -> np.ndarray:
     return field - field.mean(axis=(0, 1), keepdims=True)
 
@@ -178,6 +236,7 @@ class PowerSpectrumAccumulator:
     """
     cfg: SpectrumConfig
     binner: KBinner
+    chunks: list[ZChunk] = field(default_factory=list)
     per_cone: list[dict] = field(default_factory=list)
 
     def add_cone(self, cone_id, pred: np.ndarray, truth: np.ndarray):
@@ -218,26 +277,51 @@ class PowerSpectrumAccumulator:
         stage_cross[-1] = cross[active].sum(axis=0)
         stage_n[-1] = int(active.sum())
 
-        # ---- slab reduction (k, z maps) ----------------------------------- #
-        nz = truth.shape[2]
-        n_slab = nz // cfg.z_slab
-        used = n_slab * cfg.z_slab                   # trailing slices dropped
-        shape = (n_slab, cfg.z_slab, nb)
-        slab_pt = pt[:used].reshape(shape).sum(axis=1)
-        slab_pp = pp[:used].reshape(shape).sum(axis=1)
-        slab_cross = cross[:used].reshape(shape).sum(axis=1)
-        slab_ok = (
-            slice_std[:used].reshape(n_slab, cfg.z_slab).mean(axis=1)
-            > cfg.slab_min_std
-        )
+        # ---- cylindrical (k_perp, k_par) chunks --------------------------- #
+        cyl_pt, cyl_pp, cyl_cross, cyl_ok = [], [], [], []
+        for ch in self.chunks:
+            tc = truth[:, :, ch.start:ch.stop]
+            pc = pred[:, :, ch.start:ch.stop]
+            cyl_ok.append(
+                bool(slice_std[ch.start:ch.stop].mean() > cfg.min_truth_std)
+            )
+            spt, spp, scr = self._cylindrical_sums(tc, pc, ch)
+            cyl_pt.append(spt)
+            cyl_pp.append(spp)
+            cyl_cross.append(scr)
 
         self.per_cone.append({
             "cone_id": cone_id,
             "stage_pt": stage_pt, "stage_pp": stage_pp,
             "stage_cross": stage_cross, "stage_n": stage_n,
-            "slab_pt": slab_pt, "slab_pp": slab_pp,
-            "slab_cross": slab_cross, "slab_ok": slab_ok,
+            "cyl_pt": cyl_pt, "cyl_pp": cyl_pp,
+            "cyl_cross": cyl_cross, "cyl_ok": cyl_ok,
         })
+
+    def _cylindrical_sums(self, truth_c: np.ndarray, pred_c: np.ndarray,
+                          chunk: ZChunk) -> tuple[np.ndarray, np.ndarray,
+                                                  np.ndarray]:
+        """Hann-windowed 3-D FFT of one LOS chunk, binned to (k_par, k_perp).
+
+        Returns (pt, pp, cross) of shape (n_kpar - 1, n_perp_bins); the
+        k_par = 0 plane (pure transverse power) is dropped so both map axes
+        are strictly positive wavenumbers.  Ratio and r need no physical
+        normalization -- it cancels cell by cell.
+        """
+        w = chunk.window
+        # rfft needs real input, so the LOS transform runs first
+        tf = np.fft.fftn(
+            np.fft.rfft(_demean_slices(truth_c) * w, axis=2), axes=(0, 1))
+        pf = np.fft.fftn(
+            np.fft.rfft(_demean_slices(pred_c) * w, axis=2), axes=(0, 1))
+        b = self.binner
+
+        def bin_perp(x: np.ndarray) -> np.ndarray:
+            flat = x.reshape(-1, x.shape[2])[b.valid]      # (n_modes, n_kpar)
+            return (b.matrix.T @ flat).T[1:]               # (n_kpar-1, n_perp)
+
+        return (bin_perp(np.abs(tf) ** 2), bin_perp(np.abs(pf) ** 2),
+                bin_perp(np.real(tf * np.conj(pf))))
 
     # -- reduction ---------------------------------------------------------- #
     def reduce(self) -> dict:
@@ -273,14 +357,19 @@ class PowerSpectrumAccumulator:
         ratios = np.stack(ratios)     # (n_cones, n_stages+1, n_bins)
         rs = np.stack(rs)
 
-        # slab maps: per-cone ratio/r with uniform-truth cells masked
-        slab_ratios, slab_rs = [], []
-        for rec in self.per_cone:
-            ratio, r = _safe_ratio_r(
-                rec["slab_pt"], rec["slab_pp"], rec["slab_cross"])
-            ratio[~rec["slab_ok"]], r[~rec["slab_ok"]] = np.nan, np.nan
-            slab_ratios.append(ratio)
-            slab_rs.append(r)
+        # cylindrical maps: per-cone ratio/r with uniform-truth chunks masked
+        cyl_ratios, cyl_rs = [], []          # each: (n_cones, nkpar-1, n_perp)
+        for c in range(len(self.chunks)):
+            ratios_c, rs_c = [], []
+            for rec in self.per_cone:
+                ratio, r = _safe_ratio_r(
+                    rec["cyl_pt"][c], rec["cyl_pp"][c], rec["cyl_cross"][c])
+                if not rec["cyl_ok"][c]:
+                    ratio[:], r[:] = np.nan, np.nan
+                ratios_c.append(ratio)
+                rs_c.append(r)
+            cyl_ratios.append(np.stack(ratios_c))
+            cyl_rs.append(np.stack(rs_c))
 
         def med_lo_hi(x):
             return (np.nanmedian(x, axis=0),
@@ -294,8 +383,11 @@ class PowerSpectrumAccumulator:
             warnings.simplefilter("ignore", category=RuntimeWarning)
             ratio_med, ratio_lo, ratio_hi = med_lo_hi(ratios)
             r_med, r_lo, r_hi = med_lo_hi(rs)
-            slab_ratio_med = np.nanmedian(np.stack(slab_ratios), axis=0)
-            slab_r_med = np.nanmedian(np.stack(slab_rs), axis=0)
+            cyl_ratio_med = (np.stack([np.nanmedian(x, axis=0)
+                                       for x in cyl_ratios])
+                             if self.chunks else np.zeros((0, 0, 0)))
+            cyl_r_med = (np.stack([np.nanmedian(x, axis=0) for x in cyl_rs])
+                         if self.chunks else np.zeros((0, 0, 0)))
             d2_truth_med = np.nanmedian(np.stack(d2t), axis=0)
             d2_pred_med = np.nanmedian(np.stack(d2p), axis=0)
 
@@ -306,9 +398,12 @@ class PowerSpectrumAccumulator:
             "stage_ratio_med": ratio_med, "stage_ratio_lo": ratio_lo,
             "stage_ratio_hi": ratio_hi,
             "stage_r_med": r_med, "stage_r_lo": r_lo, "stage_r_hi": r_hi,
-            "slab_ratio_med": slab_ratio_med, "slab_r_med": slab_r_med,
-            "d2_truth_med": d2_truth_med, "d2_pred_med": d2_pred_med,
+            "cyl_ratio_med": cyl_ratio_med, "cyl_r_med": cyl_r_med,
+            "cyl_z_centers": np.array([c.z_center for c in self.chunks]),
+            "cyl_kpar_edges": (np.stack([c.kpar_edges for c in self.chunks])
+                               if self.chunks else np.zeros((0, 0))),
             "n_cones": len(self.per_cone),
+            "d2_truth_med": d2_truth_med, "d2_pred_med": d2_pred_med,
         }
 
 
@@ -398,47 +493,60 @@ def plot_overlay(results: dict[str, dict], out_path: Path):
     plt.close(fig)
 
 
-def plot_kz_maps(results: dict[str, dict], slab_z_edges: np.ndarray,
-                 out_path: Path):
-    """Per-model heatmaps of ratio(k, z) and r(k, z); grey = no truth power."""
+def plot_cylindrical_maps(results: dict[str, dict], out_ratio: Path,
+                          out_r: Path) -> bool:
+    """Cylindrical (k_perp, k_par) maps, one row per model, one column per
+    redshift chunk; log-log wavenumber axes, grey = no truth power.
+
+    Returns False (and writes nothing) when no chunks were available.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
 
-    names = list(results)
-    fig, axes = plt.subplots(len(names), 2,
-                             figsize=(12, 3.4 * len(names)), squeeze=False)
     first = next(iter(results.values()))
+    z_centers = first["cyl_z_centers"]
+    n_chunks = len(z_centers)
+    if n_chunks == 0:
+        return False
+    names = list(results)
     k_edges = first["k_edges"]
 
-    for row, name in enumerate(names):
-        res = results[name]
-        for col, (key, title, cmap, norm, vlims) in enumerate([
-            ("slab_ratio_med", "P_pred / P_true", "RdBu_r",
-             TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=2.0), None),
-            ("slab_r_med", "r(k, z)", "viridis", None, (0.0, 1.0)),
-        ]):
-            ax = axes[row][col]
-            data = res[key]                       # (n_slab, n_bins)
-            masked = np.ma.masked_invalid(data)
-            kwargs = {"cmap": cmap}
-            if norm is not None:
-                kwargs["norm"] = norm
-            if vlims is not None:
-                kwargs["vmin"], kwargs["vmax"] = vlims
-            pcm = ax.pcolormesh(k_edges, slab_z_edges, masked, **kwargs)
-            pcm.cmap.set_bad("0.85")
-            ax.set_xscale("log")
-            ax.set_xlabel(r"$k_\perp$  [Mpc$^{-1}$]")
-            ax.set_ylabel("redshift z")
-            ax.set_title(f"{name}: {title}")
-            fig.colorbar(pcm, ax=ax, pad=0.02)
+    ratio_cmap = plt.get_cmap("RdBu_r").copy()
+    ratio_cmap.set_bad("0.85")
+    r_cmap = plt.get_cmap("viridis").copy()
+    r_cmap.set_bad("0.85")
+    specs = [
+        ("cyl_ratio_med", out_ratio, r"$P_{\rm pred}/P_{\rm true}$",
+         {"cmap": ratio_cmap,
+          "norm": TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=2.0)}),
+        ("cyl_r_med", out_r, r"$r(k_\perp, k_\parallel)$",
+         {"cmap": r_cmap, "vmin": 0.0, "vmax": 1.0}),
+    ]
 
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=130)
-    plt.close(fig)
+    for key, out_path, label, style in specs:
+        fig, axes = plt.subplots(len(names), n_chunks,
+                                 figsize=(4.6 * n_chunks, 3.8 * len(names)),
+                                 squeeze=False)
+        for row, name in enumerate(names):
+            res = results[name]
+            for col in range(n_chunks):
+                ax = axes[row][col]
+                data = np.ma.masked_invalid(res[key][col])
+                pcm = ax.pcolormesh(k_edges, res["cyl_kpar_edges"][col],
+                                    data, **style)
+                ax.set_xscale("log")
+                ax.set_yscale("log")
+                ax.set_xlabel(r"$k_\perp$  [Mpc$^{-1}$]")
+                ax.set_ylabel(r"$k_\parallel$  [Mpc$^{-1}$]")
+                ax.set_title(f"{name} — z ≈ {z_centers[col]:g}")
+                fig.colorbar(pcm, ax=ax, pad=0.02, label=label)
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=130)
+        plt.close(fig)
+    return True
 
 
 def plot_stage_curves(results: dict[str, dict], out_path: Path):
@@ -510,10 +618,9 @@ def write_csv(results: dict[str, dict], out_path: Path):
         w.writerows(rows)
 
 
-def write_npz(results: dict[str, dict], slab_z_edges: np.ndarray,
-              out_path: Path):
+def write_npz(results: dict[str, dict], out_path: Path):
     """Raw reduced arrays for later re-plotting (thesis figures)."""
-    payload = {"slab_z_edges": slab_z_edges}
+    payload = {}
     for name, res in results.items():
         for key, val in res.items():
             if key == "stage_labels":
@@ -526,27 +633,12 @@ def write_npz(results: dict[str, dict], slab_z_edges: np.ndarray,
 # --------------------------------------------------------------------------- #
 # Drivers
 # --------------------------------------------------------------------------- #
-def _slab_z_edges(z_grid: np.ndarray | None, nz: int, z_slab: int) -> np.ndarray:
-    """Bin edges of the LOS slabs in redshift (or slice index if no grid)."""
-    n_slab = nz // z_slab
-    if z_grid is None:
-        return np.arange(n_slab + 1, dtype=float) * z_slab
-    z = np.asarray(z_grid, dtype=float)
-    idx = np.arange(n_slab + 1) * z_slab
-    edges = np.empty(n_slab + 1)
-    edges[:-1] = z[idx[:-1]]
-    last = min(idx[-1], len(z) - 1)
-    dz = z[1] - z[0] if len(z) > 1 else 1.0
-    edges[-1] = z[last - 1] + dz if idx[-1] >= len(z) else z[last]
-    return edges
-
-
 def run_from_cubes(cube_source: dict[str, Callable[[], "iter"]],
                    cfg: SpectrumConfig, out_dir: Path,
                    z_grid: np.ndarray | None = None) -> dict:
     """cube_source: {model_name: callable -> iterator of (cone_id, pred, truth)}."""
     binner = None
-    nz = None
+    chunks: list[ZChunk] = []
     results: dict[str, dict] = {}
     for name, source in cube_source.items():
         acc = None
@@ -555,9 +647,9 @@ def run_from_cubes(cube_source: dict[str, Callable[[], "iter"]],
             if binner is None:
                 binner = KBinner(truth.shape[0], truth.shape[1],
                                  cfg.box_mpc, cfg.n_bins)
-                nz = truth.shape[2]
+                chunks = build_chunks(cfg, z_grid, truth.shape[2])
             if acc is None:
-                acc = PowerSpectrumAccumulator(cfg, binner)
+                acc = PowerSpectrumAccumulator(cfg, binner, chunks=chunks)
             acc.add_cone(cone_id, pred, truth)
             n += 1
         if acc is None:
@@ -565,15 +657,18 @@ def run_from_cubes(cube_source: dict[str, Callable[[], "iter"]],
         print(f"[{name}] accumulated {n} cones")
         results[name] = acc.reduce()
 
-    slab_z_edges = _slab_z_edges(z_grid, nz, cfg.z_slab)
     out_dir.mkdir(parents=True, exist_ok=True)
     plot_overlay(results, out_dir / "ps_overlay.png")
-    plot_kz_maps(results, slab_z_edges, out_dir / "ps_kz_maps.png")
+    wrote_cyl = plot_cylindrical_maps(results, out_dir / "ps_cyl_ratio.png",
+                                      out_dir / "ps_cyl_r.png")
     plot_stage_curves(results, out_dir / "ps_stage_curves.png")
     write_csv(results, out_dir / "ps_metrics.csv")
-    write_npz(results, slab_z_edges, out_dir / "ps_results.npz")
-    for f in ("ps_overlay.png", "ps_kz_maps.png", "ps_stage_curves.png",
-              "ps_metrics.csv", "ps_results.npz"):
+    write_npz(results, out_dir / "ps_results.npz")
+    files = ["ps_overlay.png"]
+    if wrote_cyl:
+        files += ["ps_cyl_ratio.png", "ps_cyl_r.png"]
+    files += ["ps_stage_curves.png", "ps_metrics.csv", "ps_results.npz"]
+    for f in files:
         print(f"Wrote: {out_dir / f}")
     return results
 
@@ -680,9 +775,11 @@ def _selftest() -> int:
     rng = np.random.default_rng(0)
     nx = ny = 140
     nz = 48
-    cfg = SpectrumConfig(n_bins=12, z_slab=8)
+    cfg = SpectrumConfig(n_bins=12, chunk_z_centers=(15.0,), chunk_cells=32)
     binner = KBinner(nx, ny, cfg.box_mpc, cfg.n_bins)
     k = binner.centers
+    z_grid = np.linspace(5.0, 25.0, nz)
+    chunks = build_chunks(cfg, z_grid, nz)
 
     def fourier_blur(field, sigma_vox):
         """Exact Gaussian low-pass, applied per transverse slice.
@@ -750,13 +847,44 @@ def _selftest() -> int:
 
     # 5) saturated cone (x_HI ~ 1 everywhere) -> everything masked, no blowups
     flat = np.full((nx, ny, nz), 0.995) + 1e-5 * rng.standard_normal((nx, ny, nz))
-    acc = PowerSpectrumAccumulator(cfg, binner)
+    acc = PowerSpectrumAccumulator(cfg, binner, chunks=chunks)
     acc.add_cone(0, flat.copy(), flat)
     res = acc.reduce()
     c5 = (np.all(~np.isfinite(res["stage_ratio_med"]))
-          and np.all(~np.isfinite(res["slab_ratio_med"])))
+          and np.all(~np.isfinite(res["cyl_ratio_med"])))
     ok &= c5
     print(f"[5] saturated cone fully masked  -> {'PASS' if c5 else 'FAIL'}")
+
+    # 6) cylindrical identity -> ratio = 1, r = 1 in every (k_perp, k_par) cell
+    acc = PowerSpectrumAccumulator(cfg, binner, chunks=chunks)
+    acc.add_cone(0, truth.copy(), truth)
+    res = acc.reduce()
+    cr, crr = res["cyl_ratio_med"], res["cyl_r_med"]
+    c6 = (np.all(np.isfinite(cr)) and np.allclose(cr, 1.0, atol=1e-9)
+          and np.allclose(crr, 1.0, atol=1e-9))
+    ok &= c6
+    print(f"[6] cylindrical identity: max|ratio-1|={np.abs(cr-1).max():.2e}  "
+          f"-> {'PASS' if c6 else 'FAIL'}")
+
+    # 7) k_par localization: sin(kx x) sin(kz z) lands in the right map cell
+    ch = chunks[0]
+    j_par = 4                                     # cycles per chunk
+    mode = 8                                      # transverse cycles per box
+    wave = (np.sin(2 * np.pi * mode * np.arange(nx) / nx)[:, None, None]
+            * np.sin(2 * np.pi * j_par * np.arange(nz) / cfg.chunk_cells)
+            [None, None, :]) * np.ones((nx, ny, nz))
+    acc7 = PowerSpectrumAccumulator(cfg, binner, chunks=chunks)
+    pt7, _, _ = acc7._cylindrical_sums(
+        wave[:, :, ch.start:ch.stop], wave[:, :, ch.start:ch.stop], ch)
+    row, col = np.unravel_index(int(np.argmax(pt7)), pt7.shape)
+    k_perp_true = 2 * np.pi * mode / cfg.box_mpc
+    exp_col = int(np.digitize(k_perp_true, binner.edges) - 1)
+    exp_row = j_par - 1                           # DC plane dropped
+    c7 = (row, col) == (exp_row, exp_col)
+    ok &= c7
+    print(f"[7] cylindrical localization: peak at (k_par row, k_perp bin)="
+          f"({row},{col}), expected ({exp_row},{exp_col})  "
+          f"-> {'PASS' if c7 else 'FAIL'}")
 
     print("\nSELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -791,15 +919,19 @@ def main(argv=None):
     ap.add_argument("--save-cubes", type=Path, default=None)
     ap.add_argument("--box-mpc", type=float, default=BOX_MPC)
     ap.add_argument("--n-bins", type=int, default=15)
-    ap.add_argument("--z-slab", type=int, default=8,
-                    help="LOS slices pooled per row of the (k, z) maps")
+    ap.add_argument("--chunk-z", type=float, nargs="+", default=[7.0, 9.0, 11.0],
+                    help="redshift centres of the cylindrical (k_perp, k_par) "
+                         "map chunks")
+    ap.add_argument("--chunk-cells", type=int, default=32,
+                    help="LOS cells per cylindrical chunk")
     args = ap.parse_args(argv)
 
     if args.selftest:
         raise SystemExit(_selftest())
 
     cfg = SpectrumConfig(box_mpc=args.box_mpc, n_bins=args.n_bins,
-                         z_slab=args.z_slab)
+                         chunk_z_centers=tuple(args.chunk_z),
+                         chunk_cells=args.chunk_cells)
 
     if args.manifest:
         run_from_manifest(args.manifest, cfg, args.out)

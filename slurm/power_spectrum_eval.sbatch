@@ -72,7 +72,8 @@ done
 N_CONES="${N_CONES:-200}"
 SPLIT="${SPLIT:-test}"
 N_BINS="${N_BINS:-15}"
-Z_SLAB="${Z_SLAB:-8}"
+CHUNK_Z="${CHUNK_Z:-7 9 11}"
+CHUNK_CELLS="${CHUNK_CELLS:-32}"
 BOX_MPC="${BOX_MPC:-200.0}"
 OUT_DIR="${OUT_DIR:-ps_out/localfno-vs-ufno-${SLURM_JOB_ID:-local}}"
 
@@ -124,7 +125,8 @@ echo "Job ID:               ${SLURM_JOB_ID:-N/A}"
 echo "U-FNO checkpoint:     $UFNO_CHECKPOINT"
 echo "Local-FNO checkpoint: $LOCALFNO_CHECKPOINT"
 echo "Split / cones:        $SPLIT / $N_CONES"
-echo "k bins / z slab:      $N_BINS / $Z_SLAB"
+echo "k bins:               $N_BINS"
+echo "Cyl. chunks (z):      $CHUNK_Z  ($CHUNK_CELLS cells each)"
 echo "Local-FNO chunk:      $LOCALFNO_PATCH_CHUNK_SIZE"
 echo "Cube cache:           $CUBES_CACHE"
 echo "Save predictions:     $SAVE_CUBES"
@@ -140,10 +142,13 @@ args=(
     --split "$SPLIT"
     --n-cones "$N_CONES"
     --n-bins "$N_BINS"
-    --z-slab "$Z_SLAB"
+    --chunk-cells "$CHUNK_CELLS"
     --box-mpc "$BOX_MPC"
     --out "$OUT_DIR"
 )
+# CHUNK_Z is a space-separated list, so it must word-split here.
+# shellcheck disable=SC2206
+args+=(--chunk-z $CHUNK_Z)
 
 if [ "$SAVE_CUBES" = "yes" ]; then
     args+=(--save-cubes "$SAVED_CUBES_DIR")
