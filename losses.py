@@ -29,6 +29,46 @@ class RelativeLoss:
         return self.loss.rel(out, y)
 
 
+def los_volume_weights(target_z, omega_m: float = 0.31) -> torch.Tensor:
+    """Per-slice comoving-thickness quadrature weights for the LOS axis.
+
+    On a non-uniform LOS grid (see dataset/build_cubes.py --target-z-file),
+    voxel count IS loss weight: a plain norm lets densely sampled epochs
+    dominate in proportion to their slice count rather than the comoving
+    volume they represent. These weights undo that: w_k ~ Delta chi_k via
+    dchi/dz ~ 1/E(z) for flat LCDM (the absolute scale cancels in the
+    mean-1 normalization, so omega_m precision is uncritical).
+    """
+    z = torch.as_tensor(target_z, dtype=torch.float64)
+    ez = torch.sqrt(omega_m * (1.0 + z) ** 3 + (1.0 - omega_m))
+    dz = torch.gradient(z)[0]
+    w = dz / ez
+    return (w / w.mean()).to(torch.float32)
+
+
+class LOSVolumeWeightedLoss:
+    """Volume-weight a norm-based loss along the LOS (last) axis.
+
+    Multiplies prediction and target by sqrt(w_k) (w normalized to mean 1)
+    before delegating, which turns the wrapped norm into a physical volume
+    quadrature -- for relative losses the denominator is weighted
+    consistently: ||sqrt(w)(out - y)|| / ||sqrt(w) y||.
+
+    Wrap only norm-based terms (Lp, H1). Value-semantic terms (BCE,
+    threshold-based band losses) must not be wrapped: scaling moves their
+    inputs out of [0, 1].
+    """
+
+    def __init__(self, loss, weights: torch.Tensor):
+        self.loss = loss
+        self._sqrt_w = torch.sqrt(
+            torch.as_tensor(weights, dtype=torch.float32))
+
+    def __call__(self, out, y, **kwargs):
+        w = self._sqrt_w.to(device=out.device, dtype=out.dtype)
+        return self.loss(out * w, y * w, **kwargs)
+
+
 class WeightedLoss:
     """Combine ``(weight, loss)`` terms while preserving Trainer kwargs.
 

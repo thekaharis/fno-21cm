@@ -50,9 +50,11 @@ from losses import (
     BinaryCrossEntropyTerm,
     IonizedWallRMSE,
     LightconeH1Loss,
+    LOSVolumeWeightedLoss,
     RelativeLoss,
     ScheduledWeightedLoss,
     WeightedLoss,
+    los_volume_weights,
 )
 from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
 from util.run_metadata import write_run_metadata
@@ -112,6 +114,15 @@ N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
+
+# On non-uniform LOS grids (warped cube caches) voxel count is loss weight,
+# so densely sampled epochs dominate the L2/H1 terms in proportion to their
+# slice count. "1" applies Delta-chi quadrature weights along the LOS so the
+# loss is volume-weighted regardless of grid. No-op-ish for uniform-chi
+# grids; mildly reweights uniform-z ones. Applies to L2/H1 only.
+LOSS_LOS_VOLUME_WEIGHTS = (
+    os.environ.get("LOSS_LOS_VOLUME_WEIGHTS", "0").strip() == "1"
+)
 
 # Norm mode per term. "absolute" (historical default) uses raw H1/L2 norms,
 # under which the H1 term is ~2 orders of magnitude larger than the L2 term
@@ -793,9 +804,18 @@ def main():
         threshold=IONIZED_WALL_THRESHOLD,
     )
     norm_wrapper = {"absolute": AbsoluteLoss, "relative": RelativeLoss}
+    l2_term = norm_wrapper[LOSS_L2_MODE](l2_loss)
+    h1_term = norm_wrapper[LOSS_H1_MODE](h1_loss)
+    if LOSS_LOS_VOLUME_WEIGHTS:
+        los_w = los_volume_weights(dataset.target_z)
+        l2_term = LOSVolumeWeightedLoss(l2_term, los_w)
+        h1_term = LOSVolumeWeightedLoss(h1_term, los_w)
+        print(f"[loss] LOS volume weights ON: w in "
+              f"[{float(los_w.min()):.2f}, {float(los_w.max()):.2f}] "
+              f"(mean 1.0, {len(los_w)} slices)")
     loss_terms = (
-        (LOSS_L2_WEIGHT, norm_wrapper[LOSS_L2_MODE](l2_loss)),
-        (LOSS_H1_WEIGHT, norm_wrapper[LOSS_H1_MODE](h1_loss)),
+        (LOSS_L2_WEIGHT, l2_term),
+        (LOSS_H1_WEIGHT, h1_term),
         (LOSS_BCE_WEIGHT, bce_loss),
         (LOSS_IONIZED_WALL_WEIGHT, ionized_wall_loss),
     )
@@ -939,6 +959,7 @@ def main():
                 "l2": LOSS_L2_MODE,
                 "h1": LOSS_H1_MODE,
             },
+            "los_volume_weights": LOSS_LOS_VOLUME_WEIGHTS,
             "ionized_wall_kernel_size": IONIZED_WALL_KERNEL_SIZE,
             "ionized_wall_threshold": IONIZED_WALL_THRESHOLD,
             "ufno_h1_warmup_epochs": (

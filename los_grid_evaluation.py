@@ -65,24 +65,43 @@ def warped_grid(chi: np.ndarray, weight: np.ndarray, n: int,
     return np.interp(np.linspace(0.0, 1.0, n), cdf, chi)
 
 
-def build_grids(z: np.ndarray, chi: np.ndarray, xbar: np.ndarray,
+def build_grids(z: np.ndarray, chi: np.ndarray,
+                weights: dict[str, np.ndarray],
                 budgets: tuple[int, ...]) -> dict[str, np.ndarray]:
     """Candidate grids as ``target_z`` arrays (the cube pipeline's coordinate).
 
     ``chi`` is the ENSEMBLE-MEAN chi(z): per-cone comoving distance varies
     with the cosmology draw, so grids are defined once in z via the mean
     mapping and each cone is interpolated in z (matching build_cubes.py).
+    ``weights`` maps a name to a sampling density on (z, chi); each becomes
+    a CDF-inverted grid (e.g. "warped" = ensemble-mean |dx/dchi|,
+    "envelope90" = 90th percentile across cones, which covers early/late
+    reionizers instead of only the average one).
     """
-    dxbar = np.abs(np.gradient(xbar, chi))
     chi_to_z = lambda c: np.interp(c, chi, z)  # noqa: E731
     grids: dict[str, np.ndarray] = {}
     for n in budgets:
         grids[f"uniform_z_{n}"] = np.linspace(z[0], z[-1], n)
         grids[f"uniform_chi_{n}"] = chi_to_z(np.linspace(chi[0], chi[-1], n))
-        grids[f"warped_{n}"] = chi_to_z(warped_grid(chi, dxbar, n))
         hi = np.interp(15.0, z, chi)
         grids[f"crop15_chi_{n}"] = chi_to_z(np.linspace(chi[0], hi, n))
+        for wname, w in weights.items():
+            grids[f"{wname}_{n}"] = chi_to_z(warped_grid(chi, w, n))
     return grids
+
+
+def classify_cone(history: np.ndarray, z: np.ndarray) -> str:
+    """Reionization-timing class from a cone's global x_HI(z) history.
+
+    z50 = redshift where the global neutral fraction crosses 0.5.
+    """
+    h = np.clip(history, 0.0, 1.0)
+    if h[0] >= 0.5:          # midpoint below the z range: reionizes late
+        return "late"
+    z50 = float(np.interp(0.5, h, z))
+    if z50 > 9.5:
+        return "early"
+    return "mid" if z50 > 6.5 else "late"
 
 
 # --------------------------------------------------------------------------- #
@@ -153,7 +172,8 @@ def cell_sizes_at(grid_z: np.ndarray, z: np.ndarray, chi: np.ndarray,
 # Data driver
 # --------------------------------------------------------------------------- #
 def run_on_data(data_dir: Path, n_cones: int, budgets: tuple[int, ...],
-                field: str, out_dir: Path) -> dict[str, dict]:
+                field: str, out_dir: Path,
+                envelope_pct: float = 90.0) -> dict[str, dict]:
     import h5py
 
     files = sorted(data_dir.glob("21cmfast_11d_sample*.h5"))
@@ -179,7 +199,19 @@ def run_on_data(data_dir: Path, n_cones: int, budgets: tuple[int, ...],
     xbar = np.mean(hist, axis=0)
     chi_mean = np.mean(chi_maps, axis=0)
 
-    grids = build_grids(z_common, chi_mean, xbar, budgets)
+    # sampling densities: ensemble mean vs high-percentile envelope of the
+    # per-cone |d x_HI / d chi| -- the envelope covers every timing class
+    per_cone_dx = np.abs(np.gradient(np.asarray(hist), chi_mean, axis=1))
+    weights = {
+        "warped": per_cone_dx.mean(axis=0),
+        f"envelope{envelope_pct:g}": np.percentile(per_cone_dx,
+                                                   envelope_pct, axis=0),
+    }
+    grids = build_grids(z_common, chi_mean, weights, budgets)
+
+    classes = [classify_cone(h, z_common) for h in hist]
+    from collections import Counter
+    print(f"[grids] cone timing classes: {dict(Counter(classes))}")
 
     per_grid: dict[str, list[dict]] = {name: [] for name in grids}
     for ci, p in enumerate(picks):
@@ -190,17 +222,25 @@ def run_on_data(data_dir: Path, n_cones: int, budgets: tuple[int, ...],
         for name, grid_z in grids.items():
             fwd, bwd = LinInterp(lz, grid_z), LinInterp(grid_z, lz)
             recon = bwd(fwd(native))
-            per_grid[name].append(evaluate_roundtrip(native, recon, lchi))
+            row = evaluate_roundtrip(native, recon, lchi)
+            row["cone_class"] = classes[ci]
+            per_grid[name].append(row)
         print(f"[grids] cone {ci + 1}/{len(picks)} done "
-              f"({p.name}, {len(lz)} native slices)")
+              f"({p.name}, {len(lz)} native slices, {classes[ci]})")
 
     results = {}
     for name, rows in per_grid.items():
-        agg = {k: float(np.nanmean([r[k] for r in rows]))
-               for k in rows[0] if k != "n_front_rays"}
+        num = [k for k in rows[0] if k not in ("n_front_rays", "cone_class")]
+        agg = {k: float(np.nanmean([r[k] for r in rows])) for k in num}
         agg["n_front_rays"] = int(sum(r["n_front_rays"] for r in rows))
         agg["n_slices"] = len(grids[name])
         agg.update(cell_sizes_at(grids[name], z_common, chi_mean))
+        for cls in ("early", "mid", "late"):
+            sub = [r for r in rows if r["cone_class"] == cls]
+            if sub:
+                for k in ("transition_rmse", "sharpness_ratio",
+                          "fronts_missed_pct"):
+                    agg[f"{cls}_{k}"] = float(np.nanmean([r[k] for r in sub]))
         results[name] = agg
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +277,24 @@ def print_table(results: dict[str, dict]) -> None:
     print("\n(sharpness_ratio: 1.0 = fronts fully preserved; "
           "cell@z in Mpc; sorted best transition_rmse first)")
 
+    # per-timing-class breakdown: the ensemble-mean warp hides how badly a
+    # grid treats the rare early reionizers, so show them separately
+    cls_cols = [f"{cls}_{m}" for cls in ("early", "mid", "late")
+                for m in ("transition_rmse", "sharpness_ratio")]
+    if any(c in agg for agg in results.values() for c in cls_cols):
+        header = f"{'grid':<18}" + "".join(
+            f"{c.replace('transition_rmse', 'rmse').replace('sharpness_ratio', 'sharp'):>16}"
+            for c in cls_cols)
+        print("\n" + header)
+        print("-" * len(header))
+        for name, agg in sorted(results.items(),
+                                key=lambda kv: kv[1].get("transition_rmse", 9)):
+            row = f"{name:<18}"
+            for c in cls_cols:
+                v = agg.get(c, np.nan)
+                row += f"{v:>16.4f}"
+            print(row)
+
 
 # --------------------------------------------------------------------------- #
 # Self-test (synthetic)
@@ -256,11 +314,14 @@ def _selftest() -> int:
     native = np.asarray(rays, dtype=np.float32)[None, ...]  # (1, 300, n_nat)
     xbar = native[0].mean(axis=0)
 
-    grids = build_grids(z, chi, xbar, budgets=(256,))
+    dxbar = np.abs(np.gradient(xbar, chi))
+    grids = build_grids(z, chi, {"warped": dxbar}, budgets=(256,))
     res = {}
     for name, grid_z in grids.items():
         fwd, bwd = LinInterp(z, grid_z), LinInterp(grid_z, z)
         res[name] = evaluate_roundtrip(native, bwd(fwd(native)), chi)
+    # classifier sanity: synthetic fronts at low chi = low z = late reionizers
+    assert classify_cone(xbar, z) in ("late", "mid")
 
     uz, wp = res["uniform_z_256"], res["warped_256"]
     print(f"[selftest] uniform_z transition_rmse={uz['transition_rmse']:.4f} "
@@ -290,6 +351,9 @@ def main(argv=None):
                     help="slice budgets to build each grid family at")
     ap.add_argument("--field", default="neutral_fraction",
                     help="lightcone field to round-trip (try also: density)")
+    ap.add_argument("--envelope-pct", type=float, default=90.0,
+                    help="percentile across cones for the envelope warp "
+                         "(covers early/late reionizers, not just the mean)")
     ap.add_argument("--out", type=Path, default=Path("grid_eval_out"))
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
@@ -298,7 +362,7 @@ def main(argv=None):
         raise SystemExit(_selftest())
 
     results = run_on_data(args.data_dir, args.n_cones, tuple(args.budgets),
-                          args.field, args.out)
+                          args.field, args.out, args.envelope_pct)
     print_table(results)
     print(f"\nGrid evaluation complete: {args.out}")
 
