@@ -72,30 +72,15 @@ PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
 # times over across the run.  Skip by setting LOCAL_SCRATCH=no in the env.
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 
-# Discover the per-job NVMe scratch path -- conventions vary by cluster.
-# Most SLURM sites set TMPDIR; some expose /scratch/$SLURM_JOB_ID; some both.
 if [ "$LOCAL_SCRATCH" = "yes" ]; then
-    SCRATCH_BASE=""
-    for candidate in "${TMPDIR:-}" "/scratch/${SLURM_JOB_ID}" "/local/${SLURM_JOB_ID}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ]; then
-            SCRATCH_BASE="$candidate"; break
-        fi
-    done
-    if [ -n "$SCRATCH_BASE" ]; then
-        LOCAL_CUBES="$SCRATCH_BASE/cubes_3d.h5"
-        echo "Staging cube cache to local NVMe: $LOCAL_CUBES"
-        t0=$(date +%s)
-        # Use cp -L to follow symlinks; --reflink=auto saves time on CoW FS.
-        cp --reflink=auto "$PROJECT_CUBES" "$LOCAL_CUBES" || cp "$PROJECT_CUBES" "$LOCAL_CUBES"
-        echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
-        export CUBES_CACHE="$LOCAL_CUBES"
-    else
-        echo "No local scratch detected (TMPDIR/scratch unset); reading cubes from project FS."
-        export CUBES_CACHE="$PROJECT_CUBES"
-    fi
+    LOCAL_CUBES="$TMPDIR/cubes_3d.h5"
+    echo "Staging cube cache to local scratch: $LOCAL_CUBES"
+    t0=$(date +%s)
+    cp "$PROJECT_CUBES" "$LOCAL_CUBES"
+    echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
+    export CUBES_CACHE="$LOCAL_CUBES"
 else
-    echo "LOCAL_SCRATCH=no: reading cubes from project FS."
-    export CUBES_CACHE="$PROJECT_CUBES"
+    export CUBES_CACHE="${CUBES_CACHE:-$PROJECT_CUBES}"
 fi
 
 # --- Distributed master coordinates -----------------------------------------
