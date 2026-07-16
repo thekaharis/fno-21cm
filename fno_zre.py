@@ -15,10 +15,16 @@ Environment overrides (defaults in parentheses):
   TARGET_KIND       gompertz | step (gompertz)
   INPUT_FEATURES    density | density_params (density_params)
   N_Z_IN            LOS slices used as input channels (64)
-  N_MODES_X/Y (32), HIDDEN_CHANNELS (64), N_LAYERS (4)
-  BATCH_SIZE (2), LEARNING_RATE (5e-4), WEIGHT_DECAY (1e-5), N_EPOCHS (200)
+  MODEL_KIND        fno | ufno | localfno (fno)
+  N_MODES_X/Y (32), HIDDEN_CHANNELS (64), N_LAYERS (4)   [fno]
+  UFNO_WIDTH (32), UFNO_NORM batchnorm|groupnorm          [ufno]
+  LOCALFNO_BASE_WIDTH (16), LOCALFNO_WINDOW_X/Y (16),
+  LOCALFNO_MODES_X/Y (6), LOCALFNO_GLOBAL_MODES_X/Y (16),
+  LOCALFNO_SPECTRAL_RANK (16)                              [localfno]
+  BATCH_SIZE (2), LEARNING_RATE (5e-4 fno, 1e-4 ufno/localfno),
+  WEIGHT_DECAY (1e-5), N_EPOCHS (200)
   LOSS_L2_WEIGHT (0.5), LOSS_H1_WEIGHT (0.5)
-  CHECKPOINT_DIR (checkpoints/checkpoints_zre), EVAL_INTERVAL (5)
+  CHECKPOINT_DIR (checkpoints/checkpoints_zre[_<kind>]), EVAL_INTERVAL (5)
   RUN_SEED (0), DEVICE (auto: cuda > mps > cpu)
 """
 
@@ -62,22 +68,51 @@ INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_params").lower()
 N_Z_IN = int(os.environ.get("N_Z_IN", "64"))
 Z_MIN, Z_MAX = 5.0, 25.0
 
+MODEL_KIND = os.environ.get("MODEL_KIND", "fno").lower()
 N_MODES = (
     int(os.environ.get("N_MODES_X", "32")),
     int(os.environ.get("N_MODES_Y", "32")),
 )
 HIDDEN_CHANNELS = int(os.environ.get("HIDDEN_CHANNELS", "64"))
 N_LAYERS = int(os.environ.get("N_LAYERS", "4"))
+UFNO_WIDTH = int(os.environ.get("UFNO_WIDTH", "32"))
+UFNO_NORM = os.environ.get("UFNO_NORM", "batchnorm").lower()
+LOCALFNO_BASE_WIDTH = int(os.environ.get("LOCALFNO_BASE_WIDTH", "16"))
+LOCALFNO_WINDOW = (
+    int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
+    int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
+)
+LOCALFNO_MODES = (
+    int(os.environ.get("LOCALFNO_MODES_X", "6")),
+    int(os.environ.get("LOCALFNO_MODES_Y", "6")),
+)
+LOCALFNO_SPECTRAL_RANK = int(os.environ.get("LOCALFNO_SPECTRAL_RANK", "16"))
+# The LocalFNO bottleneck runs at 1/4 map resolution (35x35 for 140x140
+# cones), so its global modes are capped by 35//2 = 17 -- keep them separate
+# from the full-resolution N_MODES used by the plain FNO.
+LOCALFNO_GLOBAL_MODES = (
+    int(os.environ.get("LOCALFNO_GLOBAL_MODES_X", "16")),
+    int(os.environ.get("LOCALFNO_GLOBAL_MODES_Y", "16")),
+)
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "2"))
-LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "5e-4"))
+# U-FNO's sigmoid output and LocalFNO's deep residual stack train more
+# stably at a conservative LR, mirroring the 3-D pipeline's defaults.
+_DEFAULT_LR = "5e-4" if MODEL_KIND == "fno" else "1e-4"
+LEARNING_RATE = float(os.environ.get("LEARNING_RATE", _DEFAULT_LR))
 WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-5"))
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "200"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 
+# Separate checkpoint directories per model kind so runs never overwrite
+# each other (same convention as the 3-D pipeline).
+_KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "localfno": "_localfno"}
 CHECKPOINT_DIR = Path(
-    os.environ.get("CHECKPOINT_DIR", "checkpoints/checkpoints_zre")
+    os.environ.get(
+        "CHECKPOINT_DIR",
+        f"checkpoints/checkpoints_zre{_KIND_SUFFIX.get(MODEL_KIND, '')}",
+    )
 )
 
 SPLIT_SEED = 42
@@ -91,6 +126,57 @@ DEVICE = os.environ.get(
     else "mps" if torch.backends.mps.is_available()
     else "cpu",
 )
+
+
+def build_zre_model(kind: str, in_channels: int):
+    """Construct the configured 2-D architecture (returns model, description)."""
+    if kind == "ufno":
+        from models_zre_2d import UFNO2d
+
+        model = UFNO2d(
+            modes1=N_MODES[0],
+            modes2=N_MODES[1],
+            width=UFNO_WIDTH,
+            in_channels=in_channels,
+            out_channels=1,
+            sigmoid=True,
+            norm=UFNO_NORM,
+        )
+        desc = (f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} "
+                f"norm={UFNO_NORM} sigmoid-output")
+        return model, desc
+    if kind == "localfno":
+        from models_zre_2d import LocalFNO2d
+
+        model = LocalFNO2d(
+            in_channels=in_channels,
+            out_channels=1,
+            base_width=LOCALFNO_BASE_WIDTH,
+            local_window=LOCALFNO_WINDOW,
+            local_modes=LOCALFNO_MODES,
+            global_modes=LOCALFNO_GLOBAL_MODES,
+            spectral_rank=LOCALFNO_SPECTRAL_RANK,
+            output_sigmoid=True,
+        )
+        desc = (f"LocalFNO2d window={LOCALFNO_WINDOW} "
+                f"local-modes={LOCALFNO_MODES} "
+                f"global-modes={LOCALFNO_GLOBAL_MODES} "
+                f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
+                f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
+                f"sigmoid-output")
+        return model, desc
+    model = FNO(
+        n_modes=N_MODES,
+        hidden_channels=HIDDEN_CHANNELS,
+        in_channels=in_channels,
+        out_channels=1,
+        n_layers=N_LAYERS,
+        projection_channel_ratio=2,
+        positional_embedding="grid",
+    )
+    desc = (f"FNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} "
+            f"layers={N_LAYERS} pos-emb=grid")
+    return model, desc
 
 
 class MaskedMSE:
@@ -191,6 +277,11 @@ def main() -> None:
         raise SystemExit(f"TARGET_KIND must be one of {TARGET_KINDS}")
     if INPUT_FEATURES not in {"density", "density_params"}:
         raise SystemExit("INPUT_FEATURES must be 'density' or 'density_params'")
+    if MODEL_KIND not in _KIND_SUFFIX:
+        raise SystemExit(
+            f"MODEL_KIND must be one of {sorted(_KIND_SUFFIX)}, "
+            f"got {MODEL_KIND!r}"
+        )
 
     _seed_everything(RUN_SEED)
 
@@ -235,18 +326,10 @@ def main() -> None:
     test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
     test_loaders = {"val": val_loader, "test": test_loader}
 
-    fno = FNO(
-        n_modes=N_MODES,
-        hidden_channels=HIDDEN_CHANNELS,
-        in_channels=dataset.in_channels,
-        out_channels=1,
-        n_layers=N_LAYERS,
-        projection_channel_ratio=2,
-        positional_embedding="grid",
-    )
-    model = TrainerModel(fno).to(DEVICE)
-    print(f"Model: FNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} "
-          f"layers={N_LAYERS} -> {count_model_params(model.fno):,} parameters")
+    inner, description = build_zre_model(MODEL_KIND, dataset.in_channels)
+    model = TrainerModel(inner).to(DEVICE)
+    print(f"Model: {description} -> "
+          f"{count_model_params(model.fno):,} parameters")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE,
                                  weight_decay=WEIGHT_DECAY)
@@ -301,6 +384,8 @@ def main() -> None:
     loaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     report = _final_report(model, loaders, dataset, DEVICE)
     report.update(
+        model_kind=MODEL_KIND,
+        model_description=description,
         target_kind=TARGET_KIND,
         input_features=INPUT_FEATURES,
         n_z_in=N_Z_IN,
@@ -308,6 +393,7 @@ def main() -> None:
         hidden_channels=HIDDEN_CHANNELS,
         n_layers=N_LAYERS,
         n_epochs=N_EPOCHS,
+        learning_rate=LEARNING_RATE,
         run_seed=RUN_SEED,
         n_cones=len(files),
         test_cones=[dataset.file_paths[i].stem for i in test_ds.indices],

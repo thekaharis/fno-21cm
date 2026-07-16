@@ -71,13 +71,16 @@ export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/d
 export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$PROJECT_ROOT/zre_targets.h5}"
 
 # Defaults mirror fno_zre.py; listed here so an experiment can flip them via
-# `sbatch --export=ALL,...` without editing files.
+# `sbatch --export=ALL,...` without editing files.  MODEL_KIND picks the
+# architecture (fno | ufno | localfno); CHECKPOINT_DIR is deliberately NOT
+# set here -- fno_zre.py derives a per-kind default
+# (checkpoints/checkpoints_zre[_<kind>]) so runs never overwrite each other.
+export MODEL_KIND="${MODEL_KIND:-fno}"
 export TARGET_KIND="${TARGET_KIND:-gompertz}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_params}"
 export N_Z_IN="${N_Z_IN:-64}"
 export N_EPOCHS="${N_EPOCHS:-200}"
 export BATCH_SIZE="${BATCH_SIZE:-8}"
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_zre}"
 
 # --- Diagnostics (captured in the .out log) ---------------------------------
 echo "================ job environment ================"
@@ -88,6 +91,7 @@ echo "Conda env:          ${CONDA_DEFAULT_ENV:-?}"
 echo "Python:             $(which python)"
 echo "Lightcones:         $LIGHTCONE_DIR"
 echo "Target cache:       $ZRE_TARGET_CACHE"
+echo "Model kind:         $MODEL_KIND"
 echo "Target kind:        $TARGET_KIND"
 echo "Input features:     $INPUT_FEATURES"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-none}"
