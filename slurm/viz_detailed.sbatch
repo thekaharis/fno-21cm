@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # SLURM batch script -- detailed viz (16 cones, active-z slices) for the
-# plain-FNO checkpoint in ./checkpoints_3d/.
+# plain-FNO checkpoint in ./checkpoints/checkpoints_3d/.
 #
 # Submit from the project root:
 #

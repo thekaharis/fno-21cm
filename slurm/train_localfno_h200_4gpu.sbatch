@@ -33,7 +33,7 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 export MODEL_KIND=localfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_localfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_localfno}"
 export N_EPOCHS="${N_EPOCHS:-70}"
 
 # Whole-volume bottleneck modes at 35x35x64.

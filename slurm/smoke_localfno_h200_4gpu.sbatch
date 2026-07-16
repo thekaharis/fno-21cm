@@ -32,7 +32,7 @@ export PYTHONUNBUFFERED=1
 
 export MODEL_KIND=localfno
 export N_EPOCHS=1
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_localfno_smoke}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_localfno_smoke}"
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-128}"
 export LOCALFNO_LEARNING_RATE="${LOCALFNO_LEARNING_RATE:-1e-4}"
 export LOCALFNO_H1_WARMUP_EPOCHS=0

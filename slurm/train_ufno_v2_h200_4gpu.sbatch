@@ -28,7 +28,7 @@
 #      already shines (val_h1 = 8.27 vs FNO floor 11.36).  Should sharpen
 #      bubble walls further without trading off val_l2 significantly.
 #
-# Distinct CHECKPOINT_DIR (./checkpoints_3d_ufno_v2) so v1 and v2 don't
+# Distinct CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno_v2) so v1 and v2 don't
 # overwrite each other.  Reuses the v1 sbatch's NVMe staging, master-addr
 # wiring, and resource sizing; only env-var overrides + the job name and
 # log paths differ.
@@ -86,9 +86,9 @@ export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
 # Separate checkpoint dir so v1 and v2 don't collide.  fno_21cm_3d.py
-# honors CHECKPOINT_DIR if set; otherwise it picks ./checkpoints_3d_ufno
+# honors CHECKPOINT_DIR if set; otherwise it picks ./checkpoints/checkpoints_3d_ufno
 # from MODEL_KIND=ufno.
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno_v2}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v2}"
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data

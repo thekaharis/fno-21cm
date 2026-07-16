@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fno-21cm training dashboard</title>
+<style>
+  :root {
+    --bg: #12151a; --panel: #1b202a; --border: #2c3442;
+    --text: #d7dde8; --muted: #8a94a6; --accent: #5ab0f7; --live: #3fce7c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+           border-bottom: 1px solid var(--border); position: sticky; top: 0;
+           background: var(--bg); z-index: 5; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  .muted { color: var(--muted); }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 12px; padding: 12px 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 8px; padding: 10px 12px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+              color: var(--muted); margin: 2px 0 8px; }
+  #sidebar { display: flex; flex-direction: column; gap: 12px;
+             position: sticky; top: 54px; align-self: start;
+             max-height: calc(100vh - 66px); overflow-y: auto; }
+  .run-row { display: flex; align-items: center; gap: 8px; padding: 3px 2px;
+             border-radius: 4px; cursor: pointer; }
+  .run-row:hover { background: rgba(255,255,255,.04); }
+  .run-row .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .run-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                   white-space: nowrap; }
+  .run-row .label { display: block; font-size: 11px; color: var(--muted); }
+  .badge { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+           background: var(--live); color: #06240f; flex: none; }
+  .epochs { font-size: 11px; color: var(--muted); flex: none; }
+  .rm { color: var(--muted); background: none; border: none; cursor: pointer;
+        font-size: 13px; padding: 0 2px; }
+  .rm:hover { color: #f27878; }
+  #metric-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  #metric-list button { background: var(--bg); border: 1px solid var(--border);
+        color: var(--text); border-radius: 12px; padding: 2px 9px; cursor: pointer;
+        font-size: 11.5px; }
+  #metric-list button.on { background: var(--accent); border-color: var(--accent);
+        color: #08131d; font-weight: 600; }
+  label.opt { display: flex; align-items: center; gap: 6px; padding: 2px 0;
+              cursor: pointer; }
+  input[type=text] { background: var(--bg); border: 1px solid var(--border);
+        color: var(--text); border-radius: 5px; padding: 5px 8px; width: 100%; }
+  button.action { background: var(--accent); color: #08131d; border: none;
+        border-radius: 5px; padding: 5px 10px; cursor: pointer; font-weight: 600; }
+  select { background: var(--panel); color: var(--text);
+           border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px; }
+  #charts { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .chart-panel svg { display: block; width: 100%; }
+  .chart-title { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+  .axis text { fill: var(--muted); font-size: 10.5px; }
+  .axis line, .axis path { stroke: var(--border); }
+  .grid line { stroke: rgba(255,255,255,.05); }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border);
+           white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  .err { color: #f27878; font-size: 12px; min-height: 1em; }
+  .live-run { margin-bottom: 10px; }
+  .live-run:last-child { margin-bottom: 2px; }
+  .live-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .live-head .name { font-weight: 600; }
+  .bar { position: relative; height: 16px; background: var(--bg);
+         border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+         margin: 3px 0; }
+  .bar .fill { position: absolute; top: 0; bottom: 0; left: 0;
+               transition: width .6s ease; }
+  .bar.overall .fill { background: var(--accent); }
+  .bar.phase .fill { background: var(--live); }
+  .bar .bar-text { position: absolute; inset: 0; display: flex;
+                   align-items: center; justify-content: space-between;
+                   padding: 0 8px; font-size: 10.5px; white-space: nowrap;
+                   text-shadow: 0 0 3px rgba(0,0,0,.8); }
+  .tooltip { position: fixed; pointer-events: none; background: #05070a;
+             border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px;
+             font-size: 11.5px; z-index: 20; display: none; max-width: 340px; }
+  .tooltip .trow { display: flex; gap: 8px; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header>
+  <h1>fno-21cm training</h1>
+  <span id="status" class="muted">loading…</span>
+  <div class="spacer"></div>
+  <label class="opt"><input type="checkbox" id="logscale"> log y</label>
+  <label class="opt"><input type="checkbox" id="clip"> clip to live epoch</label>
+  <label class="opt muted">refresh
+    <select id="interval">
+      <option value="15000">15s</option>
+      <option value="30000" selected>30s</option>
+      <option value="60000">60s</option>
+      <option value="0">off</option>
+    </select>
+  </label>
+</header>
+<main>
+  <div id="sidebar">
+    <div class="panel">
+      <h2>Runs</h2>
+      <div id="run-list"></div>
+      <div style="display:flex; gap:6px; margin-top:8px;">
+        <input type="text" id="add-path" placeholder="/path/to/checkpoint_dir">
+        <button class="action" id="add-btn">Add</button>
+      </div>
+      <div class="err" id="add-err"></div>
+    </div>
+    <div class="panel">
+      <h2>Metrics</h2>
+      <div id="metric-list"></div>
+    </div>
+  </div>
+  <div id="charts"></div>
+</main>
+<div class="tooltip" id="tooltip"></div>
+<script>
+"use strict";
+const PALETTE = ["#5ab0f7","#f7a65a","#3fce7c","#f27878","#c792ea","#ffd866",
+                 "#66d9ef","#f78cba","#a2e57b","#8f9dff","#e0b089","#7fdbca"];
+const DEFAULT_METRICS = ["val_l2_rel","test_l2_rel","train_err"];
+const state = {
+  data: null,
+  selRuns: new Set(),
+  selMetrics: new Set(),
+  timer: null,
+  initialized: false,
+};
+
+const $ = id => document.getElementById(id);
+const fmt = v => {
+  if (v === null || v === undefined || !isFinite(v)) return "–";
+  const a = Math.abs(v);
+  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v.toExponential(3);
+  return +v.toPrecision(5) + "";
+};
+
+function runColor(name) {
+  // stable color per run name
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+
+async function fetchRuns() {
+  try {
+    const r = await fetch("/api/runs");
+    state.data = await r.json();
+    $("status").textContent =
+      `${state.data.runs.length} runs · updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $("status").textContent = "fetch failed: " + e;
+    return;
+  }
+  if (!state.initialized) {
+    state.initialized = true;
+    // default selection: live runs (or the most recent run) + default metrics
+    const live = state.data.runs.filter(r => r.live);
+    if (live.length) live.forEach(r => state.selRuns.add(r.name));
+    else if (state.data.runs.length) {
+      const newest = [...state.data.runs].sort((a, b) => b.mtime - a.mtime)[0];
+      state.selRuns.add(newest.name);
+    }
+    const avail = new Set(state.data.runs.flatMap(r => r.keys));
+    DEFAULT_METRICS.filter(m => avail.has(m)).forEach(m => state.selMetrics.add(m));
+    $("clip").checked = live.length > 0;
+  }
+  render();
+}
+
+function metricUnion() {
+  const keys = [];
+  const seen = new Set(["epoch"]);
+  for (const r of (state.data ? state.data.runs : []))
+    for (const k of r.keys)
+      if (!seen.has(k)) { seen.add(k); keys.push(k); }
+  return keys;
+}
+
+function selectedRuns() {
+  return state.data.runs.filter(r => state.selRuns.has(r.name));
+}
+
+function clipEpoch() {
+  if (!$("clip").checked) return Infinity;
+  const live = selectedRuns().filter(r => r.live);
+  if (!live.length) return Infinity;
+  return Math.max(...live.map(r => Math.max(...(r.series.epoch || [r.epochs - 1]))));
+}
+
+function render() {
+  renderRunList();
+  renderMetricList();
+  renderCharts();
+}
+
+function renderRunList() {
+  const box = $("run-list");
+  box.innerHTML = "";
+  const extras = new Set(state.data.extras || []);
+  for (const r of state.data.runs) {
+    const row = document.createElement("div");
+    row.className = "run-row";
+    const on = state.selRuns.has(r.name);
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = on ? runColor(r.name) : "transparent";
+    sw.style.border = "1px solid " + runColor(r.name);
+    const name = document.createElement("span");
+    name.className = "name";
+    name.title = r.path;
+    name.textContent = r.name;
+    if (r.label) {
+      const lab = document.createElement("span");
+      lab.className = "label";
+      lab.textContent = r.label;
+      name.appendChild(lab);
+    }
+    row.append(sw, name);
+    if (r.live) {
+      const b = document.createElement("span");
+      b.className = "badge"; b.textContent = "LIVE";
+      row.appendChild(b);
+    }
+    const ep = document.createElement("span");
+    ep.className = "epochs"; ep.textContent = r.epochs + " ep";
+    row.appendChild(ep);
+    if (extras.has(r.path)) {
+      const rm = document.createElement("button");
+      rm.className = "rm"; rm.textContent = "✕"; rm.title = "remove from dashboard";
+      rm.onclick = async e => {
+        e.stopPropagation();
+        await fetch("/api/remove", {method: "POST", body: JSON.stringify({path: r.path})});
+        state.selRuns.delete(r.name);
+        fetchRuns();
+      };
+      row.appendChild(rm);
+    }
+    row.onclick = () => {
+      on ? state.selRuns.delete(r.name) : state.selRuns.add(r.name);
+      render();
+    };
+    box.appendChild(row);
+  }
+}
+
+function renderMetricList() {
+  const box = $("metric-list");
+  box.innerHTML = "";
+  for (const k of metricUnion()) {
+    const b = document.createElement("button");
+    b.textContent = k;
+    b.className = state.selMetrics.has(k) ? "on" : "";
+    b.onclick = () => {
+      state.selMetrics.has(k) ? state.selMetrics.delete(k) : state.selMetrics.add(k);
+      render();
+    };
+    box.appendChild(b);
+  }
+}
+
+/* ---------- live status ---------- */
+
+function bar(cls, frac, left, right) {
+  const pct = Math.max(0, Math.min(1, frac)) * 100;
+  return `<div class="bar ${cls}">
+    <div class="fill" style="width:${pct.toFixed(1)}%"></div>
+    <div class="bar-text"><span>${left}</span><span>${right}</span></div>
+  </div>`;
+}
+
+function renderLiveStatus(area) {
+  const live = state.data.runs.filter(r => r.live);
+  if (!live.length) return;
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  let html = "<h2>Live runs</h2>";
+  for (const r of live) {
+    const p = r.progress;
+    const frac = p ? p.epoch_frac : 0;
+    const curEpoch = r.epochs + 1;  // 1-based epoch currently running
+    const totTxt = r.total_epochs || "?";
+    const overall = r.total_epochs
+      ? Math.min((r.epochs + frac) / r.total_epochs, 1) : null;
+    html += `<div class="live-run">
+      <div class="live-head">
+        <span style="color:${runColor(r.name)}">■</span>
+        <span class="name">${r.name}</span>
+        <span class="badge">LIVE</span>
+        <span class="muted" style="font-size:11px">${p ? p.log : "no slurm log found"}</span>
+      </div>`;
+    html += bar("overall", overall ?? 0,
+      `training · epoch ${curEpoch}/${totTxt}`,
+      overall !== null ? (overall * 100).toFixed(1) + "%" : "total unknown");
+    if (p) {
+      const stale = p.log_age_s > 600;
+      html += bar("phase", p.total ? p.done / p.total : 0,
+        `epoch ${curEpoch} · ${p.phase} ${p.done}/${p.total}`,
+        p.epoch_frac === 0 && p.done === p.total
+          ? "finishing / next epoch starting"
+          : `ETA ${p.eta_min.toFixed(1)} min · ${p.samples_per_s.toFixed(2)} samp/s` +
+            (stale ? " · ⚠ no output for " + Math.round(p.log_age_s / 60) + " min" : ""));
+    } else {
+      html += `<div class="muted" style="font-size:11px">no [phase i/N] progress lines found in logs/</div>`;
+    }
+    html += "</div>";
+  }
+  panel.innerHTML = html;
+  area.appendChild(panel);
+}
+
+/* ---------- charts ---------- */
+
+function niceTicks(lo, hi, n) {
+  if (!(hi > lo)) { hi = lo + 1; }
+  const span = hi - lo, step0 = span / Math.max(n, 1);
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 5, 10].map(m => m * mag).find(s => span / s <= n) || 10 * mag;
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12 * span; v += step)
+    ticks.push(+v.toPrecision(12));
+  return ticks;
+}
+
+function logTicks(lo, hi) {
+  const ticks = [];
+  const d0 = Math.floor(Math.log10(lo)), d1 = Math.ceil(Math.log10(hi));
+  const mants = (d1 - d0) <= 2 ? [1, 2, 5] : [1];
+  for (let d = d0; d <= d1; d++)
+    for (const m of mants) {
+      const v = m * Math.pow(10, d);
+      if (v >= lo * 0.999 && v <= hi * 1.001) ticks.push(v);
+    }
+  return ticks;
+}
+
+function renderCharts() {
+  const area = $("charts");
+  area.innerHTML = "";
+  renderLiveStatus(area);
+  const runs = selectedRuns();
+  const metrics = [...state.selMetrics];
+  if (!runs.length || !metrics.length) {
+    area.innerHTML += '<div class="panel muted">Select at least one run and one metric.</div>';
+    renderSummary(area, runs);
+    return;
+  }
+  const maxEp = clipEpoch();
+  for (const m of metrics) area.appendChild(buildChart(m, runs, maxEp));
+  renderSummary(area, runs);
+}
+
+function seriesFor(run, metric, maxEp) {
+  const ep = run.series.epoch || run.series[run.keys[0]].map((_, i) => i);
+  const ys = run.series[metric];
+  if (!ys) return null;
+  const pts = [];
+  for (let i = 0; i < ys.length; i++)
+    if (ys[i] !== null && ep[i] !== null && ep[i] <= maxEp)
+      pts.push([ep[i], ys[i]]);
+  return pts.length ? pts : null;
+}
+
+function buildChart(metric, runs, maxEp) {
+  const W = 900, H = 300, ML = 64, MR = 12, MT = 10, MB = 30;
+  const log = $("logscale").checked;
+  const panel = document.createElement("div");
+  panel.className = "panel chart-panel";
+  const title = document.createElement("p");
+  title.className = "chart-title";
+  title.textContent = metric + (isFinite(maxEp) ? `  (clipped to epoch ${maxEp})` : "");
+  panel.appendChild(title);
+
+  const all = [];
+  const lines = [];
+  for (const r of runs) {
+    const pts = seriesFor(r, metric, maxEp);
+    if (pts) { lines.push({run: r, pts}); all.push(...pts); }
+  }
+  if (!all.length) {
+    const p = document.createElement("p");
+    p.className = "muted"; p.textContent = "no data for selected runs";
+    panel.appendChild(p);
+    return panel;
+  }
+  let ys = all.map(p => p[1]);
+  if (log) ys = ys.filter(v => v > 0);
+  if (!ys.length) {
+    const p = document.createElement("p");
+    p.className = "muted"; p.textContent = "no positive values (log scale)";
+    panel.appendChild(p);
+    return panel;
+  }
+  const x0 = Math.min(...all.map(p => p[0])), x1 = Math.max(...all.map(p => p[0]));
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (y0 === y1) { y0 -= Math.abs(y0) * 0.1 || 1; y1 += Math.abs(y1) * 0.1 || 1; }
+  const X = v => ML + (x1 === x0 ? 0.5 : (v - x0) / (x1 - x0)) * (W - ML - MR);
+  const Y = log
+    ? v => MT + (1 - (Math.log10(v) - Math.log10(y0)) / (Math.log10(y1) - Math.log10(y0))) * (H - MT - MB)
+    : v => MT + (1 - (v - y0) / (y1 - y0)) * (H - MT - MB);
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  const grid = document.createElementNS(svgNS, "g");
+  grid.setAttribute("class", "grid");
+  const axis = document.createElementNS(svgNS, "g");
+  axis.setAttribute("class", "axis");
+  const yticks = log ? logTicks(y0, y1) : niceTicks(y0, y1, 6);
+  for (const t of yticks) {
+    const y = Y(t);
+    const l = document.createElementNS(svgNS, "line");
+    l.setAttribute("x1", ML); l.setAttribute("x2", W - MR);
+    l.setAttribute("y1", y); l.setAttribute("y2", y);
+    grid.appendChild(l);
+    const tx = document.createElementNS(svgNS, "text");
+    tx.setAttribute("x", ML - 6); tx.setAttribute("y", y + 3.5);
+    tx.setAttribute("text-anchor", "end");
+    tx.textContent = fmt(t);
+    axis.appendChild(tx);
+  }
+  for (const t of niceTicks(x0, x1, 10).filter(Number.isInteger)) {
+    const x = X(t);
+    const l = document.createElementNS(svgNS, "line");
+    l.setAttribute("x1", x); l.setAttribute("x2", x);
+    l.setAttribute("y1", MT); l.setAttribute("y2", H - MB);
+    grid.appendChild(l);
+    const tx = document.createElementNS(svgNS, "text");
+    tx.setAttribute("x", x); tx.setAttribute("y", H - MB + 14);
+    tx.setAttribute("text-anchor", "middle");
+    tx.textContent = t;
+    axis.appendChild(tx);
+  }
+  svg.append(grid, axis);
+
+  for (const {run, pts} of lines) {
+    const draw = log ? pts.filter(p => p[1] > 0) : pts;
+    if (!draw.length) continue;
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", draw.map((p, i) =>
+      (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join(""));
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", runColor(run.name));
+    path.setAttribute("stroke-width", "1.8");
+    svg.appendChild(path);
+    if (draw.length <= 60)
+      for (const p of draw) {
+        const c = document.createElementNS(svgNS, "circle");
+        c.setAttribute("cx", X(p[0])); c.setAttribute("cy", Y(p[1]));
+        c.setAttribute("r", "2.6");
+        c.setAttribute("fill", runColor(run.name));
+        svg.appendChild(c);
+      }
+  }
+
+  // hover: vertical cursor + per-run values at nearest epoch
+  const cursor = document.createElementNS(svgNS, "line");
+  cursor.setAttribute("y1", MT); cursor.setAttribute("y2", H - MB);
+  cursor.setAttribute("stroke", "rgba(255,255,255,.35)");
+  cursor.setAttribute("visibility", "hidden");
+  svg.appendChild(cursor);
+  const tip = $("tooltip");
+  svg.addEventListener("mousemove", ev => {
+    const box = svg.getBoundingClientRect();
+    const xe = x0 + ((ev.clientX - box.left) / box.width * W - ML) / (W - ML - MR) * (x1 - x0);
+    const near = Math.round(Math.min(Math.max(xe, x0), x1));
+    cursor.setAttribute("x1", X(near)); cursor.setAttribute("x2", X(near));
+    cursor.setAttribute("visibility", "visible");
+    let html = `<div class="trow"><b>epoch ${near}</b></div>`;
+    for (const {run, pts} of lines) {
+      const p = pts.find(p => p[0] === near);
+      html += `<div class="trow"><span style="color:${runColor(run.name)}">■</span>` +
+              `<span style="flex:1;overflow:hidden;text-overflow:ellipsis">${run.name}</span>` +
+              `<b>${p ? fmt(p[1]) : "–"}</b></div>`;
+    }
+    tip.innerHTML = html;
+    tip.style.display = "block";
+    tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - 360) + "px";
+    tip.style.top = (ev.clientY + 14) + "px";
+  });
+  svg.addEventListener("mouseleave", () => {
+    cursor.setAttribute("visibility", "hidden");
+    tip.style.display = "none";
+  });
+
+  panel.appendChild(svg);
+  return panel;
+}
+
+function best(run, key, maxEp) {
+  const pts = seriesFor(run, key, maxEp);
+  if (!pts) return [null, null];
+  let bi = 0;
+  for (let i = 1; i < pts.length; i++) if (pts[i][1] < pts[bi][1]) bi = i;
+  return [pts[bi][1], pts[bi][0]];
+}
+
+function last(run, key, maxEp) {
+  const pts = seriesFor(run, key, maxEp);
+  return pts ? pts[pts.length - 1][1] : null;
+}
+
+function renderSummary(area, runs) {
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  panel.innerHTML = "<h2>Summary</h2>";
+  const maxEp = clipEpoch();
+  const rows = runs.map(r => {
+    const [bv, be] = best(r, "val_l2_rel", maxEp);
+    const [bt] = best(r, "test_l2_rel", maxEp);
+    const et = last(r, "epoch_train_time", maxEp);
+    return `<tr>
+      <td><span style="color:${runColor(r.name)}">■</span> ${r.name}${r.live ? ' <span class="badge">LIVE</span>' : ""}</td>
+      <td>${r.epochs}${r.total_epochs ? '<span class="muted">/' + r.total_epochs + "</span>" : ""}</td>
+      <td>${fmt(bv)}${be !== null ? ` <span class="muted">@${be}</span>` : ""}</td>
+      <td>${fmt(bt)}</td>
+      <td>${fmt(last(r, "train_err", maxEp))}</td>
+      <td>${fmt(last(r, "last_grad_norm", maxEp))}</td>
+      <td>${et ? (et / 60).toFixed(1) : "–"}</td>
+      <td>${fmt(last(r, "train_samples_per_second", maxEp))}</td>
+      <td class="muted">${new Date(r.mtime * 1000).toLocaleString()}</td>
+    </tr>`;
+  }).join("");
+  panel.innerHTML += `<table>
+    <tr><th>run</th><th>epochs</th><th>best val_l2_rel</th><th>best test_l2_rel</th>
+        <th>train_err</th><th>grad norm</th><th>min/epoch</th><th>samp/s</th><th>last write</th></tr>
+    ${rows || ""}</table>`;
+  area.appendChild(panel);
+}
+
+/* ---------- wiring ---------- */
+
+$("logscale").onchange = renderCharts;
+$("clip").onchange = renderCharts;
+$("interval").onchange = schedule;
+$("add-btn").onclick = addRun;
+$("add-path").addEventListener("keydown", e => { if (e.key === "Enter") addRun(); });
+
+async function addRun() {
+  const path = $("add-path").value.trim();
+  if (!path) return;
+  $("add-err").textContent = "";
+  const r = await fetch("/api/add", {method: "POST", body: JSON.stringify({path})});
+  const j = await r.json();
+  if (!r.ok) { $("add-err").textContent = j.error || "failed"; return; }
+  $("add-path").value = "";
+  fetchRuns();
+}
+
+function schedule() {
+  if (state.timer) clearInterval(state.timer);
+  const ms = +$("interval").value;
+  state.timer = ms ? setInterval(fetchRuns, ms) : null;
+}
+
+schedule();
+fetchRuns();
+</script>
+</body>
+</html>

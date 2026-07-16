@@ -48,18 +48,18 @@ Typical use
 -----------
 Cluster (predicts cubes from checkpoints, writes figures + CSV + NPZ)::
 
-    python power_spectrum_evaluation.py --checkpoints \
-        ufno=checkpoints_3d_ufno/best_model_state_dict.pt \
-        localfno=checkpoints_3d_localfno/best_model_state_dict.pt \
-        --n-cones 200 --split test --out ps_out/
+    python -m viz.power_spectrum_evaluation --checkpoints \
+        ufno=checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt \
+        localfno=checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt \
+        --n-cones 200 --split test --out figures/ps_out/
 
 Offline (re-use cubes saved by this script or boundary_band_diagnostic)::
 
-    python power_spectrum_evaluation.py --manifest ps_manifest.json --out ps_out/
+    python -m viz.power_spectrum_evaluation --manifest ps_manifest.json --out figures/ps_out/
 
 Self-test (no data needed)::
 
-    python power_spectrum_evaluation.py --selftest
+    python -m viz.power_spectrum_evaluation --selftest
 """
 from __future__ import annotations
 
@@ -913,7 +913,7 @@ def main(argv=None):
                      help="JSON manifest of saved npz cubes")
     src.add_argument("--checkpoints", nargs="+", metavar="name=path",
                      help="cluster mode: build cubes from checkpoints")
-    ap.add_argument("--out", type=Path, default=Path("ps_out"))
+    ap.add_argument("--out", type=Path, default=Path("figures/ps_out"))
     ap.add_argument("--n-cones", type=int, default=200)
     ap.add_argument("--split", choices=["train", "val", "test"], default="test")
     ap.add_argument("--save-cubes", type=Path, default=None)

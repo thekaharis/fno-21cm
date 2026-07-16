@@ -22,7 +22,7 @@
 #
 # Inherits from v2: GroupNorm, H1-weighted loss, asymmetric Z modes.
 #
-# Distinct CHECKPOINT_DIR (./checkpoints_3d_ufno_v3_los1d).
+# Distinct CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno_v3_los1d).
 # =============================================================================
 
 #SBATCH --job-name=ufno-v3-los1d
@@ -71,7 +71,7 @@ export LOSS_L2_WEIGHT=0.3
 export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno_v3_los1d}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v3_los1d}"
 
 # --- Data paths + NVMe staging ---------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data

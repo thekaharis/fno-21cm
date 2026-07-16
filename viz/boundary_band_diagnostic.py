@@ -41,19 +41,19 @@ Typical use
 -----------
 Cluster (generates cubes from checkpoints, caches npz, writes figure + CSV)::
 
-    python boundary_band_diagnostic.py --checkpoints \
-        fno=checkpoints_3d/best_model_state_dict.pt \
-        ufno=checkpoints_3d_ufno/best_model_state_dict.pt \
-        sirenfno=checkpoints_3d_sirenfno_m64_stable/best_model_state_dict.pt \
-        --n-cones 200 --split test --save-cubes cubes_cache/ --out band_out/
+    python -m viz.boundary_band_diagnostic --checkpoints \
+        fno=checkpoints/checkpoints_3d/best_model_state_dict.pt \
+        ufno=checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt \
+        sirenfno=checkpoints/checkpoints_3d_sirenfno_m64_stable/best_model_state_dict.pt \
+        --n-cones 200 --split test --save-cubes cubes_cache/ --out figures/band_out/
 
 Offline (re-use saved cubes; runs anywhere)::
 
-    python boundary_band_diagnostic.py --manifest band_manifest.json --out band_out/
+    python -m viz.boundary_band_diagnostic --manifest band_manifest.json --out figures/band_out/
 
 Self-test (no data needed)::
 
-    python boundary_band_diagnostic.py --selftest
+    python -m viz.boundary_band_diagnostic --selftest
 """
 from __future__ import annotations
 
@@ -660,7 +660,7 @@ def main(argv=None):
     src.add_argument("--manifest", type=Path, help="JSON manifest of saved npz cubes")
     src.add_argument("--checkpoints", nargs="+", metavar="name=path",
                      help="cluster mode: build cubes from checkpoints")
-    ap.add_argument("--out", type=Path, default=Path("band_out"))
+    ap.add_argument("--out", type=Path, default=Path("figures/band_out"))
     ap.add_argument("--mode", choices=["slice", "3d"], default="slice")
     ap.add_argument("--n-cones", type=int, default=200)
     ap.add_argument("--split", choices=["train", "val", "test"], default="test")

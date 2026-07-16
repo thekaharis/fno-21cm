@@ -40,7 +40,7 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 export MODEL_KIND=sirenfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_sirenfno_m64_stable}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_sirenfno_m64_stable}"
 export CHECKPOINT_KIND="${CHECKPOINT_KIND:-best}"
 export VIZ_TAG="${VIZ_TAG:-sirenfno}"
 

@@ -30,11 +30,11 @@ Candidate grids (same slice budget unless noted):
 
 Typical use (login node, CPU only)::
 
-    python los_grid_evaluation.py --n-cones 12 --out grid_eval_out/
+    python -m viz.los_grid_evaluation --n-cones 12 --out grid_eval_out/
 
 Self-test (synthetic, no data needed)::
 
-    python los_grid_evaluation.py --selftest
+    python -m viz.los_grid_evaluation --selftest
 """
 from __future__ import annotations
 
@@ -354,7 +354,7 @@ def main(argv=None):
     ap.add_argument("--envelope-pct", type=float, default=90.0,
                     help="percentile across cones for the envelope warp "
                          "(covers early/late reionizers, not just the mean)")
-    ap.add_argument("--out", type=Path, default=Path("grid_eval_out"))
+    ap.add_argument("--out", type=Path, default=Path("figures/grid_eval_out"))
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
 

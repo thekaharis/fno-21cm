@@ -218,7 +218,7 @@ class ModelConfig:
             "sirenfno": "_sirenfno",
             "localfno": "_localfno",
         }[self.kind]
-        return Path(f"checkpoints_3d{suffix}")
+        return Path("checkpoints") / f"checkpoints_3d{suffix}"
 
     def describe(self) -> str:
         if self.kind == "fno":

@@ -28,14 +28,14 @@ Typical use
 -----------
 Cluster (predicts cones with each checkpoint's own architecture)::
 
-    python parity_diagnostic.py --checkpoints \
-        localfno=checkpoints_3d_localfno_1gpu/best_model_state_dict.pt \
+    python -m viz.parity_diagnostic --checkpoints \
+        localfno=checkpoints/checkpoints_3d_localfno_1gpu/best_model_state_dict.pt \
         ufno=checkpoint-archive/checkpoints_3d_ufno/best_model_state_dict.pt \
         --split test --n-cones 200 --out parity_out/
 
 Self-test (no data / torch needed)::
 
-    python parity_diagnostic.py --selftest
+    python -m viz.parity_diagnostic --selftest
 """
 from __future__ import annotations
 
@@ -350,7 +350,7 @@ def main(argv=None):
                     help="restrict to LOS slices with z in [LO, HI]")
     ap.add_argument("--min-count", type=int, default=1000,
                     help="ignore bins below this population in the summary")
-    ap.add_argument("--out", type=Path, default=Path("parity_out"))
+    ap.add_argument("--out", type=Path, default=Path("figures/parity_out"))
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
 

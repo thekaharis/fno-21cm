@@ -12,7 +12,7 @@
 #     GlobalResidualWrapper via UFNO_GLOBAL_RESIDUAL=true.  Both flags must
 #     match training time or load_model() fails the shape-match check.
 #   * Inherits v2 baseline overrides (groupnorm + N_MODES_Z=32).
-#   * CHECKPOINT points at ./checkpoints_3d_ufno_v3_globalres/.
+#   * CHECKPOINT points at ./checkpoints/checkpoints_3d_ufno_v3_globalres/.
 #   * VIZ_TAG=ufno-v3-globalres so figures land in a clearly-labelled folder.
 #
 # Pairs with slurm/viz_ufno_v3_globalres_detailed.sbatch.
@@ -64,7 +64,7 @@ export N_MODES_Z=32
 export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
-export CHECKPOINT_DIR=./checkpoints_3d_ufno_v3_globalres
+export CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v3_globalres
 export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-globalres
 

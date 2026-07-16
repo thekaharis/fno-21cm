@@ -34,7 +34,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
 export MODEL_KIND=ufno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno}"
 export MPLBACKEND=Agg
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-${SLURM_JOB_ID:-local}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
