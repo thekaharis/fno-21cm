@@ -35,11 +35,14 @@ from dataset.zre_target import TARGET_KINDS, load_zre_map
 
 
 class ZreMapDataset(Dataset):
-    """Density lightcone -> z_re map pairs, preloaded in memory.
+    """Density lightcone -> z_re map pairs.
 
-    Preloading is cheap here: 12 cones at ``n_z_in=64`` slices occupy ~60 MB.
-    For the full design (hundreds of cones) it is still < 3 GB; revisit if the
-    dataset outgrows host memory.
+    With ``preload=True`` (training default) every cone's density slices are
+    read once at construction: ~5 MB per cone at ``n_z_in=64``, ~33 GB for
+    the full 6600-cone design -- fits the training node's memory budget and
+    removes all epoch-time I/O. Visualization passes ``preload=False`` to
+    read density on demand for just the cones it renders; targets and masks
+    (~80 KB per cone) are always kept in memory.
     """
 
     def __init__(
@@ -53,6 +56,7 @@ class ZreMapDataset(Dataset):
         density_scale: float = 10.0,
         use_params: bool = True,
         parameter_normalization: ParameterNormalization | None = None,
+        preload: bool = True,
     ):
         if target_kind not in TARGET_KINDS:
             raise ValueError(
@@ -78,15 +82,13 @@ class ZreMapDataset(Dataset):
                     rows.append(read_sampled_params(h5_file))
             self.params = np.stack(rows).astype(np.float32)
 
-        self._density: list[torch.Tensor] = []
+        self.preload = bool(preload)
+        self._density: dict[int, torch.Tensor] = {}
         self._target: list[torch.Tensor] = []
         self._mask: list[torch.Tensor] = []
-        for path in self.file_paths:
-            with LightconeFile(path) as lf:
-                dens = lf.read_interpolated("density", self.input_z)
-            # (Nx, Ny, n_z_in) -> channels-first (n_z_in, Nx, Ny)
-            dens = np.moveaxis(dens, -1, 0) / self.density_scale
-            self._density.append(torch.from_numpy(np.ascontiguousarray(dens)))
+        for idx, path in enumerate(self.file_paths):
+            if self.preload:
+                self._density[idx] = self._load_density(idx)
 
             zre = load_zre_map(self.target_cache, path, self.target_kind)
             valid = np.isfinite(zre)
@@ -100,6 +102,13 @@ class ZreMapDataset(Dataset):
         self.map_shape = tuple(self._target[0].shape[-2:])
         self.n_params = len(PARAM_NAMES) if self.use_params else 0
         self.in_channels = self.n_z_in + self.n_params
+
+    def _load_density(self, idx: int) -> torch.Tensor:
+        with LightconeFile(self.file_paths[idx]) as lf:
+            dens = lf.read_interpolated("density", self.input_z)
+        # (Nx, Ny, n_z_in) -> channels-first (n_z_in, Nx, Ny)
+        dens = np.moveaxis(dens, -1, 0) / self.density_scale
+        return torch.from_numpy(np.ascontiguousarray(dens))
 
     @property
     def channel_names(self) -> tuple[str, ...]:
@@ -132,7 +141,8 @@ class ZreMapDataset(Dataset):
         return len(self.file_paths)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        x = self._density[idx]
+        x = (self._density[idx] if self.preload
+             else self._load_density(idx))
         if self.use_params:
             if self.parameter_normalization is None:
                 raise RuntimeError(

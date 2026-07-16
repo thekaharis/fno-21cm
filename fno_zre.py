@@ -230,17 +230,35 @@ def _final_report(model, loaders, dataset, device) -> dict:
 
 
 @torch.no_grad()
-def _save_test_figure(model, test_ds, dataset, device, out_path: Path) -> None:
-    """Truth vs. prediction maps for every test cone (quick visual check)."""
+def _save_test_figure(model, test_ds, dataset, device, out_path: Path,
+                      max_cones: int | None = None) -> None:
+    """Truth vs. prediction maps for a sample of test cones.
+
+    Capped at ``max_cones`` rows (env FIGURE_MAX_CONES, default 8): with a
+    large design the test split holds hundreds of cones and one row each
+    would produce a several-hundred-megapixel PNG no viewer can open.
+    The sample is seeded, so repeated runs show the same cones.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    if max_cones is None:
+        max_cones = int(os.environ.get("FIGURE_MAX_CONES", "8"))
+    indices = list(test_ds.indices)
+    total = len(indices)
+    if total > max_cones:
+        picker = np.random.default_rng(SPLIT_SEED)
+        indices = sorted(
+            picker.choice(total, size=max_cones, replace=False).tolist()
+        )
+        indices = [test_ds.indices[i] for i in indices]
+
     model.eval()
-    n = len(test_ds)
+    n = len(indices)
     fig, axes = plt.subplots(n, 3, figsize=(12, 3.9 * n), dpi=140,
                              squeeze=False)
-    for row, idx in enumerate(test_ds.indices):
+    for row, idx in enumerate(indices):
         sample = dataset[idx]
         pred = model(sample["x"][None].to(device))[0, 0].cpu().numpy()
         truth = sample["y"][0].numpy()
@@ -265,7 +283,7 @@ def _save_test_figure(model, test_ds, dataset, device, out_path: Path) -> None:
             ax.set_title(title, fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             fig.colorbar(im, ax=ax, fraction=0.046)
-    fig.suptitle("z_re(x, y): test cones", fontsize=13)
+    fig.suptitle(f"z_re(x, y): {n} of {total} test cones", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
