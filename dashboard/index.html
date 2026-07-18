@@ -16,6 +16,12 @@
            background: var(--bg); z-index: 5; flex-wrap: wrap; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
   header .spacer { flex: 1; }
+  #tabs { display: flex; gap: 4px; }
+  #tabs button { background: var(--panel); border: 1px solid var(--border);
+        color: var(--text); border-radius: 6px; padding: 4px 12px;
+        cursor: pointer; font-size: 12.5px; }
+  #tabs button.on { background: var(--accent); border-color: var(--accent);
+        color: #08131d; font-weight: 600; }
   .muted { color: var(--muted); }
   main { display: grid; grid-template-columns: 340px 1fr; gap: 12px; padding: 12px 16px; }
   .panel { background: var(--panel); border: 1px solid var(--border);
@@ -88,6 +94,7 @@
 <body>
 <header>
   <h1>fno-21cm training</h1>
+  <nav id="tabs"></nav>
   <span id="status" class="muted">loading…</span>
   <div class="spacer"></div>
   <label class="opt"><input type="checkbox" id="logscale"> log y</label>
@@ -131,7 +138,14 @@ const state = {
   selMetrics: new Set(),
   timer: null,
   initialized: false,
+  page: "all",
 };
+const TASK_LABELS = {"3d": "21cm 3-D", "zre": "z_re maps"};
+
+function visibleRuns() {
+  return state.data.runs.filter(r =>
+    state.page === "all" || (r.task || "3d") === state.page);
+}
 
 const $ = id => document.getElementById(id);
 const fmt = v => {
@@ -177,14 +191,14 @@ async function fetchRuns() {
 function metricUnion() {
   const keys = [];
   const seen = new Set(["epoch"]);
-  for (const r of (state.data ? state.data.runs : []))
+  for (const r of (state.data ? visibleRuns() : []))
     for (const k of r.keys)
       if (!seen.has(k)) { seen.add(k); keys.push(k); }
   return keys;
 }
 
 function selectedRuns() {
-  return state.data.runs.filter(r => state.selRuns.has(r.name));
+  return visibleRuns().filter(r => state.selRuns.has(r.name));
 }
 
 function clipEpoch() {
@@ -195,16 +209,31 @@ function clipEpoch() {
 }
 
 function render() {
+  renderTabs();
   renderRunList();
   renderMetricList();
   renderCharts();
+}
+
+function renderTabs() {
+  const nav = $("tabs");
+  nav.innerHTML = "";
+  const tasks = [...new Set(state.data.runs.map(r => r.task || "3d"))].sort();
+  if (tasks.length < 2 && state.page === "all") return;
+  for (const t of ["all", ...tasks]) {
+    const b = document.createElement("button");
+    b.textContent = t === "all" ? "All" : (TASK_LABELS[t] || t);
+    b.className = state.page === t ? "on" : "";
+    b.onclick = () => { state.page = t; render(); };
+    nav.appendChild(b);
+  }
 }
 
 function renderRunList() {
   const box = $("run-list");
   box.innerHTML = "";
   const extras = new Set(state.data.extras || []);
-  for (const r of state.data.runs) {
+  for (const r of visibleRuns()) {
     const row = document.createElement("div");
     row.className = "run-row";
     const on = state.selRuns.has(r.name);
@@ -276,7 +305,7 @@ function bar(cls, frac, left, right) {
 }
 
 function renderLiveStatus(area) {
-  const live = state.data.runs.filter(r => r.live);
+  const live = visibleRuns().filter(r => r.live);
   if (!live.length) return;
   const panel = document.createElement("div");
   panel.className = "panel";

@@ -70,6 +70,11 @@ export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/d
 # a refit after changing the fit grids in dataset/zre_target.py.
 export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$PROJECT_ROOT/zre_targets.h5}"
 
+# Input sidecar (density slices + params; build with
+# slurm/build_zre_inputs.sbatch). If absent, falls back to reading all raw
+# lightcones at startup (~1.5-2 h); with the cache, startup is minutes.
+export ZRE_INPUT_CACHE="${ZRE_INPUT_CACHE:-$PROJECT_ROOT/zre_inputs.h5}"
+
 # Defaults mirror fno_zre.py; listed here so an experiment can flip them via
 # `sbatch --export=ALL,...` without editing files.  MODEL_KIND picks the
 # architecture (fno | ufno | localfno); CHECKPOINT_DIR is deliberately NOT

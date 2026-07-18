@@ -29,8 +29,15 @@ runs on. So the server and your tunnel/forwarder must be on the SAME node:
 
 ## What it shows
 
-- Every run under `fno-21cm/checkpoints_*/` and `fno-21cm/checkpoint-archive/*/`
-  that has a `metrics.jsonl`, labeled with model config from `run_metadata.json`.
+- Every run under `fno-21cm/checkpoints/`, `fno-21cm/checkpoints_*/` and
+  `fno-21cm/checkpoint-archive/*/` that has a `metrics.jsonl`, labeled with
+  model config from `run_metadata.json`.
+- Runs are grouped into pages by training target (tabs in the header:
+  21cm 3-D lightcones vs z_re maps). The tag comes from `task` in
+  `run_metadata.json`, falling back to the directory name; tabs appear
+  automatically once runs of more than one target exist. z_re runs write
+  `metrics.jsonl` since the `ZreLoggingTrainer` addition to `fno_zre.py` —
+  older z_re runs (before that) have no metrics file and stay invisible.
 - A **LIVE** badge on runs whose `metrics.jsonl` was written within ~2 epochs.
 - A **Live runs** status panel with two progress bars per running job:
   overall training progress (epochs done + current-epoch fraction, out of

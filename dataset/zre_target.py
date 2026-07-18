@@ -100,6 +100,18 @@ def build_target_cache(
 ) -> Path:
     """Compute-and-cache z_re maps for every cone; idempotent per file stem."""
     cache_path = Path(cache_path)
+    # Fast read-only path: a complete cache needs no writable open, so
+    # concurrent jobs don't fight over HDF5's exclusive write lock.
+    if cache_path.exists():
+        try:
+            with h5py.File(cache_path, "r") as cache:
+                group = cache.get(kind)
+                if group is not None and all(
+                    Path(p).stem in group for p in file_paths
+                ):
+                    return cache_path
+        except OSError:
+            pass  # unreadable/locked: fall through to the writable open
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(cache_path, "a") as cache:
         group = cache.require_group(kind)

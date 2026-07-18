@@ -31,6 +31,7 @@ from torch.utils.data import Dataset, Subset
 from dataset.dataset_3d import ParameterNormalization
 from dataset.lightcone_params import PARAM_NAMES, read_sampled_params
 from dataset.loader import LightconeFile
+from dataset.zre_input_cache import validate_cache_attrs
 from dataset.zre_target import TARGET_KINDS, load_zre_map
 
 
@@ -57,6 +58,7 @@ class ZreMapDataset(Dataset):
         use_params: bool = True,
         parameter_normalization: ParameterNormalization | None = None,
         preload: bool = True,
+        density_cache: str | Path | None = None,
     ):
         if target_kind not in TARGET_KINDS:
             raise ValueError(
@@ -74,36 +76,71 @@ class ZreMapDataset(Dataset):
         self.input_z = np.linspace(self.z_min, self.z_max, self.n_z_in,
                                    dtype=np.float64)
 
-        self.params: np.ndarray | None = None
-        if self.use_params:
-            rows = []
-            for path in self.file_paths:
-                with h5py.File(path, "r") as h5_file:
-                    rows.append(read_sampled_params(h5_file))
-            self.params = np.stack(rows).astype(np.float32)
+        # Optional input sidecar (dataset/zre_input_cache.py): density slices
+        # already on the training z-grid + sampled params, one file for all
+        # cones. Cones missing from the cache fall back to the raw lightcone.
+        self.density_cache = Path(density_cache) if density_cache else None
+        if self.density_cache is not None and not self.density_cache.is_file():
+            self.density_cache = None
+        cache = (h5py.File(self.density_cache, "r")
+                 if self.density_cache is not None else None)
+        try:
+            if cache is not None:
+                validate_cache_attrs(cache, self.n_z_in,
+                                     self.z_min, self.z_max)
 
-        self.preload = bool(preload)
-        self._density: dict[int, torch.Tensor] = {}
-        self._target: list[torch.Tensor] = []
-        self._mask: list[torch.Tensor] = []
-        for idx, path in enumerate(self.file_paths):
-            if self.preload:
-                self._density[idx] = self._load_density(idx)
+            self.params: np.ndarray | None = None
+            if self.use_params:
+                rows = []
+                for path in self.file_paths:
+                    stem = path.stem
+                    if cache is not None and stem in cache["params"]:
+                        rows.append(np.asarray(cache["params"][stem],
+                                               dtype=np.float32))
+                        continue
+                    with h5py.File(path, "r") as h5_file:
+                        rows.append(read_sampled_params(h5_file))
+                self.params = np.stack(rows).astype(np.float32)
 
-            zre = load_zre_map(self.target_cache, path, self.target_kind)
-            valid = np.isfinite(zre)
-            norm = (zre - self.z_min) / (self.z_max - self.z_min)
-            norm = np.where(valid, norm, 0.0).astype(np.float32)
-            self._target.append(torch.from_numpy(norm[None]))
-            self._mask.append(
-                torch.from_numpy(valid.astype(np.float32)[None])
-            )
+            self.preload = bool(preload)
+            self._density: dict[int, torch.Tensor] = {}
+            self._target: list[torch.Tensor] = []
+            self._mask: list[torch.Tensor] = []
+            for idx, path in enumerate(self.file_paths):
+                if self.preload:
+                    self._density[idx] = self._load_density(idx, cache)
+
+                zre = load_zre_map(self.target_cache, path, self.target_kind)
+                valid = np.isfinite(zre)
+                norm = (zre - self.z_min) / (self.z_max - self.z_min)
+                norm = np.where(valid, norm, 0.0).astype(np.float32)
+                self._target.append(torch.from_numpy(norm[None]))
+                self._mask.append(
+                    torch.from_numpy(valid.astype(np.float32)[None])
+                )
+        finally:
+            if cache is not None:
+                cache.close()
 
         self.map_shape = tuple(self._target[0].shape[-2:])
         self.n_params = len(PARAM_NAMES) if self.use_params else 0
         self.in_channels = self.n_z_in + self.n_params
 
-    def _load_density(self, idx: int) -> torch.Tensor:
+    def _load_density(self, idx: int,
+                      cache: h5py.File | None = None) -> torch.Tensor:
+        stem = self.file_paths[idx].stem
+        if cache is not None:
+            if stem in cache["density"]:
+                dens = np.asarray(cache["density"][stem],
+                                  dtype=np.float32) / self.density_scale
+                return torch.from_numpy(dens)
+        elif self.density_cache is not None:
+            # on-demand path (preload=False): open the sidecar per read
+            with h5py.File(self.density_cache, "r") as c:
+                if stem in c["density"]:
+                    dens = np.asarray(c["density"][stem],
+                                      dtype=np.float32) / self.density_scale
+                    return torch.from_numpy(dens)
         with LightconeFile(self.file_paths[idx]) as lf:
             dens = lf.read_interpolated("density", self.input_z)
         # (Nx, Ny, n_z_in) -> channels-first (n_z_in, Nx, Ny)

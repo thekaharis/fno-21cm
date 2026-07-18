@@ -315,6 +315,7 @@ def main():
         z_max=Z_MAX,
         use_params=(INPUT_FEATURES == "density_params"),
         preload=False,
+        density_cache=os.environ.get("ZRE_INPUT_CACHE", "zre_inputs.h5"),
     )
     train_ds, val_ds, test_ds = split_by_cone(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,

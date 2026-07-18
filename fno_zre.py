@@ -12,6 +12,9 @@ is reported separately so the clamp never hides model error.
 Environment overrides (defaults in parentheses):
   LIGHTCONE_DIR     lightcone directory (data)
   ZRE_TARGET_CACHE  target sidecar HDF5 (zre_targets.h5), built on demand
+  ZRE_INPUT_CACHE   input sidecar HDF5 (zre_inputs.h5): density slices +
+                    params (build: python -m dataset.zre_input_cache);
+                    absent -> raw lightcone reads at startup
   TARGET_KIND       gompertz | step (gompertz)
   INPUT_FEATURES    density | density_params (density_params)
   N_Z_IN            LOS slices used as input channels (64)
@@ -62,6 +65,9 @@ from modeling import TrainerModel
 DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 TARGET_CACHE = Path(os.environ.get("ZRE_TARGET_CACHE", "zre_targets.h5"))
+# Input sidecar (density slices + params; dataset/zre_input_cache.py).
+# Missing file -> silent fallback to reading the raw lightcones.
+INPUT_CACHE = Path(os.environ.get("ZRE_INPUT_CACHE", "zre_inputs.h5"))
 TARGET_KIND = os.environ.get("TARGET_KIND", "gompertz").lower()
 INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_params").lower()
 
@@ -115,6 +121,11 @@ CHECKPOINT_DIR = Path(
     )
 )
 
+# Resume a timed-out run from the periodic training state in a checkpoint
+# dir (written every ``save_every`` epochs): restores model, optimizer,
+# scheduler, and the epoch counter via the neuralop Trainer.
+RESUME_DIR = os.environ.get("RESUME_DIR") or None
+
 SPLIT_SEED = 42
 RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
 VAL_FRACTION = 0.1
@@ -126,6 +137,53 @@ DEVICE = os.environ.get(
     else "mps" if torch.backends.mps.is_available()
     else "cpu",
 )
+
+
+class ZreLoggingTrainer(Trainer):
+    """``neuralop.Trainer`` + per-epoch metrics appended to metrics.jsonl.
+
+    Same schema as the 3-D pipeline's ``LoggingTrainer`` (one JSON object
+    per epoch: ``epoch``, ``train_err``, ``avg_loss``, ``epoch_train_time``,
+    plus ``val_*``/``test_*`` on eval epochs), which is exactly what the
+    dashboard scans ``checkpoints/*/metrics.jsonl`` for.  Single-process
+    only -- no DDP reductions.
+    """
+
+    def __init__(self, *args, metrics_path=None, append=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.metrics_path = Path(metrics_path) if metrics_path else None
+        if self.metrics_path is not None:
+            self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            # fresh runs start a fresh history; resumed runs append
+            if not append:
+                self.metrics_path.unlink(missing_ok=True)
+        self._last_train: dict | None = None
+
+    def train_one_epoch(self, epoch, train_loader, training_loss):
+        out = super().train_one_epoch(epoch, train_loader, training_loss)
+        train_err, avg_loss, _avg_lasso, t = out
+        self._last_train = dict(
+            epoch=int(epoch),
+            train_err=float(train_err),
+            avg_loss=float(avg_loss),
+            epoch_train_time=float(t),
+        )
+        # eval epochs are flushed (with their metrics) by evaluate_all
+        if self.eval_interval and (epoch % self.eval_interval != 0):
+            self._flush_row({})
+        return out
+
+    def evaluate_all(self, *args, **kwargs):
+        eval_metrics = super().evaluate_all(*args, **kwargs)
+        self._flush_row({k: float(v) for k, v in eval_metrics.items()})
+        return eval_metrics
+
+    def _flush_row(self, eval_metrics: dict) -> None:
+        if self.metrics_path is None or self._last_train is None:
+            return
+        row = {**self._last_train, **eval_metrics}
+        with open(self.metrics_path, "a") as f:
+            f.write(json.dumps(row) + "\n")
 
 
 def build_zre_model(kind: str, in_channels: int):
@@ -313,6 +371,8 @@ def main() -> None:
     # Target maps are cached; first run pays the fitting cost once.
     build_target_cache(files, TARGET_CACHE, kind=TARGET_KIND)
 
+    print(f"Input cache: {INPUT_CACHE} "
+          f"({'found' if INPUT_CACHE.is_file() else 'absent - raw reads'})")
     dataset = ZreMapDataset(
         files,
         target_cache=TARGET_CACHE,
@@ -321,6 +381,7 @@ def main() -> None:
         z_min=Z_MIN,
         z_max=Z_MAX,
         use_params=(INPUT_FEATURES == "density_params"),
+        density_cache=INPUT_CACHE,
     )
     train_ds, val_ds, test_ds = split_by_cone(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
@@ -370,7 +431,30 @@ def main() -> None:
         "masked_mse": MaskedMSE(),
     }
 
-    trainer = Trainer(
+    from util.run_metadata import write_run_metadata
+    write_run_metadata(CHECKPOINT_DIR, {
+        "task": "zre",
+        "model_config": {
+            "kind": MODEL_KIND,
+            "n_modes": list(N_MODES),
+            "hidden_channels": HIDDEN_CHANNELS,
+            "n_layers": N_LAYERS,
+        },
+        "training": {
+            "epochs": N_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
+            "weight_decay": WEIGHT_DECAY,
+            "loss_weights": {"l2": LOSS_L2_WEIGHT, "h1": LOSS_H1_WEIGHT},
+            "target_kind": TARGET_KIND,
+            "input_features": INPUT_FEATURES,
+            "n_z_in": N_Z_IN,
+            "run_seed": RUN_SEED,
+            "resume_dir": RESUME_DIR,
+        },
+    })
+
+    trainer = ZreLoggingTrainer(
         model=model,
         n_epochs=N_EPOCHS,
         device=DEVICE,
@@ -379,6 +463,8 @@ def main() -> None:
         eval_interval=EVAL_INTERVAL,
         use_distributed=False,
         verbose=True,
+        metrics_path=CHECKPOINT_DIR / "metrics.jsonl",
+        append=(RESUME_DIR is not None),
     )
 
     print(f"\nDevice: {DEVICE}")
@@ -397,6 +483,7 @@ def main() -> None:
         eval_losses=eval_losses,
         save_every=max(1, N_EPOCHS // 4),
         save_dir=str(CHECKPOINT_DIR),
+        resume_from_dir=RESUME_DIR,
     )
 
     loaders = {"train": train_loader, "val": val_loader, "test": test_loader}

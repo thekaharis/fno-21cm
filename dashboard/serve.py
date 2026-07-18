@@ -92,6 +92,18 @@ CKPT_DIR_RE = re.compile(r"CHECKPOINT_DIR:\s*(\S+)")
 PHASE_SPAN = {"train": (0.0, 0.95), "val": (0.95, 0.025), "test": (0.975, 0.025)}
 
 
+def read_task(run_dir, name):
+    """Training-target tag for page grouping: metadata 'task', else name."""
+    try:
+        meta = json.loads((run_dir / "run_metadata.json").read_text())
+        task = meta.get("task")
+        if isinstance(task, str) and task:
+            return task
+    except (OSError, json.JSONDecodeError):
+        pass
+    return "zre" if "zre" in name else "3d"
+
+
 def read_total_epochs(run_dir):
     try:
         meta = json.loads((run_dir / "run_metadata.json").read_text())
@@ -238,6 +250,7 @@ def build_payload(root, extras):
             "label": read_label(d),
             "keys": keys,
             "series": series,
+            "task": read_task(d, name),
         })
     return {"generated": time.time(), "root": str(root), "extras": extras, "runs": runs}
 
