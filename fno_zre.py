@@ -18,15 +18,21 @@ Environment overrides (defaults in parentheses):
   TARGET_KIND       gompertz | step (gompertz)
   INPUT_FEATURES    density | density_params (density_params)
   N_Z_IN            LOS slices used as input channels (64)
-  MODEL_KIND        fno | ufno | localfno (fno)
+  MODEL_KIND        fno | ufno | localfno | sirenfno (fno)
   N_MODES_X/Y (32), HIDDEN_CHANNELS (64), N_LAYERS (4)   [fno]
   UFNO_WIDTH (32), UFNO_NORM batchnorm|groupnorm          [ufno]
   LOCALFNO_BASE_WIDTH (16), LOCALFNO_WINDOW_X/Y (16),
   LOCALFNO_MODES_X/Y (6), LOCALFNO_GLOBAL_MODES_X/Y (16),
   LOCALFNO_SPECTRAL_RANK (16)                              [localfno]
+  SIREN_HIDDEN_DIM (64), SIREN_OMEGA (30.0), SIREN_N_HIDDEN (1),
+  SIREN_FEATURE_DIM (16), SIREN_FF_SIGMA (128.0),
+  SIREN_LEARNABLE_FF (1), SIREN_MLP_DROPOUT (0.0),
+  SIREN_SIGMOID_TEMPERATURE (2.0)                          [sirenfno]
   BATCH_SIZE (2), LEARNING_RATE (5e-4 fno, 1e-4 ufno/localfno),
   WEIGHT_DECAY (1e-5), N_EPOCHS (200)
   LOSS_L2_WEIGHT (0.5), LOSS_H1_WEIGHT (0.5)
+  GRAD_CLIP_NORM    max grad norm per step; 0 = off
+                    (1.0 for sirenfno, 0.0 otherwise)
   CHECKPOINT_DIR (checkpoints/checkpoints_zre[_<kind>]), EVAL_INTERVAL (5)
   RUN_SEED (0), DEVICE (auto: cuda > mps > cpu)
 """
@@ -93,6 +99,23 @@ LOCALFNO_MODES = (
     int(os.environ.get("LOCALFNO_MODES_Y", "6")),
 )
 LOCALFNO_SPECTRAL_RANK = int(os.environ.get("LOCALFNO_SPECTRAL_RANK", "16"))
+SIREN_HIDDEN_DIM = int(os.environ.get("SIREN_HIDDEN_DIM", "64"))
+SIREN_OMEGA = float(os.environ.get("SIREN_OMEGA", "30.0"))
+SIREN_N_HIDDEN = int(os.environ.get("SIREN_N_HIDDEN", "1"))
+SIREN_FEATURE_DIM = int(os.environ.get("SIREN_FEATURE_DIM", "16"))
+SIREN_FF_SIGMA = float(os.environ.get("SIREN_FF_SIGMA", "128.0"))
+SIREN_LEARNABLE_FF = os.environ.get("SIREN_LEARNABLE_FF", "1").strip() == "1"
+SIREN_MLP_DROPOUT = float(os.environ.get("SIREN_MLP_DROPOUT", "0.0"))
+SIREN_SIGMOID_TEMPERATURE = float(
+    os.environ.get("SIREN_SIGMOID_TEMPERATURE", "2.0")
+)
+# The z_re target's clamped-to-zero majority makes a sigmoid output a
+# saturation trap for the SIREN variant (logits run to the rails within
+# ~60 batches and gradients die); the task's best model (plain FNO) uses a
+# linear output. Default 0 = linear; set 1 to restore the 3-D-style sigmoid.
+SIREN_OUTPUT_SIGMOID = (
+    os.environ.get("SIREN_OUTPUT_SIGMOID", "0").strip() == "1"
+)
 # The LocalFNO bottleneck runs at 1/4 map resolution (35x35 for 140x140
 # cones), so its global modes are capped by 35//2 = 17 -- keep them separate
 # from the full-resolution N_MODES used by the plain FNO.
@@ -109,11 +132,18 @@ WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-5"))
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "200"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
+# Grad-norm clipping before every optimizer step; 0 disables. Defaults to
+# 1.0 for sirenfno (which NaNs without it, like its 3-D twin) and off for
+# the architectures that have trained stably unclipped.
+GRAD_CLIP_NORM = float(os.environ.get(
+    "GRAD_CLIP_NORM", "1.0" if MODEL_KIND == "sirenfno" else "0.0"
+))
 EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 
 # Separate checkpoint directories per model kind so runs never overwrite
 # each other (same convention as the 3-D pipeline).
-_KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "localfno": "_localfno"}
+_KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "localfno": "_localfno",
+                "sirenfno": "_sirenfno"}
 CHECKPOINT_DIR = Path(
     os.environ.get(
         "CHECKPOINT_DIR",
@@ -222,6 +252,30 @@ def build_zre_model(kind: str, in_channels: int):
                 f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
                 f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
                 f"sigmoid-output")
+        return model, desc
+    if kind == "sirenfno":
+        from models_zre_2d import SirenFNO2d
+
+        model = SirenFNO2d(
+            n_modes=N_MODES,
+            hidden_channels=HIDDEN_CHANNELS,
+            in_channels=in_channels,
+            out_channels=1,
+            n_layers=N_LAYERS,
+            siren_hidden_dim=SIREN_HIDDEN_DIM,
+            siren_omega=SIREN_OMEGA,
+            siren_n_hidden=SIREN_N_HIDDEN,
+            siren_feature_dim=SIREN_FEATURE_DIM,
+            siren_ff_sigma=SIREN_FF_SIGMA,
+            siren_learnable_ff=SIREN_LEARNABLE_FF,
+            mlp_dropout=SIREN_MLP_DROPOUT,
+            output_sigmoid=SIREN_OUTPUT_SIGMOID,
+            sigmoid_temperature=SIREN_SIGMOID_TEMPERATURE,
+        )
+        out_kind = "sigmoid" if SIREN_OUTPUT_SIGMOID else "linear"
+        desc = (f"SirenFNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} "
+                f"layers={N_LAYERS} siren={SIREN_HIDDEN_DIM}x{SIREN_N_HIDDEN} "
+                f"ff={SIREN_FEATURE_DIM}@{SIREN_FF_SIGMA} {out_kind}-output")
         return model, desc
     model = FNO(
         n_modes=N_MODES,
@@ -412,6 +466,18 @@ def main() -> None:
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE,
                                  weight_decay=WEIGHT_DECAY)
+    if GRAD_CLIP_NORM > 0:
+        # Same mechanism as fno_21cm_3d.py: the SIREN hypernetwork diverges
+        # to NaN within the first epoch without clipping (its 3-D twin
+        # defaults to clip=1.0 for the same reason).
+        def _clip_before_step(optim, args, kwargs):
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=GRAD_CLIP_NORM
+            )
+            return None
+
+        optimizer.register_step_pre_hook(_clip_before_step)
+        print(f"Gradient clipping: max_norm={GRAD_CLIP_NORM}")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=N_EPOCHS
     )
@@ -446,6 +512,7 @@ def main() -> None:
             "learning_rate": LEARNING_RATE,
             "weight_decay": WEIGHT_DECAY,
             "loss_weights": {"l2": LOSS_L2_WEIGHT, "h1": LOSS_H1_WEIGHT},
+            "grad_clip_norm": GRAD_CLIP_NORM,
             "target_kind": TARGET_KIND,
             "input_features": INPUT_FEATURES,
             "n_z_in": N_Z_IN,

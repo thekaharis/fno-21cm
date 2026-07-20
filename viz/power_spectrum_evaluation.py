@@ -517,15 +517,37 @@ def plot_cylindrical_maps(results: dict[str, dict], out_ratio: Path,
     ratio_cmap.set_bad("0.85")
     r_cmap = plt.get_cmap("viridis").copy()
     r_cmap.set_bad("0.85")
+
+    # Data-driven color limits: fixed ranges (ratio 0..2, r 0..1) rendered
+    # near-uniform maps when the actual values sat within a few percent of
+    # perfect. Ratio maps are shown as log2(P_pred/P_true) with a symmetric
+    # robust limit; r maps get a robust lower limit. Small floors keep noise
+    # from being amplified into fake structure when models are near-perfect.
+    ratio_vals = np.concatenate([
+        np.log2(res["cyl_ratio_med"][np.isfinite(res["cyl_ratio_med"])
+                                     & (res["cyl_ratio_med"] > 0)])
+        for res in results.values()
+    ])
+    ratio_lim = max(0.1, float(np.percentile(np.abs(ratio_vals), 98)))
+    r_vals = np.concatenate([
+        res["cyl_r_med"][np.isfinite(res["cyl_r_med"])]
+        for res in results.values()
+    ])
+    r_lo = min(0.9, float(np.percentile(r_vals, 2)))
+
     specs = [
-        ("cyl_ratio_med", out_ratio, r"$P_{\rm pred}/P_{\rm true}$",
+        ("cyl_ratio_med", out_ratio,
+         r"$\log_2(P_{\rm pred}/P_{\rm true})$",
          {"cmap": ratio_cmap,
-          "norm": TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=2.0)}),
+          "norm": TwoSlopeNorm(vmin=-ratio_lim, vcenter=0.0,
+                               vmax=ratio_lim)},
+         lambda a: np.log2(np.where(a > 0, a, np.nan))),
         ("cyl_r_med", out_r, r"$r(k_\perp, k_\parallel)$",
-         {"cmap": r_cmap, "vmin": 0.0, "vmax": 1.0}),
+         {"cmap": r_cmap, "vmin": r_lo, "vmax": 1.0},
+         None),
     ]
 
-    for key, out_path, label, style in specs:
+    for key, out_path, label, style, transform in specs:
         fig, axes = plt.subplots(len(names), n_chunks,
                                  figsize=(4.6 * n_chunks, 3.8 * len(names)),
                                  squeeze=False)
@@ -533,7 +555,10 @@ def plot_cylindrical_maps(results: dict[str, dict], out_ratio: Path,
             res = results[name]
             for col in range(n_chunks):
                 ax = axes[row][col]
-                data = np.ma.masked_invalid(res[key][col])
+                raw = res[key][col]
+                if transform is not None:
+                    raw = transform(raw)
+                data = np.ma.masked_invalid(raw)
                 pcm = ax.pcolormesh(k_edges, res["cyl_kpar_edges"][col],
                                     data, **style)
                 ax.set_xscale("log")
@@ -913,6 +938,9 @@ def main(argv=None):
                      help="JSON manifest of saved npz cubes")
     src.add_argument("--checkpoints", nargs="+", metavar="name=path",
                      help="cluster mode: build cubes from checkpoints")
+    src.add_argument("--replot", type=Path, metavar="NPZ",
+                     help="re-render all figures from a saved ps_results.npz "
+                          "(no GPU/data needed; for plot-style iterations)")
     ap.add_argument("--out", type=Path, default=Path("figures/ps_out"))
     ap.add_argument("--n-cones", type=int, default=200)
     ap.add_argument("--split", choices=["train", "val", "test"], default="test")
@@ -928,6 +956,24 @@ def main(argv=None):
 
     if args.selftest:
         raise SystemExit(_selftest())
+
+    if args.replot:
+        data = np.load(args.replot, allow_pickle=True)
+        results: dict[str, dict] = {}
+        for flat_key in data.files:
+            name, _, key = flat_key.partition("/")
+            arr = data[flat_key]
+            if key == "stage_labels":
+                arr = [str(v) for v in arr.tolist()]
+            results.setdefault(name, {})[key] = arr
+        out = args.out
+        out.mkdir(parents=True, exist_ok=True)
+        plot_overlay(results, out / "ps_overlay.png")
+        plot_cylindrical_maps(results, out / "ps_cyl_ratio.png",
+                              out / "ps_cyl_r.png")
+        plot_stage_curves(results, out / "ps_stage_curves.png")
+        print(f"[replot] figures re-rendered into {out}")
+        return
 
     cfg = SpectrumConfig(box_mpc=args.box_mpc, n_bins=args.n_bins,
                          chunk_z_centers=tuple(args.chunk_z),

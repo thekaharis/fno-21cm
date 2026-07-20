@@ -22,6 +22,7 @@ The sigmoid output matches the task: the z_re target is normalized to [0, 1].
 from __future__ import annotations
 
 import itertools
+import math
 from collections.abc import Callable, Sequence
 
 import torch
@@ -567,3 +568,359 @@ class LocalFNO2d(nn.Module):
         x = self.decoder0(x)
         x = self.projection(x)
         return torch.sigmoid(x) if self.output_sigmoid else x
+
+
+# ---------------------------------------------------------------------------
+# SirenFNO2d: siren_fno_3d.SirenFNO3d reduced to the sky plane.  The SIREN
+# machinery (Fourier-feature mapping -> sine MLP -> dense channel-mixing
+# weights per retained mode) is unchanged apart from 2-D mode coordinates;
+# rfft2 keeps signed frequencies on X and the non-negative half on Y, so the
+# layer fills two signed-X blocks instead of the 3-D version's four X/Y
+# quadrants.  Both map axes are periodic, so there is no padding at all.
+# ---------------------------------------------------------------------------
+
+
+class FourierFeatureMapping2d(nn.Module):
+    """Encode signed 2-D Fourier-mode coordinates with random Fourier features."""
+
+    def __init__(
+        self,
+        feature_dim: int = 16,
+        sigma: float = 128.0,
+        learnable: bool = True,
+    ):
+        super().__init__()
+        if feature_dim <= 0 or feature_dim % 2:
+            raise ValueError("feature_dim must be a positive even integer")
+        self.feature_dim = int(feature_dim)
+        projection = torch.randn(2, self.feature_dim // 2) * float(sigma)
+        self.projection = nn.Parameter(projection, requires_grad=bool(learnable))
+
+    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+        phase = torch.matmul(coordinates, self.projection) * math.pi
+        return torch.cat((torch.cos(phase), torch.sin(phase)), dim=-1)
+
+
+class SirenSineLayer(nn.Module):
+    """Bias-free SIREN layer with a learnable per-feature frequency scale."""
+
+    def __init__(self, in_features: int, out_features: int, omega: float):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=False)
+        self.omega = nn.Parameter(torch.full((out_features,), float(omega)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sin(self.linear(x) * self.omega)
+
+
+class SirenWeightNetwork2d(nn.Module):
+    """Map signed 2-D mode coordinates to dense channel-mixing weights."""
+
+    def __init__(
+        self,
+        out_dim: int,
+        hidden_dim: int = 64,
+        omega: float = 30.0,
+        n_hidden: int = 1,
+        feature_dim: int = 16,
+        ff_sigma: float = 128.0,
+        learnable_ff: bool = True,
+    ):
+        super().__init__()
+        if n_hidden < 1:
+            raise ValueError("n_hidden must be at least 1")
+        self.mapping = FourierFeatureMapping2d(
+            feature_dim=feature_dim, sigma=ff_sigma, learnable=learnable_ff,
+        )
+        self.first = SirenSineLayer(feature_dim, hidden_dim, omega)
+        self.hidden = nn.ModuleList(
+            SirenSineLayer(hidden_dim, hidden_dim, omega)
+            for _ in range(n_hidden - 1)
+        )
+        self.last = nn.Linear(hidden_dim, out_dim, bias=False)
+        with torch.no_grad():
+            self.first.linear.weight.uniform_(-1.0 / feature_dim,
+                                              1.0 / feature_dim)
+            bound = math.sqrt(6.0 / hidden_dim) / float(omega)
+            for layer in self.hidden:
+                layer.linear.weight.uniform_(-bound, bound)
+            self.last.weight.uniform_(-bound, bound)
+
+    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+        x = self.first(self.mapping(coordinates))
+        for layer in self.hidden:
+            x = layer(x)
+        return self.last(x)
+
+
+class SpectralConv2dSiren(nn.Module):
+    """Truncated 2-D Fourier convolution with SIREN-generated weights.
+
+    ``rfft2`` stores signed frequencies on X and the non-negative half on Y,
+    so this layer fills a positive-X and a negative-X block over the retained
+    non-negative Y range.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        n_modes: Sequence[int],
+        hidden_dim: int = 64,
+        omega: float = 30.0,
+        n_hidden: int = 1,
+        feature_dim: int = 16,
+        ff_sigma: float = 128.0,
+        learnable_ff: bool = True,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        if len(n_modes) != 2:
+            raise ValueError("n_modes must contain exactly two values")
+        if any(int(mode) <= 0 for mode in n_modes):
+            raise ValueError("all retained mode counts must be positive")
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+        self.n_modes = tuple(int(mode) for mode in n_modes)
+        self.dropout = float(dropout)
+        weight_dim = self.in_channels * self.out_channels
+        kwargs = dict(hidden_dim=hidden_dim, omega=omega, n_hidden=n_hidden,
+                      feature_dim=feature_dim, ff_sigma=ff_sigma,
+                      learnable_ff=learnable_ff)
+        self.real_weight = SirenWeightNetwork2d(weight_dim, **kwargs)
+        self.imag_weight = SirenWeightNetwork2d(weight_dim, **kwargs)
+        self.bias = nn.Parameter(torch.zeros(self.out_channels, 1, 1))
+
+    def _validate_modes(self, spatial_shape: Sequence[int]) -> None:
+        nx, ny = (int(size) for size in spatial_shape)
+        mx, my = self.n_modes
+        limits = (nx // 2, ny // 2 + 1)
+        if mx > limits[0] or my > limits[1]:
+            raise ValueError(
+                f"n_modes={self.n_modes} exceeds FFT limits {limits} "
+                f"for spatial shape {(nx, ny)}"
+            )
+
+    def _block_coordinates(self, *, device, dtype) -> list[torch.Tensor]:
+        mx, my = self.n_modes
+        # Normalize by the retained band, not the input resolution, so the
+        # learned spectral function is resolution-independent.
+        scale_x = max(1, mx)
+        scale_y = max(1, my - 1)
+        positive_x = torch.arange(mx, device=device, dtype=dtype) / scale_x
+        negative_x = torch.arange(-mx, 0, device=device, dtype=dtype) / scale_x
+        positive_y = torch.arange(my, device=device, dtype=dtype) / scale_y
+
+        def grid(kx: torch.Tensor) -> torch.Tensor:
+            values = torch.meshgrid(kx, positive_y, indexing="ij")
+            return torch.stack(values, dim=-1)
+
+        return [grid(positive_x), grid(negative_x)]
+
+    def _make_weight(self, coordinates: torch.Tensor) -> torch.Tensor:
+        mx, my = self.n_modes
+        shape = (mx, my, self.in_channels, self.out_channels)
+        real = self.real_weight(coordinates).reshape(shape)
+        imag = self.imag_weight(coordinates).reshape(shape)
+        real = real.permute(2, 3, 0, 1).contiguous()
+        imag = imag.permute(2, 3, 0, 1).contiguous()
+        return torch.complex(real, imag)
+
+    def spectral_weight_tensors(self) -> list[torch.Tensor]:
+        """Materialize the two retained weight blocks for diagnostics."""
+        parameter = next(self.parameters())
+        return [
+            self._make_weight(grid)
+            for grid in self._block_coordinates(
+                device=parameter.device, dtype=parameter.dtype
+            )
+        ]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected input shape (B,C,H,W), got {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.in_channels:
+            raise ValueError(
+                f"Expected {self.in_channels} input channels, got {x.shape[1]}"
+            )
+        spatial_shape = tuple(int(size) for size in x.shape[-2:])
+        self._validate_modes(spatial_shape)
+        mx, my = self.n_modes
+        # ortho normalization keeps every mode's amplitude O(pixel scale);
+        # unnormalized FFT gives the DC mode ~Nx*Ny amplitude, which acts as
+        # a ~2e4x effective LR on the output mean and destabilizes training
+        # against the mostly-zero z_re target (saturation collapse -> NaN).
+        x_ft = torch.fft.rfft2(x, dim=(-2, -1), norm="ortho")
+        # Decouple the DC mode from the SIREN-generated weights: its ~Nx*Ny
+        # amplitude otherwise dominates the shared weight-network's gradient
+        # (every mode's backward sums into one trunk, unlike a plain FNO's
+        # independent per-mode parameters), dragging the whole spectral map
+        # toward mean-shifting directions until the sigmoid saturates. The
+        # mean signal still reaches the output via the residual stream,
+        # channel MLPs, and this layer's bias.
+        x_ft[:, :, 0, 0] = 0
+        out_ft = torch.zeros(
+            x.shape[0],
+            self.out_channels,
+            spatial_shape[0],
+            spatial_shape[1] // 2 + 1,
+            dtype=x_ft.dtype,
+            device=x.device,
+        )
+        blocks = (slice(0, mx), slice(-mx, None))
+        for coordinate_grid, x_slice in zip(
+            self._block_coordinates(device=x.device, dtype=x.dtype),
+            blocks,
+            strict=True,
+        ):
+            weight = self._make_weight(coordinate_grid).to(dtype=x_ft.dtype)
+            out_ft[:, :, x_slice, :my] = torch.einsum(
+                "bixy,ioxy->boxy", x_ft[:, :, x_slice, :my], weight
+            )
+        out = torch.fft.irfft2(out_ft, s=spatial_shape, dim=(-2, -1),
+                               norm="ortho")
+        if self.dropout and self.training:
+            out = F.dropout(out, p=self.dropout)
+        return out + self.bias
+
+
+class PointwiseMLP2d(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_channels: int,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.first = nn.Conv2d(in_channels, hidden_channels, kernel_size=1)
+        self.last = nn.Conv2d(hidden_channels, out_channels, kernel_size=1)
+        self.dropout = float(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.gelu(self.first(x))
+        if self.dropout and self.training:
+            x = F.dropout(x, p=self.dropout)
+        return self.last(x)
+
+
+class SirenFNO2d(nn.Module):
+    """Residual 2-D FNO with SIREN-generated truncated spectral weights.
+
+    ``siren_fno_3d.SirenFNO3d`` on the sky plane: both axes are periodic
+    transverse simulation axes, so the 3-D version's LOS padding is dropped
+    entirely.
+    """
+
+    def __init__(
+        self,
+        n_modes: Sequence[int],
+        hidden_channels: int,
+        in_channels: int,
+        out_channels: int = 1,
+        n_layers: int = 4,
+        add_grid: bool = True,
+        siren_hidden_dim: int = 64,
+        siren_omega: float = 30.0,
+        siren_n_hidden: int = 1,
+        siren_feature_dim: int = 16,
+        siren_ff_sigma: float = 128.0,
+        siren_learnable_ff: bool = True,
+        mlp_dropout: float = 0.0,
+        output_sigmoid: bool = True,
+        sigmoid_temperature: float = 2.0,
+    ):
+        super().__init__()
+        if n_layers <= 0:
+            raise ValueError("n_layers must be positive")
+        if sigmoid_temperature <= 0:
+            raise ValueError("sigmoid_temperature must be positive")
+        self.n_modes = tuple(int(value) for value in n_modes)
+        self.hidden_channels = int(hidden_channels)
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+        self.n_layers = int(n_layers)
+        self.add_grid = bool(add_grid)
+        self.output_sigmoid = bool(output_sigmoid)
+        self.sigmoid_temperature = float(sigmoid_temperature)
+
+        lift_channels = self.in_channels + (2 if self.add_grid else 0)
+        self.lifting = nn.Conv2d(lift_channels, self.hidden_channels,
+                                 kernel_size=1)
+        self.spectral_layers = nn.ModuleList(
+            SpectralConv2dSiren(
+                self.hidden_channels,
+                self.hidden_channels,
+                self.n_modes,
+                hidden_dim=siren_hidden_dim,
+                omega=siren_omega,
+                n_hidden=siren_n_hidden,
+                feature_dim=siren_feature_dim,
+                ff_sigma=siren_ff_sigma,
+                learnable_ff=siren_learnable_ff,
+                dropout=mlp_dropout,
+            )
+            for _ in range(self.n_layers)
+        )
+        self.channel_mlps = nn.ModuleList(
+            PointwiseMLP2d(
+                self.hidden_channels,
+                self.hidden_channels,
+                4 * self.hidden_channels,
+                dropout=mlp_dropout,
+            )
+            for _ in range(self.n_layers)
+        )
+        self.projection = PointwiseMLP2d(
+            self.hidden_channels,
+            self.out_channels,
+            4 * self.hidden_channels,
+        )
+
+    @staticmethod
+    def _make_grid(batch: int, nx: int, ny: int, *, device, dtype):
+        axes = [
+            torch.linspace(0.0, 1.0, size, device=device, dtype=dtype)
+            for size in (nx, ny)
+        ]
+        grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=0)
+        return grid.unsqueeze(0).expand(batch, -1, -1, -1)
+
+    def forward(self, x: torch.Tensor | None = None, **kwargs) -> torch.Tensor:
+        if x is None:
+            x = kwargs.get("x")
+        if x is None:
+            raise TypeError("SirenFNO2d.forward expected argument 'x'")
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected input shape (B,C,H,W), got {tuple(x.shape)}"
+            )
+        batch, channels, nx, ny = x.shape
+        if self.add_grid:
+            if channels == self.in_channels:
+                grid = self._make_grid(batch, nx, ny,
+                                       device=x.device, dtype=x.dtype)
+                x = torch.cat((x, grid), dim=1)
+            elif channels != self.in_channels + 2:
+                raise ValueError(
+                    f"Expected {self.in_channels} or {self.in_channels + 2} "
+                    f"channels, got {channels}"
+                )
+        elif channels != self.in_channels:
+            raise ValueError(
+                f"Expected {self.in_channels} input channels, got {channels}"
+            )
+
+        x = self.lifting(x)
+        for index, (spectral, channel_mlp) in enumerate(
+            zip(self.spectral_layers, self.channel_mlps, strict=True)
+        ):
+            x = x + channel_mlp(spectral(x))
+            if index + 1 < self.n_layers:
+                x = F.gelu(x)
+        x = self.projection(x)
+        if self.output_sigmoid:
+            x = torch.sigmoid(x / self.sigmoid_temperature)
+        return x
