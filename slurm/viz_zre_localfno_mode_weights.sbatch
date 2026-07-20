@@ -11,10 +11,11 @@
 # Override CHECKPOINT_DIR to inspect another z_re LocalFNO run.
 
 #SBATCH --job-name=viz-zre-localfno-mode-weights
-#SBATCH --partition=cpu
+#SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
+#SBATCH --gres=gpu:a30:1
 #SBATCH --mem=8G
 #SBATCH --time=00:15:00
 #SBATCH --output=logs/viz-zre-localfno-mode-weights-%j.out
