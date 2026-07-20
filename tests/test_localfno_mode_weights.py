@@ -127,23 +127,12 @@ def test_end_to_end_from_checkpoint(tmp_path, task, monkeypatch):
     checkpoint = tmp_path / "best_model_state_dict.pt"
     torch.save(model.state_dict(), checkpoint)
 
+    # Geometry is inferred from the checkpoint; only the window (a label)
+    # comes from the environment.
+    monkeypatch.setenv("LOCALFNO_WINDOW_X", "8")
+    monkeypatch.setenv("LOCALFNO_WINDOW_Y", "8")
     if task == "3d":
-        settings = (
-            ("LOCALFNO_WINDOW_X", "8"), ("LOCALFNO_WINDOW_Y", "8"),
-            ("LOCALFNO_WINDOW_Z", "8"), ("LOCALFNO_MODES_X", "2"),
-            ("LOCALFNO_MODES_Y", "2"), ("LOCALFNO_MODES_Z", "3"),
-            ("N_MODES_X", "2"), ("N_MODES_Y", "2"), ("N_MODES_Z", "2"),
-            ("LOCALFNO_BASE_WIDTH", "8"), ("LOCALFNO_SPECTRAL_RANK", "4"),
-        )
-    else:
-        settings = (
-            ("LOCALFNO_WINDOW_X", "8"), ("LOCALFNO_WINDOW_Y", "8"),
-            ("LOCALFNO_MODES_X", "2"), ("LOCALFNO_MODES_Y", "3"),
-            ("LOCALFNO_GLOBAL_MODES_X", "2"), ("LOCALFNO_GLOBAL_MODES_Y", "2"),
-            ("LOCALFNO_BASE_WIDTH", "8"), ("LOCALFNO_SPECTRAL_RANK", "4"),
-        )
-    for name, value in settings:
-        monkeypatch.setenv(name, value)
+        monkeypatch.setenv("LOCALFNO_WINDOW_Z", "8")
 
     output_dir = main(
         [

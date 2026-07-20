@@ -26,8 +26,11 @@ Usage (from the project root, same env contract as training):
     python -m viz.localfno_mode_weights --task zre
 
 CHECKPOINT_DIR / CHECKPOINT / CHECKPOINT_KIND select the weights file as in
-the other viz entry points; LOCALFNO_* environment switches must match the
-training run so the constructed architecture fits the state dict.
+the other viz entry points.  The architecture geometry (mode counts, rank,
+widths, channels) is inferred from the checkpoint's weight shapes, so no
+LOCALFNO_* switches are required; only the Hann window extent -- which is
+cosmetic here (panel labels) -- is read from run_metadata.json when the run
+recorded it, else from LOCALFNO_WINDOW_*.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ import argparse
 import csv
 import os
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -376,55 +379,83 @@ def write_csv(branches: list[BranchWeights], output: Path) -> None:
                     )
 
 
-def _infer_in_channels(checkpoint: Path) -> int:
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+def _shape_of(state: dict, suffix: str) -> tuple[int, ...]:
     for key, value in state.items():
-        if key.endswith("lifting.weight"):
-            return int(value.shape[1])
+        if key.endswith(suffix):
+            return tuple(int(size) for size in value.shape)
     raise KeyError(
-        f"No '*lifting.weight' key in {checkpoint}; cannot infer the "
-        "input-channel count"
+        f"No '*{suffix}' key in the checkpoint; is this a LocalFNO "
+        "state dict?"
     )
 
 
-def _build_model(task: str, in_channels: int) -> nn.Module:
+def _window_from_env(task: str) -> tuple[int, ...]:
+    window = (
+        int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
+        int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
+    )
+    if task == "3d":
+        window += (int(os.environ.get("LOCALFNO_WINDOW_Z", "32")),)
+    return window
+
+
+def _build_model(task: str, checkpoint: Path) -> nn.Module:
+    """Reconstruct the LocalFNO whose geometry the checkpoint encodes.
+
+    Mode counts, spectral rank, base width, and channel counts are read
+    from the weight shapes, so the LOCALFNO_* switches do not need to
+    match the training run. The Hann window extent is the one setting that
+    leaves no trace in the parameters; it only affects panel labels here
+    and comes from run_metadata.json when recorded (3-D runs), otherwise
+    from LOCALFNO_WINDOW_*.
+    """
     from modeling import TrainerModel
 
-    if task == "3d":
-        from modeling import ModelConfig, build_3d_model
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    lifting = _shape_of(state, "lifting.weight")
+    local = _shape_of(state, "encoder0.spectral.weights1")
+    global_ = _shape_of(state, "bottleneck.0.spectral.weights1")
+    expected = 5 if task == "3d" else 4
+    if len(local) != expected:
+        raise ValueError(
+            f"--task {task} expects {expected}-dimensional quadrant "
+            f"weights, but the checkpoint holds shape {local}; wrong "
+            "--task for this checkpoint?"
+        )
+    base_width, in_channels = lifting[0], lifting[1]
+    out_channels = _shape_of(state, "projection.2.weight")[0]
+    rank, local_modes, global_modes = local[0], local[2:], global_[2:]
 
-        config = replace(ModelConfig.from_env(), kind="localfno")
-        print(f"Model: {config.describe()}")
-        return TrainerModel(build_3d_model(config, in_channels))
+    metadata = load_run_metadata(checkpoint.parent) or {}
+    model_config = metadata.get("model_config") or {}
+    window = tuple(
+        int(size) for size in model_config.get("localfno_window") or ()
+    ) or _window_from_env(task)
 
-    # Same environment contract as fno_zre.build_zre_model("localfno", ...),
-    # but without importing the training module (whose dataset dependencies a
-    # weights-only diagnostic does not need).
-    from models_zre_2d import LocalFNO2d
-
-    model = LocalFNO2d(
-        in_channels=in_channels,
-        out_channels=1,
-        base_width=int(os.environ.get("LOCALFNO_BASE_WIDTH", "16")),
-        local_window=(
-            int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
-            int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
-        ),
-        local_modes=(
-            int(os.environ.get("LOCALFNO_MODES_X", "6")),
-            int(os.environ.get("LOCALFNO_MODES_Y", "6")),
-        ),
-        global_modes=(
-            int(os.environ.get("LOCALFNO_GLOBAL_MODES_X", "16")),
-            int(os.environ.get("LOCALFNO_GLOBAL_MODES_Y", "16")),
-        ),
-        spectral_rank=int(os.environ.get("LOCALFNO_SPECTRAL_RANK", "16")),
-        output_sigmoid=True,
-    )
+    try:
+        if task == "3d":
+            from local_fno_3d import LocalFNO3d as LocalFNO
+        else:
+            from models_zre_2d import LocalFNO2d as LocalFNO
+        model = LocalFNO(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            base_width=base_width,
+            local_window=window,
+            local_modes=local_modes,
+            global_modes=global_modes,
+            spectral_rank=rank,
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"{error} -- the retained modes come from the checkpoint, so "
+            "this window cannot be the training run's; export the "
+            "LOCALFNO_WINDOW_* values that run used"
+        ) from error
     print(
-        f"Model: LocalFNO2d window={model.local_window} "
-        f"local-modes={model.local_modes} global-modes={model.global_modes} "
-        f"rank={model.spectral_rank}"
+        f"Model ({task}): window={window} local-modes={tuple(local_modes)} "
+        f"global-modes={tuple(global_modes)} base-width={base_width} "
+        f"rank={rank} in/out-channels={in_channels}/{out_channels}"
     )
     return TrainerModel(model)
 
@@ -457,16 +488,9 @@ def main(argv: list[str] | None = None) -> Path:
     checkpoint = args.checkpoint or resolve_checkpoint(checkpoint_dir)
     if not checkpoint.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-    metadata = load_run_metadata(checkpoint_dir)
-    if metadata:
-        described = metadata.get("model_description") or metadata.get("model")
-        if described:
-            print(f"Run metadata: {described}")
-
     from modeling import load_checkpoint
 
-    in_channels = _infer_in_channels(checkpoint)
-    model = _build_model(args.task, in_channels)
+    model = _build_model(args.task, checkpoint)
     report = load_checkpoint(model, checkpoint)
     print(
         f"Loaded {checkpoint} ({report.transform}): "
