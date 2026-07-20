@@ -4,9 +4,10 @@
 Counterpart of ``viz/visualize_spectral_weights.py`` (the SIREN/FNO/U-FNO
 history diagnostic) that works directly from a checkpoint instead of the
 training-time ``spectral_weight_history.npz``: it loads a trained LocalFNO
-(3-D lightcone or 2-D z_re variant), walks all six spectral branches
-(``encoder0``, ``encoder1``, ``bottleneck.0``, ``bottleneck.1``,
-``decoder1``, ``decoder0``) and maps their retained quadrant weights to
+or LocalSirenFNO (3-D lightcone or 2-D z_re variant), walks all six
+spectral branches (``encoder0``, ``encoder1``, ``bottleneck.0``,
+``bottleneck.1``, ``decoder1``, ``decoder0``) and maps their retained
+quadrant weights to
 
   * RMS-per-absolute-mode profiles along each axis and radial shells,
     in the same style as the history-based plots,
@@ -30,7 +31,10 @@ the other viz entry points.  The architecture geometry (mode counts, rank,
 widths, channels) is inferred from the checkpoint's weight shapes, so no
 LOCALFNO_* switches are required; only the Hann window extent -- which is
 cosmetic here (panel labels) -- is read from run_metadata.json when the run
-recorded it, else from LOCALFNO_WINDOW_*.
+recorded it, else from LOCALFNO_WINDOW_*.  LocalSirenFNO checkpoints encode
+no mode counts in their shapes (the weights are SIREN-generated), so their
+retained bands come from run_metadata.json when recorded, else from
+LOCALFNO_MODES_* / LOCALFNO_GLOBAL_MODES_* (z_re) or N_MODES_* (3-D).
 """
 
 from __future__ import annotations
@@ -94,6 +98,11 @@ class BranchWeights:
 
 
 def _quadrant_tensors(conv: nn.Module) -> list[torch.Tensor] | None:
+    # LocalSirenFNO branches generate their quadrant weights from SIREN
+    # networks; materialize them (extract_branches runs under no_grad).
+    materialize = getattr(conv, "spectral_weight_tensors", None)
+    if callable(materialize):
+        return materialize()
     if all(hasattr(conv, name) for name in ("weights1", "weights2",
                                             "weights3", "weights4")):
         return [conv.weights1, conv.weights2, conv.weights3, conv.weights4]
@@ -399,38 +408,112 @@ def _window_from_env(task: str) -> tuple[int, ...]:
     return window
 
 
+def _siren_modes(
+    task: str,
+    model_config: dict,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Retained local/global bands of a LocalSirenFNO checkpoint.
+
+    SIREN-generated weights leave no mode-count trace in the checkpoint
+    shapes, so the bands come from run_metadata.json (3-D runs record the
+    full ModelConfig) or from the same LOCALFNO_*/N_MODES_* switches the
+    training scripts read.
+    """
+    local = tuple(
+        int(mode) for mode in model_config.get("localfno_modes") or ()
+    )
+    global_ = tuple(
+        int(mode) for mode in model_config.get("modes") or ()
+    )
+    if task == "3d":
+        local = local or (
+            int(os.environ.get("LOCALFNO_MODES_X", "6")),
+            int(os.environ.get("LOCALFNO_MODES_Y", "6")),
+            int(os.environ.get("LOCALFNO_MODES_Z", "12")),
+        )
+        global_ = global_ or (
+            int(os.environ.get("N_MODES_X", "16")),
+            int(os.environ.get("N_MODES_Y", "16")),
+            int(os.environ.get("N_MODES_Z", "16")),
+        )
+    else:
+        local = local or (
+            int(os.environ.get("LOCALFNO_MODES_X", "6")),
+            int(os.environ.get("LOCALFNO_MODES_Y", "6")),
+        )
+        global_ = global_ or (
+            int(os.environ.get("LOCALFNO_GLOBAL_MODES_X", "16")),
+            int(os.environ.get("LOCALFNO_GLOBAL_MODES_Y", "16")),
+        )
+    return local, global_
+
+
+def _siren_kwargs_from_shapes(state: dict) -> dict:
+    """Structural SIREN settings encoded in the checkpoint weight shapes.
+
+    Omega and the Fourier-feature sigma are learnable tensors, so their
+    trained values load from the checkpoint; only the hidden/feature widths
+    and the trunk depth must match the run's architecture.
+    """
+    first = _shape_of(
+        state, "encoder0.spectral.real_weight.first.linear.weight"
+    )
+    hidden_layers = {
+        key.rsplit("hidden.", 1)[-1].split(".", 1)[0]
+        for key in state
+        if "encoder0.spectral.real_weight.hidden." in key
+    }
+    return {
+        "siren_hidden_dim": first[0],
+        "siren_feature_dim": first[1],
+        "siren_n_hidden": 1 + len(hidden_layers),
+    }
+
+
 def _build_model(task: str, checkpoint: Path) -> nn.Module:
     """Reconstruct the LocalFNO whose geometry the checkpoint encodes.
 
     Mode counts, spectral rank, base width, and channel counts are read
     from the weight shapes, so the LOCALFNO_* switches do not need to
-    match the training run. The Hann window extent is the one setting that
-    leaves no trace in the parameters; it only affects panel labels here
-    and comes from run_metadata.json when recorded (3-D runs), otherwise
-    from LOCALFNO_WINDOW_*.
+    match the training run. LocalSirenFNO checkpoints are the exception:
+    their SIREN-generated weights encode no mode count, so the retained
+    bands come from run_metadata.json when recorded (3-D runs), otherwise
+    from the LOCALFNO_MODES_*/N_MODES_* switches. The Hann window extent
+    also leaves no trace in the parameters; it only affects panel labels
+    here and comes from run_metadata.json or LOCALFNO_WINDOW_*.
     """
     from modeling import TrainerModel
 
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     lifting = _shape_of(state, "lifting.weight")
-    local = _shape_of(state, "encoder0.spectral.weights1")
-    global_ = _shape_of(state, "bottleneck.0.spectral.weights1")
-    expected = 5 if task == "3d" else 4
-    if len(local) != expected:
-        raise ValueError(
-            f"--task {task} expects {expected}-dimensional quadrant "
-            f"weights, but the checkpoint holds shape {local}; wrong "
-            "--task for this checkpoint?"
-        )
     base_width, in_channels = lifting[0], lifting[1]
     out_channels = _shape_of(state, "projection.2.weight")[0]
-    rank, local_modes, global_modes = local[0], local[2:], global_[2:]
 
     metadata = load_run_metadata(checkpoint.parent) or {}
     model_config = metadata.get("model_config") or {}
     window = tuple(
         int(size) for size in model_config.get("localfno_window") or ()
     ) or _window_from_env(task)
+
+    siren = not any(
+        key.endswith("encoder0.spectral.weights1") for key in state
+    )
+    if siren:
+        rank = _shape_of(state, "encoder0.in_projection.weight")[0]
+        local_modes, global_modes = _siren_modes(task, model_config)
+        siren_kwargs = _siren_kwargs_from_shapes(state)
+    else:
+        local = _shape_of(state, "encoder0.spectral.weights1")
+        global_ = _shape_of(state, "bottleneck.0.spectral.weights1")
+        expected = 5 if task == "3d" else 4
+        if len(local) != expected:
+            raise ValueError(
+                f"--task {task} expects {expected}-dimensional quadrant "
+                f"weights, but the checkpoint holds shape {local}; wrong "
+                "--task for this checkpoint?"
+            )
+        rank, local_modes, global_modes = local[0], local[2:], global_[2:]
+        siren_kwargs = {}
 
     try:
         if task == "3d":
@@ -445,15 +528,22 @@ def _build_model(task: str, checkpoint: Path) -> nn.Module:
             local_modes=local_modes,
             global_modes=global_modes,
             spectral_rank=rank,
+            siren=siren,
+            **siren_kwargs,
         )
     except ValueError as error:
+        source = (
+            "run metadata or the environment" if siren else "the checkpoint"
+        )
         raise ValueError(
-            f"{error} -- the retained modes come from the checkpoint, so "
-            "this window cannot be the training run's; export the "
-            "LOCALFNO_WINDOW_* values that run used"
+            f"{error} -- the retained modes come from {source}, so this "
+            "window cannot be the training run's; export the LOCALFNO_* "
+            "values that run used"
         ) from error
+    variant = "LocalSirenFNO" if siren else "LocalFNO"
     print(
-        f"Model ({task}): window={window} local-modes={tuple(local_modes)} "
+        f"Model ({task}, {variant}): window={window} "
+        f"local-modes={tuple(local_modes)} "
         f"global-modes={tuple(global_modes)} base-width={base_width} "
         f"rank={rank} in/out-channels={in_channels}/{out_channels}"
     )

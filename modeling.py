@@ -57,10 +57,12 @@ class ModelConfig:
     localfno_patch_chunk_size: int = 128
 
     def __post_init__(self) -> None:
-        if self.kind not in {"fno", "ufno", "sirenfno", "localfno"}:
+        if self.kind not in {
+            "fno", "ufno", "sirenfno", "localfno", "localsirenfno"
+        }:
             raise ValueError(
-                "kind must be 'fno', 'ufno', 'sirenfno', or 'localfno', "
-                f"got {self.kind!r}"
+                "kind must be 'fno', 'ufno', 'sirenfno', 'localfno', or "
+                f"'localsirenfno', got {self.kind!r}"
             )
         if len(self.modes) != 3 or any(int(value) <= 0 for value in self.modes):
             raise ValueError("modes must contain three positive values")
@@ -217,6 +219,7 @@ class ModelConfig:
             "ufno": "_ufno",
             "sirenfno": "_sirenfno",
             "localfno": "_localfno",
+            "localsirenfno": "_localsirenfno",
         }[self.kind]
         return Path("checkpoints") / f"checkpoints_3d{suffix}"
 
@@ -234,16 +237,26 @@ class ModelConfig:
                 f"sigmoid={self.siren_output_sigmoid} "
                 f"temperature={self.siren_sigmoid_temperature:g}"
             )
-        if self.kind == "localfno":
+        if self.kind in {"localfno", "localsirenfno"}:
+            name = "LocalFNO" if self.kind == "localfno" else "LocalSirenFNO"
+            siren = (
+                ""
+                if self.kind == "localfno"
+                else (
+                    f" siren={self.siren_hidden_dim}x{self.siren_n_hidden} "
+                    f"ff={self.siren_feature_dim}@{self.siren_ff_sigma:g}"
+                )
+            )
             return (
-                f"LocalFNO window={self.localfno_window} "
+                f"{name} window={self.localfno_window} "
                 f"local-modes={self.localfno_modes} "
                 f"global-modes={self.modes} widths="
                 f"{self.localfno_base_width}/"
                 f"{2 * self.localfno_base_width}/"
                 f"{4 * self.localfno_base_width} "
                 f"rank={self.localfno_spectral_rank} "
-                f"chunk={self.localfno_patch_chunk_size} sigmoid-output"
+                f"chunk={self.localfno_patch_chunk_size}{siren} "
+                "sigmoid-output"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
         return (
@@ -333,7 +346,7 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             output_sigmoid=config.siren_output_sigmoid,
             sigmoid_temperature=config.siren_sigmoid_temperature,
         )
-    if config.kind == "localfno":
+    if config.kind in {"localfno", "localsirenfno"}:
         from local_fno_3d import LocalFNO3d
 
         return LocalFNO3d(
@@ -346,6 +359,13 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             spectral_rank=config.localfno_spectral_rank,
             patch_chunk_size=config.localfno_patch_chunk_size,
             output_sigmoid=True,
+            siren=(config.kind == "localsirenfno"),
+            siren_hidden_dim=config.siren_hidden_dim,
+            siren_omega=config.siren_omega,
+            siren_n_hidden=config.siren_n_hidden,
+            siren_feature_dim=config.siren_feature_dim,
+            siren_ff_sigma=config.siren_ff_sigma,
+            siren_learnable_ff=config.siren_learnable_ff,
         )
     return FNO(
         n_modes=config.modes,

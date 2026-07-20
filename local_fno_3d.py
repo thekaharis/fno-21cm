@@ -241,6 +241,146 @@ class QuadrantSpectralConv3d(nn.Module):
         )
 
 
+class QuadrantSpectralConv3dSiren(nn.Module):
+    """Quadrant spectral convolution with SIREN-generated weights.
+
+    Fills the same four signed X/Y quadrants as ``QuadrantSpectralConv3d``,
+    but the per-mode channel-mixing weights are produced by two shared
+    ``SirenWeightNetwork`` trunks (real/imaginary) evaluated at signed mode
+    coordinates normalized by the retained band, exactly following
+    ``siren_fno_3d.SpectralConv3dSiren``. The truncation therefore becomes a
+    smooth learned function of the mode coordinate instead of independent
+    per-mode parameters. Bias-free: the enclosing residual block's spatial
+    convolution carries the bias.
+
+    ``forward`` accepts pre-materialized ``weights`` so that windowed
+    overlap-add processing (which calls the transform once per patch chunk)
+    evaluates the SIRENs a single time per block forward.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        modes: Sequence[int],
+        *,
+        hidden_dim: int = 64,
+        omega: float = 30.0,
+        n_hidden: int = 1,
+        feature_dim: int = 16,
+        ff_sigma: float = 128.0,
+        learnable_ff: bool = True,
+    ):
+        super().__init__()
+        from siren_fno_3d import SirenWeightNetwork
+
+        self.channels = int(channels)
+        self.n_modes = _triple(modes, "modes")
+        weight_dim = self.channels * self.channels
+        kwargs = dict(
+            hidden_dim=hidden_dim,
+            omega=omega,
+            n_hidden=n_hidden,
+            feature_dim=feature_dim,
+            ff_sigma=ff_sigma,
+            learnable_ff=learnable_ff,
+        )
+        self.real_weight = SirenWeightNetwork(weight_dim, **kwargs)
+        self.imag_weight = SirenWeightNetwork(weight_dim, **kwargs)
+
+    def _quadrant_coordinates(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> list[torch.Tensor]:
+        mx, my, mz = self.n_modes
+        # Normalize by the retained band so the same learned spectral
+        # function is evaluated at the same coordinates in every branch
+        # regardless of its mode count (cf. SpectralConv3dSiren).
+        scale_x = max(1, mx)
+        scale_y = max(1, my)
+        scale_z = max(1, mz - 1)
+        positive_x = torch.arange(mx, device=device, dtype=dtype) / scale_x
+        negative_x = torch.arange(-mx, 0, device=device, dtype=dtype) / scale_x
+        positive_y = torch.arange(my, device=device, dtype=dtype) / scale_y
+        negative_y = torch.arange(-my, 0, device=device, dtype=dtype) / scale_y
+        positive_z = torch.arange(mz, device=device, dtype=dtype) / scale_z
+
+        def grid(kx: torch.Tensor, ky: torch.Tensor) -> torch.Tensor:
+            values = torch.meshgrid(kx, ky, positive_z, indexing="ij")
+            return torch.stack(values, dim=-1)
+
+        return [
+            grid(positive_x, positive_y),
+            grid(negative_x, positive_y),
+            grid(positive_x, negative_y),
+            grid(negative_x, negative_y),
+        ]
+
+    def _make_weight(self, coordinates: torch.Tensor) -> torch.Tensor:
+        mx, my, mz = self.n_modes
+        shape = (mx, my, mz, self.channels, self.channels)
+        real = self.real_weight(coordinates).reshape(shape)
+        imag = self.imag_weight(coordinates).reshape(shape)
+        real = real.permute(3, 4, 0, 1, 2).contiguous()
+        imag = imag.permute(3, 4, 0, 1, 2).contiguous()
+        return torch.complex(real, imag)
+
+    def materialize_weights(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> list[torch.Tensor]:
+        """Evaluate the SIRENs once, yielding the four quadrant blocks."""
+        return [
+            self._make_weight(grid)
+            for grid in self._quadrant_coordinates(device=device, dtype=dtype)
+        ]
+
+    def spectral_weight_tensors(self) -> list[torch.Tensor]:
+        """Materialize the retained weight blocks for diagnostics."""
+        parameter = next(self.parameters())
+        return self.materialize_weights(
+            device=parameter.device, dtype=parameter.dtype
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        weights: list[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        nx, ny, nz = (int(value) for value in x.shape[-3:])
+        mx, my, mz = self.n_modes
+        limits = (nx // 2, ny // 2, nz // 2 + 1)
+        if any(mode > limit for mode, limit in zip(self.n_modes, limits)):
+            raise ValueError(
+                f"modes={self.n_modes} exceeds FFT limits {limits} "
+                f"for spatial shape {(nx, ny, nz)}"
+            )
+        if weights is None:
+            weights = self.materialize_weights(device=x.device, dtype=x.dtype)
+        x_ft = torch.fft.rfftn(x, dim=(-3, -2, -1))
+        out_ft = torch.zeros_like(x_ft)
+        blocks = (
+            (slice(0, mx), slice(0, my)),
+            (slice(-mx, None), slice(0, my)),
+            (slice(0, mx), slice(-my, None)),
+            (slice(-mx, None), slice(-my, None)),
+        )
+        for (x_slice, y_slice), weight in zip(blocks, weights, strict=True):
+            out_ft[:, :, x_slice, y_slice, :mz] = torch.einsum(
+                "bixyz,ioxyz->boxyz",
+                x_ft[:, :, x_slice, y_slice, :mz],
+                weight.to(dtype=x_ft.dtype),
+            )
+        return torch.fft.irfftn(
+            out_ft,
+            s=(nx, ny, nz),
+            dim=(-3, -2, -1),
+        )
+
+
 class SpectralResidualBlock3d(nn.Module):
     """Rank-projected spectral residual block, local or whole-volume."""
 
@@ -253,13 +393,18 @@ class SpectralResidualBlock3d(nn.Module):
         window_size: Sequence[int] | None = None,
         offset: Sequence[int] = (0, 0, 0),
         patch_chunk_size: int = 128,
+        siren: dict | None = None,
     ):
         super().__init__()
         rank = min(int(spectral_rank), int(channels))
         if rank <= 0:
             raise ValueError("spectral_rank must be positive")
         self.in_projection = nn.Conv3d(channels, rank, kernel_size=1, bias=False)
-        self.spectral = QuadrantSpectralConv3d(rank, modes)
+        self.spectral = (
+            QuadrantSpectralConv3dSiren(rank, modes, **siren)
+            if siren is not None
+            else QuadrantSpectralConv3d(rank, modes)
+        )
         self.out_projection = nn.Conv3d(rank, channels, kernel_size=1, bias=False)
         self.spatial = nn.Conv3d(channels, channels, kernel_size=1)
         self.norm = _group_norm(channels)
@@ -280,16 +425,36 @@ class SpectralResidualBlock3d(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         projected = self.in_projection(x)
-        if self.window_grid is None:
-            spectral = self.spectral(projected)
+        materialize = getattr(self.spectral, "materialize_weights", None)
+        if materialize is None:
+            transform = self.spectral
         else:
-            spectral = self.window_grid.apply(projected, self.spectral)
+            # SIREN-generated weights depend only on the retained modes, so
+            # evaluate the weight networks once per forward instead of once
+            # per overlap-add patch chunk.
+            weights = materialize(device=projected.device,
+                                  dtype=projected.dtype)
+            spectral_conv = self.spectral
+
+            def transform(patches: torch.Tensor) -> torch.Tensor:
+                return spectral_conv(patches, weights=weights)
+
+        if self.window_grid is None:
+            spectral = transform(projected)
+        else:
+            spectral = self.window_grid.apply(projected, transform)
         y = F.gelu(self.norm(self.out_projection(spectral) + self.spatial(x)))
         return y + self.mlp(y)
 
 
 class LocalFNO3d(nn.Module):
-    """Two-level local-spectral U-Net with a global FNO bottleneck."""
+    """Two-level local-spectral U-Net with a global FNO bottleneck.
+
+    With ``siren=True`` every spectral branch (both windowed levels and the
+    global bottleneck) generates its quadrant weights from per-branch SIREN
+    networks instead of storing dense per-mode parameters -- the
+    "LocalSirenFNO" variant.
+    """
 
     def __init__(
         self,
@@ -302,6 +467,13 @@ class LocalFNO3d(nn.Module):
         spectral_rank: int = 16,
         patch_chunk_size: int = 128,
         output_sigmoid: bool = True,
+        siren: bool = False,
+        siren_hidden_dim: int = 64,
+        siren_omega: float = 30.0,
+        siren_n_hidden: int = 1,
+        siren_feature_dim: int = 16,
+        siren_ff_sigma: float = 128.0,
+        siren_learnable_ff: bool = True,
     ):
         super().__init__()
         width0 = int(base_width)
@@ -333,12 +505,25 @@ class LocalFNO3d(nn.Module):
         self.spectral_rank = int(spectral_rank)
         self.patch_chunk_size = int(patch_chunk_size)
         self.output_sigmoid = bool(output_sigmoid)
+        self.siren = bool(siren)
+        siren_spec = (
+            dict(
+                hidden_dim=int(siren_hidden_dim),
+                omega=float(siren_omega),
+                n_hidden=int(siren_n_hidden),
+                feature_dim=int(siren_feature_dim),
+                ff_sigma=float(siren_ff_sigma),
+                learnable_ff=bool(siren_learnable_ff),
+            )
+            if self.siren
+            else None
+        )
 
         self.lifting = nn.Conv3d(self.in_channels, width0, kernel_size=1)
         self.encoder0 = SpectralResidualBlock3d(
             width0, local_modes, spectral_rank,
             window_size=window, offset=(0, 0, 0),
-            patch_chunk_size=patch_chunk_size,
+            patch_chunk_size=patch_chunk_size, siren=siren_spec,
         )
         self.down0 = nn.Sequential(
             nn.AvgPool3d(kernel_size=2, stride=2),
@@ -347,27 +532,31 @@ class LocalFNO3d(nn.Module):
         self.encoder1 = SpectralResidualBlock3d(
             width1, local_modes, spectral_rank,
             window_size=window, offset=shifted,
-            patch_chunk_size=patch_chunk_size,
+            patch_chunk_size=patch_chunk_size, siren=siren_spec,
         )
         self.down1 = nn.Sequential(
             nn.AvgPool3d(kernel_size=2, stride=2),
             nn.Conv3d(width1, width2, kernel_size=1),
         )
         self.bottleneck = nn.Sequential(
-            SpectralResidualBlock3d(width2, self.global_modes, spectral_rank),
-            SpectralResidualBlock3d(width2, self.global_modes, spectral_rank),
+            SpectralResidualBlock3d(
+                width2, self.global_modes, spectral_rank, siren=siren_spec,
+            ),
+            SpectralResidualBlock3d(
+                width2, self.global_modes, spectral_rank, siren=siren_spec,
+            ),
         )
         self.fuse1 = nn.Conv3d(width2 + width1, width1, kernel_size=1)
         self.decoder1 = SpectralResidualBlock3d(
             width1, local_modes, spectral_rank,
             window_size=window, offset=(0, 0, 0),
-            patch_chunk_size=patch_chunk_size,
+            patch_chunk_size=patch_chunk_size, siren=siren_spec,
         )
         self.fuse0 = nn.Conv3d(width1 + width0, width0, kernel_size=1)
         self.decoder0 = SpectralResidualBlock3d(
             width0, local_modes, spectral_rank,
             window_size=window, offset=shifted,
-            patch_chunk_size=patch_chunk_size,
+            patch_chunk_size=patch_chunk_size, siren=siren_spec,
         )
         self.projection = nn.Sequential(
             nn.Conv3d(width0, 2 * width0, kernel_size=1),

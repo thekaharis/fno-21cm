@@ -18,7 +18,7 @@ Environment overrides (defaults in parentheses):
   TARGET_KIND       gompertz | step (gompertz)
   INPUT_FEATURES    density | density_params (density_params)
   N_Z_IN            LOS slices used as input channels (64)
-  MODEL_KIND        fno | ufno | localfno | sirenfno (fno)
+  MODEL_KIND        fno | ufno | localfno | sirenfno | localsirenfno (fno)
   N_MODES_X/Y (32), HIDDEN_CHANNELS (64), N_LAYERS (4)   [fno]
   UFNO_WIDTH (32), UFNO_NORM batchnorm|groupnorm          [ufno]
   LOCALFNO_BASE_WIDTH (16), LOCALFNO_WINDOW_X/Y (16),
@@ -136,14 +136,16 @@ LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 # 1.0 for sirenfno (which NaNs without it, like its 3-D twin) and off for
 # the architectures that have trained stably unclipped.
 GRAD_CLIP_NORM = float(os.environ.get(
-    "GRAD_CLIP_NORM", "1.0" if MODEL_KIND == "sirenfno" else "0.0"
+    "GRAD_CLIP_NORM",
+    "1.0" if MODEL_KIND in ("sirenfno", "localsirenfno") else "0.0",
 ))
 EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 
 # Separate checkpoint directories per model kind so runs never overwrite
 # each other (same convention as the 3-D pipeline).
 _KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "localfno": "_localfno",
-                "sirenfno": "_sirenfno"}
+                "sirenfno": "_sirenfno",
+                "localsirenfno": "_localsirenfno"}
 CHECKPOINT_DIR = Path(
     os.environ.get(
         "CHECKPOINT_DIR",
@@ -233,9 +235,10 @@ def build_zre_model(kind: str, in_channels: int):
         desc = (f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} "
                 f"norm={UFNO_NORM} sigmoid-output")
         return model, desc
-    if kind == "localfno":
+    if kind in ("localfno", "localsirenfno"):
         from models_zre_2d import LocalFNO2d
 
+        siren = kind == "localsirenfno"
         model = LocalFNO2d(
             in_channels=in_channels,
             out_channels=1,
@@ -245,13 +248,27 @@ def build_zre_model(kind: str, in_channels: int):
             global_modes=LOCALFNO_GLOBAL_MODES,
             spectral_rank=LOCALFNO_SPECTRAL_RANK,
             output_sigmoid=True,
+            siren=siren,
+            siren_hidden_dim=SIREN_HIDDEN_DIM,
+            siren_omega=SIREN_OMEGA,
+            siren_n_hidden=SIREN_N_HIDDEN,
+            siren_feature_dim=SIREN_FEATURE_DIM,
+            siren_ff_sigma=SIREN_FF_SIGMA,
+            siren_learnable_ff=SIREN_LEARNABLE_FF,
         )
-        desc = (f"LocalFNO2d window={LOCALFNO_WINDOW} "
+        name = "LocalSirenFNO2d" if siren else "LocalFNO2d"
+        siren_desc = (
+            f" siren={SIREN_HIDDEN_DIM}x{SIREN_N_HIDDEN} "
+            f"ff={SIREN_FEATURE_DIM}@{SIREN_FF_SIGMA:g}"
+            if siren
+            else ""
+        )
+        desc = (f"{name} window={LOCALFNO_WINDOW} "
                 f"local-modes={LOCALFNO_MODES} "
                 f"global-modes={LOCALFNO_GLOBAL_MODES} "
                 f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
-                f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
-                f"sigmoid-output")
+                f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK}"
+                f"{siren_desc} sigmoid-output")
         return model, desc
     if kind == "sirenfno":
         from models_zre_2d import SirenFNO2d

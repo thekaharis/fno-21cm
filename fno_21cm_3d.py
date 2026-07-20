@@ -756,6 +756,7 @@ def main():
         "ufno": UFNO_LEARNING_RATE,
         "sirenfno": SIRENFNO_LEARNING_RATE,
         "localfno": LOCALFNO_LEARNING_RATE,
+        "localsirenfno": LOCALFNO_LEARNING_RATE,
     }[MODEL_KIND]
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
@@ -773,6 +774,7 @@ def main():
         "ufno": UFNO_GRAD_CLIP_NORM,
         "sirenfno": SIRENFNO_GRAD_CLIP_NORM,
         "localfno": LOCALFNO_GRAD_CLIP_NORM,
+        "localsirenfno": LOCALFNO_GRAD_CLIP_NORM,
     }[MODEL_KIND]
     if grad_clip_norm > 0:
         def _clip_before_step(optim, args, kwargs):
@@ -825,6 +827,7 @@ def main():
         "ufno": UFNO_H1_WARMUP_EPOCHS,
         "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
         "localfno": LOCALFNO_H1_WARMUP_EPOCHS,
+        "localsirenfno": LOCALFNO_H1_WARMUP_EPOCHS,
     }[MODEL_KIND]
     if h1_warmup_epochs > 0:
         train_loss_fn = ScheduledWeightedLoss(
@@ -899,9 +902,9 @@ def main():
             f"output sigmoid={MODEL_CONFIG.siren_output_sigmoid}, "
             f"temperature={MODEL_CONFIG.siren_sigmoid_temperature:g}"
         )
-    elif MODEL_KIND == "localfno":
+    elif MODEL_KIND in ("localfno", "localsirenfno"):
         rprint(
-            "LocalFNO stability: "
+            f"{MODEL_KIND} stability: "
             f"H1 warmup={LOCALFNO_H1_WARMUP_EPOCHS} epochs, "
             f"gradient clip={LOCALFNO_GRAD_CLIP_NORM:g}, "
             f"window={MODEL_CONFIG.localfno_window}, "
@@ -980,12 +983,12 @@ def main():
             ),
             "localfno_h1_warmup_epochs": (
                 LOCALFNO_H1_WARMUP_EPOCHS
-                if MODEL_KIND == "localfno"
+                if MODEL_KIND in ("localfno", "localsirenfno")
                 else 0
             ),
             "localfno_grad_clip_norm": (
                 LOCALFNO_GRAD_CLIP_NORM
-                if MODEL_KIND == "localfno"
+                if MODEL_KIND in ("localfno", "localsirenfno")
                 else None
             ),
             "best_metric_name": "val_l2",

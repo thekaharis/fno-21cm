@@ -183,6 +183,7 @@ MODEL_KIND=fno python fno_21cm_3d.py
 MODEL_KIND=ufno python fno_21cm_3d.py
 MODEL_KIND=sirenfno python fno_21cm_3d.py
 MODEL_KIND=localfno python fno_21cm_3d.py
+MODEL_KIND=localsirenfno python fno_21cm_3d.py
 ```
 
 `localfno` is a two-level 3-D U-Net built from overlapping local Fourier
@@ -196,6 +197,17 @@ Override the architecture with `LOCALFNO_WINDOW_X/Y/Z`,
 `LOCALFNO_MODES_X/Y/Z`, `LOCALFNO_BASE_WIDTH`,
 `LOCALFNO_SPECTRAL_RANK`, and `LOCALFNO_PATCH_CHUNK_SIZE`. The chunk size
 bounds patch FFT memory and can be reduced for A30 inference.
+
+`localsirenfno` keeps the same U-Net topology but replaces every branch's
+dense per-mode quadrant weights with SIREN-generated ones, exactly as in
+SirenFNO: two shared real/imaginary SIREN trunks per branch map signed mode
+coordinates (normalized by the retained band) to the channel-mixing weights,
+so the truncation becomes a smooth learned function of the mode coordinate.
+It reads the same `LOCALFNO_*` switches plus the SIREN trunk settings
+`SIREN_HIDDEN_DIM`, `SIREN_OMEGA`, `SIREN_N_HIDDEN`, `SIREN_FEATURE_DIM`,
+`SIREN_FF_SIGMA`, and `SIREN_LEARNABLE_FF`, trains with the LocalFNO
+stability defaults, and checkpoints to `checkpoints/checkpoints_3d_localsirenfno/`.
+The 2-D z_re pipeline accepts the same kind via `MODEL_KIND=localsirenfno`.
 
 An optional one-sided ionized-wall loss penalizes excess predicted neutral
 fraction on the ionized side of true transverse bubble boundaries:
