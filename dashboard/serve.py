@@ -60,27 +60,66 @@ def read_metrics(path):
 
 
 def read_label(run_dir):
-    """Short config label from run_metadata.json, e.g. 'localfno m=[8,8,16] h=32'."""
+    """One-line config summary, e.g.
+    'localsirenfno w=32 m=[6,6,12] om=60 lr=1e-04 L2=1.0 H1=0.0 abs'.
+
+    Covers the knobs that actually vary across sweeps; the full parameter
+    set is served separately as ``config`` for the comparison table.
+    """
     try:
         meta = json.loads((run_dir / "run_metadata.json").read_text())
     except (OSError, json.JSONDecodeError):
         return ""
     mc = meta.get("model_config", {})
+    tr = meta.get("training", {})
     if not isinstance(mc, dict):
         return ""
     parts = []
     if mc.get("kind"):
         parts.append(str(mc["kind"]))
-    for key, tag in (
-        ("localfno_modes", "m"),
-        ("n_modes", "m"),
-        ("hidden_channels", "h"),
-        ("localfno_base_width", "w"),
-    ):
-        if key in mc:
-            v = mc[key]
-            v = json.dumps(v, separators=(",", ",")) if isinstance(v, list) else v
-            parts.append(f"{tag}={v}")
+
+    def fmt(v):
+        return ("[" + ",".join(str(x) for x in v) + "]"
+                if isinstance(v, list) else str(v))
+
+    # The 3-D metadata carries every architecture's fields regardless of the
+    # kind actually built, so pick only the ones this kind uses.
+    kind = str(mc.get("kind", ""))
+    if kind in ("localfno", "localsirenfno"):
+        keys = [("localfno_base_width", "w"), ("localfno_modes", "m"),
+                ("localfno_window", "win")]
+        if kind == "localsirenfno":
+            keys.append(("siren_omega", "om"))
+    elif kind == "ufno":
+        keys = [("ufno_width", "w"), ("ufno_norm", "norm"),
+                ("modes", "m"), ("n_modes", "m")]
+    elif kind == "sirenfno":
+        keys = [("hidden_channels", "h"), ("modes", "m"), ("n_modes", "m"),
+                ("siren_omega", "om")]
+    else:
+        keys = [("hidden_channels", "h"), ("modes", "m"), ("n_modes", "m")]
+    seen = set()
+    for key, tag in keys:
+        if key in mc and tag not in seen:
+            seen.add(tag)
+            parts.append(f"{tag}={fmt(mc[key])}")
+
+    lr = tr.get("learning_rate", tr.get("base_learning_rate"))
+    if isinstance(lr, (int, float)):
+        parts.append(f"lr={lr:.0e}")
+    lw = tr.get("loss_weights")
+    if isinstance(lw, dict):
+        active = " ".join(f"{k.upper()}={v:g}"
+                          for k, v in sorted(lw.items()) if v)
+        if active:
+            parts.append(active)
+    modes = tr.get("loss_modes")
+    if isinstance(modes, dict) and modes:
+        parts.append("rel" if all(m == "relative" for m in modes.values())
+                     else "abs" if all(m == "absolute" for m in modes.values())
+                     else "mixed")
+    elif "loss_relative" in tr:
+        parts.append("rel" if tr["loss_relative"] else "abs")
     return " ".join(parts)
 
 
@@ -90,6 +129,40 @@ PROGRESS_RE = re.compile(
 CKPT_DIR_RE = re.compile(r"CHECKPOINT_DIR:\s*(\S+)")
 # rough share of an epoch spent in each phase (train dominates at ~4500s vs ~2x125s)
 PHASE_SPAN = {"train": (0.0, 0.95), "val": (0.95, 0.025), "test": (0.975, 0.025)}
+
+
+# Bulk fields in run_metadata.json that must never reach the browser: the
+# split index/id lists are thousands of entries per run.
+CONFIG_SKIP = {
+    "train_indices", "val_indices", "test_indices",
+    "train_cone_ids", "val_cone_ids", "test_cone_ids",
+    "test_cones", "channel_names", "mean", "std", "names",
+    "checkpoints",
+}
+
+
+def _flatten_config(obj, path, out):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in CONFIG_SKIP:
+                continue
+            _flatten_config(value, path + [key], out)
+    elif isinstance(obj, list):
+        if len(obj) <= 8:   # geometry tuples yes, cone-id lists no
+            out[".".join(path)] = "[" + ", ".join(str(v) for v in obj) + "]"
+    elif isinstance(obj, (str, int, float, bool)) or obj is None:
+        out[".".join(path)] = obj
+
+
+def read_config(run_dir):
+    """Flattened run_metadata for the per-run config comparison table."""
+    try:
+        meta = json.loads((run_dir / "run_metadata.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out = {}
+    _flatten_config(meta, [], out)
+    return out
 
 
 def read_task(run_dir, name):
@@ -251,6 +324,7 @@ def build_payload(root, extras):
             "keys": keys,
             "series": series,
             "task": read_task(d, name),
+            "config": read_config(d),
         })
     return {"generated": time.time(), "root": str(root), "extras": extras, "runs": runs}
 

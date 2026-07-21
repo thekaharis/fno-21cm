@@ -1,0 +1,21 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 41012)
+Traceback (most recent call last):
+  File "/usr/lib64/python3.9/socketserver.py", line 683, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/lib64/python3.9/socketserver.py", line 360, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/lib64/python3.9/socketserver.py", line 747, in __init__
+    self.handle()
+  File "/usr/lib64/python3.9/http/server.py", line 433, in handle
+    self.handle_one_request()
+  File "/usr/lib64/python3.9/http/server.py", line 421, in handle_one_request
+    method()
+  File "/pfs/10/work/hd_id260-fno_training/fno-21cm/dashboard/serve.py", line 361, in do_GET
+    self._send(200, build_payload(self.root, load_extra_runs()))
+  File "/pfs/10/work/hd_id260-fno_training/fno-21cm/dashboard/serve.py", line 349, in _send
+    self.wfile.write(data)
+  File "/usr/lib64/python3.9/socketserver.py", line 826, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------

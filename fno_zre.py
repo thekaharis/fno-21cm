@@ -30,7 +30,9 @@ Environment overrides (defaults in parentheses):
   SIREN_SIGMOID_TEMPERATURE (2.0)                          [sirenfno]
   BATCH_SIZE (2), LEARNING_RATE (5e-4 fno, 1e-4 ufno/localfno),
   WEIGHT_DECAY (1e-5), N_EPOCHS (200)
-  LOSS_L2_WEIGHT (0.5), LOSS_H1_WEIGHT (0.5)
+  LOSS_L2_WEIGHT (0.5), LOSS_H1_WEIGHT (0.5),
+  LOSS_L1_WEIGHT (0.0), LOSS_H2_WEIGHT (0.0),
+  LOSS_RELATIVE (0 = absolute norms, 1 = relative norms)
   GRAD_CLIP_NORM    max grad norm per step; 0 = off
                     (1.0 for sirenfno, 0.0 otherwise)
   CHECKPOINT_DIR (checkpoints/checkpoints_zre[_<kind>]), EVAL_INTERVAL (5)
@@ -63,7 +65,7 @@ print(f"[fno_zre] using neuralop from {_neuralop.__file__}")
 
 from dataset.dataset_zre import ZreMapDataset, split_by_cone
 from dataset.zre_target import TARGET_KINDS, build_target_cache
-from losses import AbsoluteLoss, WeightedLoss
+from losses import AbsoluteLoss, H2Loss2d, RelativeLoss, WeightedLoss
 from modeling import TrainerModel
 
 
@@ -132,6 +134,11 @@ WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-5"))
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "200"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
+LOSS_L1_WEIGHT = float(os.environ.get("LOSS_L1_WEIGHT", "0.0"))
+LOSS_H2_WEIGHT = float(os.environ.get("LOSS_H2_WEIGHT", "0.0"))
+# 0 keeps the established absolute norms; 1 switches every active term to
+# its relative implementation (||out-y|| / ||y||), e.g. the L1+H2 ablation.
+LOSS_RELATIVE = os.environ.get("LOSS_RELATIVE", "0").strip() == "1"
 # Grad-norm clipping before every optimizer step; 0 disables. Defaults to
 # 1.0 for sirenfno (which NaNs without it, like its 3-D twin) and off for
 # the architectures that have trained stably unclipped.
@@ -331,6 +338,50 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def build_losses():
+    """Construct train/eval losses from the LOSS_* env configuration.
+
+    Train terms are the positively weighted subset of L2/H1/L1/H2, each
+    absolute by default (LOSS_RELATIVE=0). The default absolute norms avoid
+    dividing by the near-zero target norm of late-reionizing cones (the
+    normalized target is zero over clamped regions); LOSS_RELATIVE=1 opts
+    into relative norms for ablation runs regardless. Eval losses always
+    report absolute L1/L2/H1/H2 plus the masked MSE, so metrics stay
+    comparable across loss ablations.
+    """
+    adapter = RelativeLoss if LOSS_RELATIVE else AbsoluteLoss
+    l2_loss = LpLoss(d=2, p=2)
+    h1_loss = H1Loss(d=2)
+    l1_loss = LpLoss(d=2, p=1)
+    h2_loss = H2Loss2d()
+    weighted_terms = (
+        (LOSS_L2_WEIGHT, "L2", l2_loss),
+        (LOSS_H1_WEIGHT, "H1", h1_loss),
+        (LOSS_L1_WEIGHT, "L1", l1_loss),
+        (LOSS_H2_WEIGHT, "H2", h2_loss),
+    )
+    if not any(weight > 0 for weight, _, _ in weighted_terms):
+        raise SystemExit("At least one LOSS_*_WEIGHT must be positive")
+    train_loss_fn = WeightedLoss(
+        *[(weight, adapter(loss)) for weight, _, loss in weighted_terms],
+        term_names=tuple(name.lower() for _, name, _ in weighted_terms),
+    )
+    eval_losses = {
+        "l2": AbsoluteLoss(l2_loss),
+        "h1": AbsoluteLoss(h1_loss),
+        "l1": AbsoluteLoss(l1_loss),
+        "h2": AbsoluteLoss(h2_loss),
+        "masked_mse": MaskedMSE(),
+    }
+    norm_kind = "rel" if LOSS_RELATIVE else "abs"
+    description = " + ".join(
+        f"{weight}*{norm_kind}{name}"
+        for weight, name, _ in weighted_terms
+        if weight > 0
+    )
+    return train_loss_fn, eval_losses, description
+
+
 @torch.no_grad()
 def _final_report(model, loaders, dataset, device) -> dict:
     """Dense/masked MSE per split, in normalized and physical units."""
@@ -499,36 +550,48 @@ def main() -> None:
         optimizer, T_max=N_EPOCHS
     )
 
-    # Both terms absolute, as in the 2-D slice pipeline: the normalized target
-    # is zero over clamped regions, so a relative norm would divide by a
-    # near-zero target norm on late-reionizing cones.
-    l2_loss = LpLoss(d=2, p=2)
-    h1_loss = H1Loss(d=2)
-    train_loss_fn = WeightedLoss(
-        (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
-        (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
-    )
-    eval_losses = {
-        "l2": AbsoluteLoss(l2_loss),
-        "h1": AbsoluteLoss(h1_loss),
-        "masked_mse": MaskedMSE(),
-    }
+    train_loss_fn, eval_losses, loss_description = build_losses()
 
     from util.run_metadata import write_run_metadata
     write_run_metadata(CHECKPOINT_DIR, {
         "task": "zre",
+        # Record every architecture knob, not just the generic ones: a sweep
+        # over base width / window / local modes / omega is otherwise
+        # indistinguishable in the run metadata (and therefore on the
+        # dashboard), leaving the job log as the only record of what ran.
         "model_config": {
             "kind": MODEL_KIND,
             "n_modes": list(N_MODES),
             "hidden_channels": HIDDEN_CHANNELS,
             "n_layers": N_LAYERS,
+            **({"ufno_width": UFNO_WIDTH, "ufno_norm": UFNO_NORM}
+               if MODEL_KIND == "ufno" else {}),
+            **({"localfno_base_width": LOCALFNO_BASE_WIDTH,
+                "localfno_window": list(LOCALFNO_WINDOW),
+                "localfno_modes": list(LOCALFNO_MODES),
+                "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
+                "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK}
+               if MODEL_KIND in ("localfno", "localsirenfno") else {}),
+            **({"siren_omega": SIREN_OMEGA,
+                "siren_hidden_dim": SIREN_HIDDEN_DIM,
+                "siren_n_hidden": SIREN_N_HIDDEN,
+                "siren_feature_dim": SIREN_FEATURE_DIM,
+                "siren_ff_sigma": SIREN_FF_SIGMA,
+                "siren_output_sigmoid": SIREN_OUTPUT_SIGMOID}
+               if MODEL_KIND in ("sirenfno", "localsirenfno") else {}),
         },
         "training": {
             "epochs": N_EPOCHS,
             "batch_size": BATCH_SIZE,
             "learning_rate": LEARNING_RATE,
             "weight_decay": WEIGHT_DECAY,
-            "loss_weights": {"l2": LOSS_L2_WEIGHT, "h1": LOSS_H1_WEIGHT},
+            "loss_weights": {
+                "l2": LOSS_L2_WEIGHT,
+                "h1": LOSS_H1_WEIGHT,
+                "l1": LOSS_L1_WEIGHT,
+                "h2": LOSS_H2_WEIGHT,
+            },
+            "loss_relative": LOSS_RELATIVE,
             "grad_clip_norm": GRAD_CLIP_NORM,
             "target_kind": TARGET_KIND,
             "input_features": INPUT_FEATURES,
@@ -554,7 +617,7 @@ def main() -> None:
     print(f"\nDevice: {DEVICE}")
     print(f"Batch size: {BATCH_SIZE}, LR: {LEARNING_RATE}, "
           f"epochs: {N_EPOCHS}")
-    print(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1")
+    print(f"Loss: {loss_description}")
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     trainer.train(

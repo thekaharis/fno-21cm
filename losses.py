@@ -229,6 +229,164 @@ class IonizedWallRMSE:
         return torch.where(count > 0, stable_rmse, out.sum() * 0.0)
 
 
+class H2Loss2d:
+    """Sobolev H2 norm for 2-D maps, periodic in both transverse axes.
+
+    Terms: value, first derivatives, and all multi-index second derivatives
+    (the mixed derivative enters with its combinatorial factor of 2, folded
+    in as sqrt(2)*fxy). First derivatives use centered stencils; the pure
+    second derivatives use the standard three-point stencil; the mixed
+    derivative is centered in both axes. Quadrature scaling matches the
+    neuralop H1Loss convention, so absolute and relative values are directly
+    comparable with the Lp/H1 terms they are weighted against.
+    """
+
+    def __init__(
+        self,
+        measure: tuple[float, float] = (1.0, 1.0),
+        reduction: str = "sum",
+    ):
+        if len(measure) != 2:
+            raise ValueError("H2Loss2d requires two domain measures")
+        if reduction not in {"sum", "mean"}:
+            raise ValueError("reduction must be 'sum' or 'mean'")
+        self.d = 2
+        self.measure = tuple(float(value) for value in measure)
+        self.reduction = reduction
+        self.periodic_in_x = True
+        self.periodic_in_y = True
+
+    def uniform_quadrature(self, x: torch.Tensor) -> tuple[float, float]:
+        return (
+            self.measure[0] / x.size(-2),
+            self.measure[1] / x.size(-1),
+        )
+
+    def _reduce(self, value: torch.Tensor) -> torch.Tensor:
+        if self.reduction == "sum":
+            return value.sum()
+        return value.mean()
+
+    def compute_terms(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        quadrature: tuple[float, float] | None = None,
+    ) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor]]:
+        """Return flattened value/first/second-derivative terms."""
+        if x.shape != y.shape:
+            raise ValueError(
+                f"prediction and target shapes differ: {x.shape} != {y.shape}"
+            )
+        if x.ndim < 2:
+            raise ValueError("H2Loss2d requires at least two spatial dims")
+        if quadrature is None:
+            quadrature = self.uniform_quadrature(x)
+        hx, hy = (float(value) for value in quadrature)
+        sqrt2 = math.sqrt(2.0)
+
+        def terms(field: torch.Tensor) -> dict[int, torch.Tensor]:
+            fx = (
+                torch.roll(field, shifts=-1, dims=-2)
+                - torch.roll(field, shifts=1, dims=-2)
+            ) / (2.0 * hx)
+            fy = (
+                torch.roll(field, shifts=-1, dims=-1)
+                - torch.roll(field, shifts=1, dims=-1)
+            ) / (2.0 * hy)
+            fxx = (
+                torch.roll(field, shifts=-1, dims=-2)
+                - 2.0 * field
+                + torch.roll(field, shifts=1, dims=-2)
+            ) / (hx * hx)
+            fyy = (
+                torch.roll(field, shifts=-1, dims=-1)
+                - 2.0 * field
+                + torch.roll(field, shifts=1, dims=-1)
+            ) / (hy * hy)
+            fxy = (
+                torch.roll(
+                    torch.roll(field, shifts=-1, dims=-2), shifts=-1, dims=-1
+                )
+                - torch.roll(
+                    torch.roll(field, shifts=-1, dims=-2), shifts=1, dims=-1
+                )
+                - torch.roll(
+                    torch.roll(field, shifts=1, dims=-2), shifts=-1, dims=-1
+                )
+                + torch.roll(
+                    torch.roll(field, shifts=1, dims=-2), shifts=1, dims=-1
+                )
+            ) / (4.0 * hx * hy)
+            return {
+                0: torch.flatten(field, start_dim=-2),
+                1: torch.flatten(fx, start_dim=-2),
+                2: torch.flatten(fy, start_dim=-2),
+                3: torch.flatten(fxx, start_dim=-2),
+                4: torch.flatten(sqrt2 * fxy, start_dim=-2),
+                5: torch.flatten(fyy, start_dim=-2),
+            }
+
+        return terms(x), terms(y)
+
+    def _squared_error_and_norm(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        quadrature: tuple[float, float] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-sample squared H2 error and squared H2 norm of the target."""
+        if quadrature is None:
+            quadrature = self.uniform_quadrature(x)
+        terms_x, terms_y = self.compute_terms(x, y, quadrature)
+        scale = math.prod(quadrature)
+        error = sum(
+            scale * torch.sum(
+                (terms_x[index] - terms_y[index]).square(),
+                dim=-1,
+            )
+            for index in range(6)
+        )
+        norm = sum(
+            scale * torch.sum(terms_y[index].square(), dim=-1)
+            for index in range(6)
+        )
+        return error, norm
+
+    def abs(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        quadrature: tuple[float, float] | None = None,
+        take_root: bool = True,
+    ) -> torch.Tensor:
+        error, _ = self._squared_error_and_norm(x, y, quadrature)
+        if take_root:
+            error = error.sqrt()
+        return self._reduce(error).squeeze()
+
+    def rel(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        quadrature: tuple[float, float] | None = None,
+        take_root: bool = True,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        """Relative H2 error, ``||x - y||_H2 / ||y||_H2`` per sample.
+
+        Dimensionless, matching neuralop's relative Lp/H1 conventions
+        (``eps`` guards near-zero target norms, e.g. fully clamped z_re
+        maps).
+        """
+        error, norm = self._squared_error_and_norm(x, y, quadrature)
+        if take_root:
+            ratio = error.sqrt() / norm.sqrt().clamp_min(eps)
+        else:
+            ratio = error / norm.clamp_min(eps)
+        return self._reduce(ratio).squeeze()
+
+
 class LightconeH1Loss:
     """Absolute H1 norm with periodic X/Y and interior-only LOS differences.
 

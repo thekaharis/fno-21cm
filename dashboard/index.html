@@ -70,6 +70,16 @@
   th:first-child, td:first-child { text-align: left; }
   th { color: var(--muted); font-weight: 600; }
   .err { color: #f27878; font-size: 12px; min-height: 1em; }
+  .cfg-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .cfg-head h2 { margin: 2px 0; }
+  table.cfg td, table.cfg th { font-size: 11.5px; padding: 3px 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  table.cfg td.param { text-align: left; color: var(--muted);
+        font-family: inherit; }
+  table.cfg tr.diff td.param { color: var(--text); font-weight: 600; }
+  table.cfg tr.diff { background: rgba(90,176,247,.07); }
+  table.cfg td.val-diff { color: var(--accent); font-weight: 600; }
+  .cfg-scroll { max-height: 420px; overflow: auto; }
   .live-run { margin-bottom: 10px; }
   .live-run:last-child { margin-bottom: 2px; }
   .live-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
@@ -99,6 +109,7 @@
   <div class="spacer"></div>
   <label class="opt"><input type="checkbox" id="logscale"> log y</label>
   <label class="opt"><input type="checkbox" id="clip"> clip to live epoch</label>
+  <label class="opt"><input type="checkbox" id="diffonly" checked> config: differences only</label>
   <label class="opt muted">refresh
     <select id="interval">
       <option value="15000">15s</option>
@@ -383,6 +394,7 @@ function renderCharts() {
   const maxEp = clipEpoch();
   for (const m of metrics) area.appendChild(buildChart(m, runs, maxEp));
   renderSummary(area, runs);
+  renderConfig(area, runs);
 }
 
 function seriesFor(run, metric, maxEp) {
@@ -536,6 +548,67 @@ function last(run, key, maxEp) {
   return pts ? pts[pts.length - 1][1] : null;
 }
 
+function renderConfig(area, runs) {
+  if (!runs.length) return;
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  const withCfg = runs.filter(r => r.config && Object.keys(r.config).length);
+  if (!withCfg.length) {
+    panel.innerHTML = "<h2>Config</h2><div class='muted' style='font-size:12px'>"
+      + "No run_metadata.json for the selected runs.</div>";
+    area.appendChild(panel);
+    return;
+  }
+  // union of parameters, ordered: model_config first, then training, then rest
+  const keys = [...new Set(withCfg.flatMap(r => Object.keys(r.config)))];
+  const rank = k => k.startsWith("model_config.") ? 0
+                  : k.startsWith("training.") ? 1 : 2;
+  keys.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+  const differs = k => {
+    const vals = withCfg.map(r => JSON.stringify(r.config[k] ?? null));
+    return vals.some(v => v !== vals[0]);
+  };
+  const diffOnly = $("diffonly").checked;
+  const shown = keys.filter(k => !diffOnly || differs(k));
+  const nDiff = keys.filter(differs).length;
+
+  let html = `<div class="cfg-head"><h2>Config</h2>`
+    + `<span class="muted" style="font-size:11.5px">`
+    + `${withCfg.length} run(s) · ${keys.length} parameters · `
+    + `<b>${nDiff} differ</b>${diffOnly ? " (showing only these)" : ""}`
+    + `${withCfg.length < runs.length
+        ? ` · ${runs.length - withCfg.length} selected run(s) have no metadata` : ""}`
+    + `</span></div>`;
+
+  if (!shown.length) {
+    html += `<div class="muted" style="font-size:12px">`
+          + `Selected runs are identically configured.</div>`;
+    panel.innerHTML = html;
+    area.appendChild(panel);
+    return;
+  }
+  html += `<div class="cfg-scroll"><table class="cfg"><tr><th>parameter</th>`
+        + withCfg.map(r => `<th><span style="color:${runColor(r.name)}">■</span> `
+            + `${r.name}</th>`).join("") + `</tr>`;
+  for (const k of shown) {
+    const d = differs(k);
+    const first = JSON.stringify(withCfg[0].config[k] ?? null);
+    html += `<tr class="${d ? "diff" : ""}">`
+          + `<td class="param">${k.replace(/^(model_config|training)\./, "")}</td>`;
+    for (const r of withCfg) {
+      const raw = r.config[k];
+      const cell = (raw === undefined || raw === null) ? "–" : String(raw);
+      const changed = d && JSON.stringify(raw ?? null) !== first;
+      html += `<td class="${changed ? "val-diff" : ""}">${cell}</td>`;
+    }
+    html += `</tr>`;
+  }
+  html += `</table></div>`;
+  panel.innerHTML = html;
+  area.appendChild(panel);
+}
+
 function renderSummary(area, runs) {
   const panel = document.createElement("div");
   panel.className = "panel";
@@ -568,6 +641,7 @@ function renderSummary(area, runs) {
 
 $("logscale").onchange = renderCharts;
 $("clip").onchange = renderCharts;
+$("diffonly").onchange = renderCharts;
 $("interval").onchange = schedule;
 $("add-btn").onclick = addRun;
 $("add-path").addEventListener("keydown", e => { if (e.key === "Enter") addRun(); });
