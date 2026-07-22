@@ -219,7 +219,9 @@ def load_model(
         if metadata and "model_config" in metadata:
             config = ModelConfig.from_dict(metadata["model_config"])
     config = config or MODEL_CONFIG
-    if config.kind == "localfno" and "LOCALFNO_PATCH_CHUNK_SIZE" in os.environ:
+    if config.kind in {"localfno", "localsirenfno"} and (
+        "LOCALFNO_PATCH_CHUNK_SIZE" in os.environ
+    ):
         # Chunk size changes execution memory only, not learned parameters.
         config = replace(
             config,

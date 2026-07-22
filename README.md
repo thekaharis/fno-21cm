@@ -85,6 +85,7 @@ Two pipelines live side by side:
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
 | `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
 | `slurm/power_spectrum_eval.sbatch` | Paired power-spectrum evaluation (Local-FNO vs U-FNO by default): P(k) ratio and r(k) curves, cylindrical `(k⊥, k∥)` maps, per-stage CSV, and a reduced-results NPZ. Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `CHUNK_Z`, `OUT_DIR` via `--export`. |
+| `slurm/bubble_size_eval.sbatch` | Paired transverse mean-free-path bubble-size evaluation (3-D LocalSirenFNO L2+H1 vs L2-only by default): stage-resolved BSD plots, capped/restricted Wasserstein distance, size bias, CSV, and reduced NPZ. Override model names/checkpoints, `N_CONES`, `RAYS_PER_SLICE`, `SLICES_PER_STAGE`, or `OUT_DIR`. |
 
 The prediction-visualization scripts write into a per-run subfolder under
 `figures/` whose
@@ -271,6 +272,31 @@ Mpc⁻¹ via flat ΛCDM), per-stage curves binned by the slice's transverse-mean
 a `ps_results.npz` with the reduced arrays for thesis re-plotting. Both
 diagnostics accept the same saved-cube NPZ manifests, so predictions computed
 once (`--save-cubes`) can be re-analyzed offline by either tool.
+
+For a complementary ionized-bubble morphology comparison, run the transverse
+mean-free-path diagnostic:
+
+```bash
+python -m viz.bubble_size_evaluation --checkpoints \
+  l2h1=checkpoints/checkpoints_3d_localsirenfno/best_model_state_dict.pt \
+  l2only=checkpoints/checkpoints_3d_localsirenfno_l2only/best_model_state_dict.pt \
+  --split test --n-cones 200 --out figures/bubble_size_out
+```
+
+or `sbatch slurm/bubble_size_eval.sbatch` on the cluster. Rays are launched
+isotropically from uniformly sampled ionized pixels (`x_HI < 0.5`) and traced
+exactly to the first neutral cell with periodic transverse boundaries. Because
+the lightcone LOS is an evolution axis sampled uniformly in redshift, the
+metric operates on 2-D transverse slices and aggregates them by truth
+`x_HI` stage rather than treating the full lightcone as a coeval 3-D volume.
+Each selected slice receives the same ray budget; sampling is ionized-area
+weighted within a slice and slice-balanced within each stage.
+It writes `bubble_size_distribution.png`, `bubble_size_summary.png`,
+`bubble_size_metrics.csv`, `bubble_size_results.npz`, and the complete sampling
+configuration. Rays that travel one box length without a neutral hit are kept
+as a censored overflow probability. Predictions with no ionized pixels are
+retained as a zero-distance underflow failure rather than omitted from model
+scores; the restricted Wasserstein metric includes both categories.
 
 On the four-GPU H200 job:
 
