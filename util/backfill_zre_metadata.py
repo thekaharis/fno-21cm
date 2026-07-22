@@ -153,7 +153,7 @@ def main() -> None:
         # the directory-name suffix (..._om60) is the only surviving record.
         # Mark it so an inferred value is never mistaken for a logged one.
         if "siren_omega" not in mc:
-            om = re.search(r"_om(\d+)", target.name)
+            om = re.search(r"om(\d+)", target.name)
             if om:
                 mc["siren_omega"] = float(om.group(1))
                 merged["siren_omega_inferred_from_dirname"] = True
