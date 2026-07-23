@@ -185,6 +185,7 @@ MODEL_KIND=ufno python fno_21cm_3d.py
 MODEL_KIND=sirenfno python fno_21cm_3d.py
 MODEL_KIND=localfno python fno_21cm_3d.py
 MODEL_KIND=localsirenfno python fno_21cm_3d.py
+MODEL_KIND=localwno python fno_21cm_3d.py
 ```
 
 `localfno` is a two-level 3-D U-Net built from overlapping local Fourier
@@ -209,6 +210,15 @@ It reads the same `LOCALFNO_*` switches plus the SIREN trunk settings
 `SIREN_FF_SIGMA`, and `SIREN_LEARNABLE_FF`, trains with the LocalFNO
 stability defaults, and checkpoints to `checkpoints/checkpoints_3d_localsirenfno/`.
 The 2-D z_re pipeline accepts the same kind via `MODEL_KIND=localsirenfno`.
+
+`localwno` is a hybrid LocalWNO/FNO architecture for controlled wavelet
+experiments. It replaces the four overlap-add local Fourier branches with
+dependency-free, orthonormal Haar operators while retaining the two global
+Fourier bottleneck blocks. Every wavelet level and detail orientation has an
+independent learned channel-mixing matrix, and all bands are reconstructed, so
+the operator preserves the window shape. Set the decomposition depth with
+`LOCALWNO_LEVELS` (default `2`); each local-window dimension must be divisible
+by `2**LOCALWNO_LEVELS`. The 2-D z_re pipeline supports the same model kind.
 
 An optional one-sided ionized-wall loss penalizes excess predicted neutral
 fraction on the ionized side of true transverse bubble boundaries:

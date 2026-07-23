@@ -18,12 +18,14 @@ Environment overrides (defaults in parentheses):
   TARGET_KIND       gompertz | step (gompertz)
   INPUT_FEATURES    density | density_params (density_params)
   N_Z_IN            LOS slices used as input channels (64)
-  MODEL_KIND        fno | ufno | localfno | sirenfno | localsirenfno (fno)
+  MODEL_KIND        fno | ufno | localfno | localwno | sirenfno |
+                    localsirenfno (fno)
   N_MODES_X/Y (32), HIDDEN_CHANNELS (64), N_LAYERS (4)   [fno]
   UFNO_WIDTH (32), UFNO_NORM batchnorm|groupnorm          [ufno]
   LOCALFNO_BASE_WIDTH (16), LOCALFNO_WINDOW_X/Y (16),
   LOCALFNO_MODES_X/Y (6), LOCALFNO_GLOBAL_MODES_X/Y (16),
   LOCALFNO_SPECTRAL_RANK (16)                              [localfno]
+  LOCALWNO_LEVELS (2)                                      [localwno]
   SIREN_HIDDEN_DIM (64), SIREN_OMEGA (30.0), SIREN_N_HIDDEN (1),
   SIREN_FEATURE_DIM (16), SIREN_FF_SIGMA (128.0),
   SIREN_LEARNABLE_FF (1), SIREN_MLP_DROPOUT (0.0),
@@ -101,6 +103,7 @@ LOCALFNO_MODES = (
     int(os.environ.get("LOCALFNO_MODES_Y", "6")),
 )
 LOCALFNO_SPECTRAL_RANK = int(os.environ.get("LOCALFNO_SPECTRAL_RANK", "16"))
+LOCALWNO_LEVELS = int(os.environ.get("LOCALWNO_LEVELS", "2"))
 SIREN_HIDDEN_DIM = int(os.environ.get("SIREN_HIDDEN_DIM", "64"))
 SIREN_OMEGA = float(os.environ.get("SIREN_OMEGA", "30.0"))
 SIREN_N_HIDDEN = int(os.environ.get("SIREN_N_HIDDEN", "1"))
@@ -151,8 +154,9 @@ EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 # Separate checkpoint directories per model kind so runs never overwrite
 # each other (same convention as the 3-D pipeline).
 _KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "localfno": "_localfno",
-                "sirenfno": "_sirenfno",
-                "localsirenfno": "_localsirenfno"}
+                 "sirenfno": "_sirenfno",
+                 "localsirenfno": "_localsirenfno",
+                 "localwno": "_localwno"}
 CHECKPOINT_DIR = Path(
     os.environ.get(
         "CHECKPOINT_DIR",
@@ -242,10 +246,11 @@ def build_zre_model(kind: str, in_channels: int):
         desc = (f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} "
                 f"norm={UFNO_NORM} sigmoid-output")
         return model, desc
-    if kind in ("localfno", "localsirenfno"):
+    if kind in ("localfno", "localsirenfno", "localwno"):
         from models_zre_2d import LocalFNO2d
 
         siren = kind == "localsirenfno"
+        wavelet = kind == "localwno"
         model = LocalFNO2d(
             in_channels=in_channels,
             out_channels=1,
@@ -262,20 +267,32 @@ def build_zre_model(kind: str, in_channels: int):
             siren_feature_dim=SIREN_FEATURE_DIM,
             siren_ff_sigma=SIREN_FF_SIGMA,
             siren_learnable_ff=SIREN_LEARNABLE_FF,
+            local_operator="wavelet" if wavelet else "fourier",
+            wavelet_levels=LOCALWNO_LEVELS,
         )
-        name = "LocalSirenFNO2d" if siren else "LocalFNO2d"
+        name = (
+            "LocalWNO2d" if wavelet
+            else "LocalSirenFNO2d" if siren
+            else "LocalFNO2d"
+        )
         siren_desc = (
             f" siren={SIREN_HIDDEN_DIM}x{SIREN_N_HIDDEN} "
             f"ff={SIREN_FEATURE_DIM}@{SIREN_FF_SIGMA:g}"
             if siren
             else ""
         )
+        wavelet_desc = (
+            f" wavelet=haar levels={LOCALWNO_LEVELS}" if wavelet else ""
+        )
+        local_modes_desc = (
+            "" if wavelet else f"local-modes={LOCALFNO_MODES} "
+        )
         desc = (f"{name} window={LOCALFNO_WINDOW} "
-                f"local-modes={LOCALFNO_MODES} "
+                f"{local_modes_desc}"
                 f"global-modes={LOCALFNO_GLOBAL_MODES} "
                 f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
                 f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK}"
-                f"{siren_desc} sigmoid-output")
+                f"{siren_desc}{wavelet_desc} sigmoid-output")
         return model, desc
     if kind == "sirenfno":
         from models_zre_2d import SirenFNO2d
@@ -571,7 +588,10 @@ def main() -> None:
                 "localfno_modes": list(LOCALFNO_MODES),
                 "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
                 "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK}
-               if MODEL_KIND in ("localfno", "localsirenfno") else {}),
+               if MODEL_KIND in ("localfno", "localsirenfno", "localwno") else {}),
+            **({"localwno_levels": LOCALWNO_LEVELS,
+                "localwno_wavelet": "haar"}
+               if MODEL_KIND == "localwno" else {}),
             **({"siren_omega": SIREN_OMEGA,
                 "siren_hidden_dim": SIREN_HIDDEN_DIM,
                 "siren_n_hidden": SIREN_N_HIDDEN,

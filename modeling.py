@@ -55,14 +55,16 @@ class ModelConfig:
     localfno_base_width: int = 16
     localfno_spectral_rank: int = 16
     localfno_patch_chunk_size: int = 128
+    localwno_levels: int = 2
 
     def __post_init__(self) -> None:
         if self.kind not in {
-            "fno", "ufno", "sirenfno", "localfno", "localsirenfno"
+            "fno", "ufno", "sirenfno", "localfno", "localsirenfno",
+            "localwno",
         }:
             raise ValueError(
                 "kind must be 'fno', 'ufno', 'sirenfno', 'localfno', or "
-                f"'localsirenfno', got {self.kind!r}"
+                f"'localsirenfno', or 'localwno', got {self.kind!r}"
             )
         if len(self.modes) != 3 or any(int(value) <= 0 for value in self.modes):
             raise ValueError("modes must contain three positive values")
@@ -106,17 +108,25 @@ class ModelConfig:
             )
         if self.localfno_patch_chunk_size <= 0:
             raise ValueError("localfno_patch_chunk_size must be positive")
+        if self.localwno_levels <= 0:
+            raise ValueError("localwno_levels must be positive")
         local_limits = (
             self.localfno_window[0] // 2,
             self.localfno_window[1] // 2,
             self.localfno_window[2] // 2 + 1,
         )
-        if any(
+        if self.kind != "localwno" and any(
             mode > limit
             for mode, limit in zip(self.localfno_modes, local_limits)
         ):
             raise ValueError(
                 "localfno_modes exceeds the local-window FFT limits"
+            )
+        if self.kind == "localwno" and any(
+            size % (2**self.localwno_levels) for size in self.localfno_window
+        ):
+            raise ValueError(
+                "localfno_window must be divisible by 2**localwno_levels"
             )
 
     @classmethod
@@ -169,6 +179,7 @@ class ModelConfig:
             localfno_patch_chunk_size=int(
                 os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "128")
             ),
+            localwno_levels=int(os.environ.get("LOCALWNO_LEVELS", "2")),
         )
 
     @classmethod
@@ -210,6 +221,7 @@ class ModelConfig:
             "localfno_base_width": self.localfno_base_width,
             "localfno_spectral_rank": self.localfno_spectral_rank,
             "localfno_patch_chunk_size": self.localfno_patch_chunk_size,
+            "localwno_levels": self.localwno_levels,
         }
 
     @property
@@ -220,6 +232,7 @@ class ModelConfig:
             "sirenfno": "_sirenfno",
             "localfno": "_localfno",
             "localsirenfno": "_localsirenfno",
+            "localwno": "_localwno",
         }[self.kind]
         return Path("checkpoints") / f"checkpoints_3d{suffix}"
 
@@ -237,25 +250,39 @@ class ModelConfig:
                 f"sigmoid={self.siren_output_sigmoid} "
                 f"temperature={self.siren_sigmoid_temperature:g}"
             )
-        if self.kind in {"localfno", "localsirenfno"}:
-            name = "LocalFNO" if self.kind == "localfno" else "LocalSirenFNO"
+        if self.kind in {"localfno", "localsirenfno", "localwno"}:
+            name = {
+                "localfno": "LocalFNO",
+                "localsirenfno": "LocalSirenFNO",
+                "localwno": "LocalWNO",
+            }[self.kind]
             siren = (
-                ""
-                if self.kind == "localfno"
-                else (
+                (
                     f" siren={self.siren_hidden_dim}x{self.siren_n_hidden} "
                     f"ff={self.siren_feature_dim}@{self.siren_ff_sigma:g}"
                 )
+                if self.kind == "localsirenfno"
+                else ""
+            )
+            wavelet = (
+                f" wavelet=haar levels={self.localwno_levels}"
+                if self.kind == "localwno"
+                else ""
+            )
+            local_modes = (
+                ""
+                if self.kind == "localwno"
+                else f"local-modes={self.localfno_modes} "
             )
             return (
                 f"{name} window={self.localfno_window} "
-                f"local-modes={self.localfno_modes} "
+                f"{local_modes}"
                 f"global-modes={self.modes} widths="
                 f"{self.localfno_base_width}/"
                 f"{2 * self.localfno_base_width}/"
                 f"{4 * self.localfno_base_width} "
                 f"rank={self.localfno_spectral_rank} "
-                f"chunk={self.localfno_patch_chunk_size}{siren} "
+                f"chunk={self.localfno_patch_chunk_size}{siren}{wavelet} "
                 "sigmoid-output"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
@@ -346,7 +373,7 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             output_sigmoid=config.siren_output_sigmoid,
             sigmoid_temperature=config.siren_sigmoid_temperature,
         )
-    if config.kind in {"localfno", "localsirenfno"}:
+    if config.kind in {"localfno", "localsirenfno", "localwno"}:
         from local_fno_3d import LocalFNO3d
 
         return LocalFNO3d(
@@ -366,6 +393,10 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             siren_feature_dim=config.siren_feature_dim,
             siren_ff_sigma=config.siren_ff_sigma,
             siren_learnable_ff=config.siren_learnable_ff,
+            local_operator=(
+                "wavelet" if config.kind == "localwno" else "fourier"
+            ),
+            wavelet_levels=config.localwno_levels,
         )
     return FNO(
         n_modes=config.modes,

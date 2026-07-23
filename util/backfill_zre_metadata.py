@@ -56,7 +56,8 @@ def parse_log(path: Path) -> dict | None:
     if kind:
         mc["kind"] = kind.group(1)
     else:
-        guess = {"LocalSirenFNO2d": "localsirenfno", "LocalFNO2d": "localfno",
+        guess = {"LocalSirenFNO2d": "localsirenfno", "LocalWNO2d": "localwno",
+                 "LocalFNO2d": "localfno",
                  "U-FNO2d": "ufno", "SirenFNO2d": "sirenfno",
                  "FNO2d": "fno"}.get(m.group(1))
         if guess:

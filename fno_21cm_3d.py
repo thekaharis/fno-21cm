@@ -757,6 +757,7 @@ def main():
         "sirenfno": SIRENFNO_LEARNING_RATE,
         "localfno": LOCALFNO_LEARNING_RATE,
         "localsirenfno": LOCALFNO_LEARNING_RATE,
+        "localwno": LOCALFNO_LEARNING_RATE,
     }[MODEL_KIND]
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
@@ -775,6 +776,7 @@ def main():
         "sirenfno": SIRENFNO_GRAD_CLIP_NORM,
         "localfno": LOCALFNO_GRAD_CLIP_NORM,
         "localsirenfno": LOCALFNO_GRAD_CLIP_NORM,
+        "localwno": LOCALFNO_GRAD_CLIP_NORM,
     }[MODEL_KIND]
     if grad_clip_norm > 0:
         def _clip_before_step(optim, args, kwargs):
@@ -828,6 +830,7 @@ def main():
         "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
         "localfno": LOCALFNO_H1_WARMUP_EPOCHS,
         "localsirenfno": LOCALFNO_H1_WARMUP_EPOCHS,
+        "localwno": LOCALFNO_H1_WARMUP_EPOCHS,
     }[MODEL_KIND]
     if h1_warmup_epochs > 0:
         train_loss_fn = ScheduledWeightedLoss(
@@ -902,13 +905,18 @@ def main():
             f"output sigmoid={MODEL_CONFIG.siren_output_sigmoid}, "
             f"temperature={MODEL_CONFIG.siren_sigmoid_temperature:g}"
         )
-    elif MODEL_KIND in ("localfno", "localsirenfno"):
+    elif MODEL_KIND in ("localfno", "localsirenfno", "localwno"):
+        local_operator = (
+            f"haar wavelet levels={MODEL_CONFIG.localwno_levels}"
+            if MODEL_KIND == "localwno"
+            else f"Fourier modes={MODEL_CONFIG.localfno_modes}"
+        )
         rprint(
             f"{MODEL_KIND} stability: "
             f"H1 warmup={LOCALFNO_H1_WARMUP_EPOCHS} epochs, "
             f"gradient clip={LOCALFNO_GRAD_CLIP_NORM:g}, "
             f"window={MODEL_CONFIG.localfno_window}, "
-            f"local modes={MODEL_CONFIG.localfno_modes}, "
+            f"local operator={local_operator}, "
             f"chunk={MODEL_CONFIG.localfno_patch_chunk_size}"
         )
     rprint(f"DataLoader workers: {NUM_WORKERS} "
@@ -983,12 +991,12 @@ def main():
             ),
             "localfno_h1_warmup_epochs": (
                 LOCALFNO_H1_WARMUP_EPOCHS
-                if MODEL_KIND in ("localfno", "localsirenfno")
+                if MODEL_KIND in ("localfno", "localsirenfno", "localwno")
                 else 0
             ),
             "localfno_grad_clip_norm": (
                 LOCALFNO_GRAD_CLIP_NORM
-                if MODEL_KIND in ("localfno", "localsirenfno")
+                if MODEL_KIND in ("localfno", "localsirenfno", "localwno")
                 else None
             ),
             "best_metric_name": "val_l2",

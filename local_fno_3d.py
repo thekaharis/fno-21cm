@@ -1,4 +1,4 @@
-"""Windowed local-Fourier U-Net for 3-D 21cm lightcone cubes."""
+"""Windowed local Fourier/wavelet U-Net for 3-D 21cm lightcone cubes."""
 
 from __future__ import annotations
 
@@ -382,7 +382,7 @@ class QuadrantSpectralConv3dSiren(nn.Module):
 
 
 class SpectralResidualBlock3d(nn.Module):
-    """Rank-projected spectral residual block, local or whole-volume."""
+    """Rank-projected Fourier/wavelet residual block."""
 
     def __init__(
         self,
@@ -394,17 +394,24 @@ class SpectralResidualBlock3d(nn.Module):
         offset: Sequence[int] = (0, 0, 0),
         patch_chunk_size: int = 128,
         siren: dict | None = None,
+        wavelet_levels: int | None = None,
     ):
         super().__init__()
+        if siren is not None and wavelet_levels is not None:
+            raise ValueError("siren and wavelet operators are mutually exclusive")
         rank = min(int(spectral_rank), int(channels))
         if rank <= 0:
             raise ValueError("spectral_rank must be positive")
         self.in_projection = nn.Conv3d(channels, rank, kernel_size=1, bias=False)
-        self.spectral = (
-            QuadrantSpectralConv3dSiren(rank, modes, **siren)
-            if siren is not None
-            else QuadrantSpectralConv3d(rank, modes)
-        )
+        if wavelet_levels is not None:
+            from wavelet_operator import HaarWaveletOperator
+
+            self.spectral = HaarWaveletOperator(rank, ndim=3,
+                                                levels=wavelet_levels)
+        elif siren is not None:
+            self.spectral = QuadrantSpectralConv3dSiren(rank, modes, **siren)
+        else:
+            self.spectral = QuadrantSpectralConv3d(rank, modes)
         self.out_projection = nn.Conv3d(rank, channels, kernel_size=1, bias=False)
         self.spatial = nn.Conv3d(channels, channels, kernel_size=1)
         self.norm = _group_norm(channels)
@@ -453,7 +460,9 @@ class LocalFNO3d(nn.Module):
     With ``siren=True`` every spectral branch (both windowed levels and the
     global bottleneck) generates its quadrant weights from per-branch SIREN
     networks instead of storing dense per-mode parameters -- the
-    "LocalSirenFNO" variant.
+    "LocalSirenFNO" variant. With ``local_operator="wavelet"``, only the four
+    windowed branches use multilevel Haar operators; the whole-volume
+    bottleneck remains Fourier, yielding the hybrid "LocalWNO" variant.
     """
 
     def __init__(
@@ -474,6 +483,8 @@ class LocalFNO3d(nn.Module):
         siren_feature_dim: int = 16,
         siren_ff_sigma: float = 128.0,
         siren_learnable_ff: bool = True,
+        local_operator: str = "fourier",
+        wavelet_levels: int = 2,
     ):
         super().__init__()
         width0 = int(base_width)
@@ -482,15 +493,33 @@ class LocalFNO3d(nn.Module):
         width1, width2 = 2 * width0, 4 * width0
         window = _triple(local_window, "local_window")
         local_modes = _triple(local_modes, "local_modes")
+        local_operator = str(local_operator).lower()
+        if local_operator not in {"fourier", "wavelet"}:
+            raise ValueError("local_operator must be 'fourier' or 'wavelet'")
+        if siren and local_operator == "wavelet":
+            raise ValueError("siren cannot be combined with wavelet local layers")
         if any(value % 4 for value in window):
             raise ValueError(
                 "local_window values must be divisible by four for 50% "
                 "overlap and half-stride shifted grids"
             )
         limits = (window[0] // 2, window[1] // 2, window[2] // 2 + 1)
-        if any(mode > limit for mode, limit in zip(local_modes, limits)):
+        if local_operator == "fourier" and any(
+            mode > limit for mode, limit in zip(local_modes, limits)
+        ):
             raise ValueError(
                 f"local_modes={local_modes} exceeds window FFT limits {limits}"
+            )
+        wavelet_levels = int(wavelet_levels)
+        wavelet_divisor = 2**wavelet_levels
+        if wavelet_levels <= 0:
+            raise ValueError("wavelet_levels must be positive")
+        if local_operator == "wavelet" and any(
+            value % wavelet_divisor for value in window
+        ):
+            raise ValueError(
+                f"local_window values must be divisible by {wavelet_divisor} "
+                f"for {wavelet_levels} wavelet levels"
             )
         if int(spectral_rank) > width0:
             raise ValueError("spectral_rank cannot exceed base_width")
@@ -506,6 +535,8 @@ class LocalFNO3d(nn.Module):
         self.patch_chunk_size = int(patch_chunk_size)
         self.output_sigmoid = bool(output_sigmoid)
         self.siren = bool(siren)
+        self.local_operator = local_operator
+        self.wavelet_levels = wavelet_levels
         siren_spec = (
             dict(
                 hidden_dim=int(siren_hidden_dim),
@@ -518,12 +549,16 @@ class LocalFNO3d(nn.Module):
             if self.siren
             else None
         )
+        local_wavelet_levels = (
+            self.wavelet_levels if self.local_operator == "wavelet" else None
+        )
 
         self.lifting = nn.Conv3d(self.in_channels, width0, kernel_size=1)
         self.encoder0 = SpectralResidualBlock3d(
             width0, local_modes, spectral_rank,
             window_size=window, offset=(0, 0, 0),
             patch_chunk_size=patch_chunk_size, siren=siren_spec,
+            wavelet_levels=local_wavelet_levels,
         )
         self.down0 = nn.Sequential(
             nn.AvgPool3d(kernel_size=2, stride=2),
@@ -533,6 +568,7 @@ class LocalFNO3d(nn.Module):
             width1, local_modes, spectral_rank,
             window_size=window, offset=shifted,
             patch_chunk_size=patch_chunk_size, siren=siren_spec,
+            wavelet_levels=local_wavelet_levels,
         )
         self.down1 = nn.Sequential(
             nn.AvgPool3d(kernel_size=2, stride=2),
@@ -551,12 +587,14 @@ class LocalFNO3d(nn.Module):
             width1, local_modes, spectral_rank,
             window_size=window, offset=(0, 0, 0),
             patch_chunk_size=patch_chunk_size, siren=siren_spec,
+            wavelet_levels=local_wavelet_levels,
         )
         self.fuse0 = nn.Conv3d(width1 + width0, width0, kernel_size=1)
         self.decoder0 = SpectralResidualBlock3d(
             width0, local_modes, spectral_rank,
             window_size=window, offset=shifted,
             patch_chunk_size=patch_chunk_size, siren=siren_spec,
+            wavelet_levels=local_wavelet_levels,
         )
         self.projection = nn.Sequential(
             nn.Conv3d(width0, 2 * width0, kernel_size=1),
