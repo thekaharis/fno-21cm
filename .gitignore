@@ -1,6 +1,7 @@
 # --- Large / external content (never upload) ---------------------------------
 # 21cmFAST lightcone HDF5 files (~13 GB)
 data/
+trainset*.h5*
 
 # Local neuraloperator checkout — third-party library with its own git history.
 # Install via conda/pip, or clone https://github.com/neuraloperator/neuraloperator

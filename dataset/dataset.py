@@ -11,6 +11,11 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 
 from dataset.loader import LightconeFile
+from dataset.dataset_3d import InputFeatures, ParameterNormalization
+from dataset.lightcone_params import PARAM_NAMES
+
+
+SLICE_CACHE_VERSION = 2
 
 
 def _interp_field(lf: LightconeFile, field: str,
@@ -198,10 +203,29 @@ class SliceCache(Dataset):
         the normalization used everywhere else.
     """
 
-    def __init__(self, cache_path: str | Path, density_scale: float = 10.0):
+    def __init__(
+        self,
+        cache_path: str | Path,
+        density_scale: float = 10.0,
+        input_features: InputFeatures | str = "density",
+        parameter_normalization: ParameterNormalization | None = None,
+    ):
         self.cache_path = Path(cache_path)
         self.density_scale = float(density_scale)
+        self.input_features = (
+            input_features
+            if isinstance(input_features, InputFeatures)
+            else InputFeatures(str(input_features))
+        )
+        self.parameter_normalization = parameter_normalization
+        self._normalized_params: np.ndarray | None = None
         with h5py.File(self.cache_path, "r") as f:
+            version = int(f.attrs.get("slice_cache_version", 0))
+            if version != SLICE_CACHE_VERSION:
+                raise ValueError(
+                    f"slice cache version {version} is unsupported; expected "
+                    f"{SLICE_CACHE_VERSION}. Rebuild the cache and every shard."
+                )
             self.x = f["x"][:].astype(np.float32)          # (N, 140, 140)
             self.y = f["y"][:].astype(np.float32)
             self.cone_id = f["cone_id"][:].astype(np.int64)
@@ -209,15 +233,106 @@ class SliceCache(Dataset):
             self.xHI_mean = f["xHI_mean"][:].astype(np.float32)
             self.params = (f["params"][:].astype(np.float32)
                            if "params" in f else None)
+            raw_names = f.attrs.get("param_names", ())
+            self.param_names = tuple(
+                value.decode() if isinstance(value, bytes) else str(value)
+                for value in raw_names
+            )
+            self.selection = {
+                "k_per_cone": int(f.attrs.get("k_per_cone", 0)),
+                "xHI_window": [
+                    float(value) for value in f.attrs.get("xHI_window", ())
+                ],
+            }
+
+        n = len(self.x)
+        for name, values in (
+            ("y", self.y), ("cone_id", self.cone_id), ("z", self.z),
+            ("xHI_mean", self.xHI_mean),
+        ):
+            if len(values) != n:
+                raise ValueError(f"slice-cache {name} length does not match x")
+        if not np.isfinite(self.x).all() or not np.isfinite(self.y).all():
+            raise ValueError("slice cache contains non-finite fields")
+        if not np.isfinite(self.z).all():
+            raise ValueError("slice cache contains non-finite redshifts")
+        if not np.isfinite(self.xHI_mean).all():
+            raise ValueError("slice cache contains non-finite mean neutral fractions")
+        if self.input_features.use_params:
+            if self.params is None:
+                raise ValueError("parameter-conditioned inputs require cache params")
+            if (self.params.ndim != 2 or len(self.params) != n
+                    or self.params.shape[1] != len(PARAM_NAMES)):
+                raise ValueError("slice-cache parameter array has the wrong shape")
+            if not np.isfinite(self.params).all():
+                bad = np.unique(self.cone_id[~np.isfinite(self.params).all(axis=1)])
+                raise ValueError(
+                    "slice-cache parameters contain non-finite values for cone IDs "
+                    f"{bad[:10].tolist()}"
+                )
+            if self.param_names != tuple(PARAM_NAMES):
+                raise ValueError("slice-cache parameter names do not match schema")
+        if self.parameter_normalization is not None:
+            self.set_parameter_normalization(self.parameter_normalization)
+
+        self.in_channels = len(self.input_features.channel_names)
+        self.channel_names = self.input_features.channel_names
 
     def __len__(self) -> int:
         return self.x.shape[0]
 
     def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
+        shape = self.x[i].shape
+        channels: list[np.ndarray] = []
+        if self.input_features.use_density:
+            channels.append(self.x[i] / self.density_scale)
+        if self.input_features.use_redshift:
+            channels.append(np.full(
+                shape, 1.0 / (1.0 + float(self.z[i])), dtype=np.float32
+            ))
+        if self.input_features.use_params:
+            if self._normalized_params is None:
+                raise RuntimeError(
+                    "fit or set parameter normalization before reading samples"
+                )
+            channels.extend(
+                np.full(shape, value, dtype=np.float32)
+                for value in self._normalized_params[i]
+            )
         return {
-            "x": torch.from_numpy(self.x[i][None] / self.density_scale),
+            "x": torch.from_numpy(np.stack(channels)),
             "y": torch.from_numpy(self.y[i][None]),
+            "z": torch.tensor(float(self.z[i]), dtype=torch.float32),
+            "xhi_mean": torch.tensor(
+                float(self.xHI_mean[i]), dtype=torch.float32
+            ),
+            "cone_id": torch.tensor(int(self.cone_id[i]), dtype=torch.int64),
         }
+
+    def fit_parameter_normalization(
+        self, train_indices: Sequence[int]
+    ) -> ParameterNormalization:
+        """Fit once per training cone, not once per correlated slice."""
+        if self.params is None:
+            raise ValueError("slice cache has no parameters")
+        indices = np.asarray(list(train_indices), dtype=np.int64)
+        if indices.size == 0:
+            raise ValueError("cannot fit normalization on an empty split")
+        _, first = np.unique(self.cone_id[indices], return_index=True)
+        cone_rows = indices[first]
+        normalization = ParameterNormalization.fit(
+            self.params, cone_rows, names=PARAM_NAMES
+        )
+        self.set_parameter_normalization(normalization)
+        return normalization
+
+    def set_parameter_normalization(
+        self, normalization: ParameterNormalization
+    ) -> None:
+        if self.params is None:
+            raise ValueError("slice cache has no parameters")
+        self.parameter_normalization = normalization
+        self._normalized_params = normalization.normalize(self.params)
 
 
 def split_by_cone(

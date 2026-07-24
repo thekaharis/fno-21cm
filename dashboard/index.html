@@ -151,7 +151,18 @@ const state = {
   initialized: false,
   page: "all",
 };
-const TASK_LABELS = {"3d": "21cm 3-D", "zre": "z_re maps"};
+const TASK_LABELS = {"3d": "21cm 3-D", "2d": "2-D x_HI", "zre": "z_re maps"};
+const TASK_ORDER = ["3d", "2d", "zre"];
+
+function selectDefaultMetrics(page) {
+  const avail = new Set(visibleRuns().flatMap(r => r.keys));
+  const preferred = page === "3d"
+    ? ["val_l2_rel", "test_l2_rel", "train_err"]
+    : page === "all"
+      ? ["val_l2_rel", "test_l2_rel", "val_l2", "test_l2", "train_err"]
+      : ["val_l2", "test_l2", "train_err"];
+  state.selMetrics = new Set(preferred.filter(m => avail.has(m)));
+}
 
 function visibleRuns() {
   return state.data.runs.filter(r =>
@@ -192,8 +203,7 @@ async function fetchRuns() {
       const newest = [...state.data.runs].sort((a, b) => b.mtime - a.mtime)[0];
       state.selRuns.add(newest.name);
     }
-    const avail = new Set(state.data.runs.flatMap(r => r.keys));
-    DEFAULT_METRICS.filter(m => avail.has(m)).forEach(m => state.selMetrics.add(m));
+    selectDefaultMetrics(state.page);
     $("clip").checked = live.length > 0;
   }
   render();
@@ -229,13 +239,20 @@ function render() {
 function renderTabs() {
   const nav = $("tabs");
   nav.innerHTML = "";
-  const tasks = [...new Set(state.data.runs.map(r => r.task || "3d"))].sort();
+  const tasks = [...new Set(state.data.runs.map(r => r.task || "3d"))].sort((a, b) => {
+    const ai = TASK_ORDER.indexOf(a), bi = TASK_ORDER.indexOf(b);
+    return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi) || a.localeCompare(b);
+  });
   if (tasks.length < 2 && state.page === "all") return;
   for (const t of ["all", ...tasks]) {
     const b = document.createElement("button");
     b.textContent = t === "all" ? "All" : (TASK_LABELS[t] || t);
     b.className = state.page === t ? "on" : "";
-    b.onclick = () => { state.page = t; render(); };
+    b.onclick = () => {
+      state.page = t;
+      selectDefaultMetrics(t);
+      render();
+    };
     nav.appendChild(b);
   }
 }
@@ -323,7 +340,7 @@ function renderLiveStatus(area) {
   let html = "<h2>Live runs</h2>";
   for (const r of live) {
     const p = r.progress;
-    const frac = p ? p.epoch_frac : 0;
+    const frac = p?.epoch_frac ?? 0;
     const curEpoch = r.epochs + 1;  // 1-based epoch currently running
     const totTxt = r.total_epochs || "?";
     const overall = r.total_epochs
@@ -338,7 +355,7 @@ function renderLiveStatus(area) {
     html += bar("overall", overall ?? 0,
       `training · epoch ${curEpoch}/${totTxt}`,
       overall !== null ? (overall * 100).toFixed(1) + "%" : "total unknown");
-    if (p) {
+    if (p?.phase) {
       const stale = p.log_age_s > 600;
       html += bar("phase", p.total ? p.done / p.total : 0,
         `epoch ${curEpoch} · ${p.phase} ${p.done}/${p.total}`,
@@ -346,6 +363,11 @@ function renderLiveStatus(area) {
           ? "finishing / next epoch starting"
           : `ETA ${p.eta_min.toFixed(1)} min · ${p.samples_per_s.toFixed(2)} samp/s` +
             (stale ? " · ⚠ no output for " + Math.round(p.log_age_s / 60) + " min" : ""));
+    } else if (p) {
+      const stale = p.log_age_s > 600;
+      html += `<div class="muted" style="font-size:11px">log matched; this trainer reports progress once per epoch` +
+        (stale ? " · ⚠ no output for " + Math.round(p.log_age_s / 60) + " min" : "") +
+        `</div>`;
     } else {
       html += `<div class="muted" style="font-size:11px">no [phase i/N] progress lines found in logs/</div>`;
     }
@@ -615,8 +637,10 @@ function renderSummary(area, runs) {
   panel.innerHTML = "<h2>Summary</h2>";
   const maxEp = clipEpoch();
   const rows = runs.map(r => {
-    const [bv, be] = best(r, "val_l2_rel", maxEp);
-    const [bt] = best(r, "test_l2_rel", maxEp);
+    const valMetric = r.keys.includes("val_l2_rel") ? "val_l2_rel" : "val_l2";
+    const testMetric = r.keys.includes("test_l2_rel") ? "test_l2_rel" : "test_l2";
+    const [bv, be] = best(r, valMetric, maxEp);
+    const [bt] = best(r, testMetric, maxEp);
     const et = last(r, "epoch_train_time", maxEp);
     return `<tr>
       <td><span style="color:${runColor(r.name)}">■</span> ${r.name}${r.live ? ' <span class="badge">LIVE</span>' : ""}</td>
@@ -631,7 +655,7 @@ function renderSummary(area, runs) {
     </tr>`;
   }).join("");
   panel.innerHTML += `<table>
-    <tr><th>run</th><th>epochs</th><th>best val_l2_rel</th><th>best test_l2_rel</th>
+    <tr><th>run</th><th>epochs</th><th>best val L2</th><th>best test L2</th>
         <th>train_err</th><th>grad norm</th><th>min/epoch</th><th>samp/s</th><th>last write</th></tr>
     ${rows || ""}</table>`;
   area.appendChild(panel);

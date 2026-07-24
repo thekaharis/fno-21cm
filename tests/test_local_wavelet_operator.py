@@ -43,6 +43,13 @@ def test_haar_operator_shape_and_gradients(ndim: int) -> None:
     assert all(weight.grad is not None for weight in operator.detail_weights)
 
 
+def test_haar_operator_rejects_channel_mismatch() -> None:
+    operator = HaarWaveletOperator(channels=2, ndim=2, levels=2)
+
+    with pytest.raises(ValueError, match="expected 2 input channels, got 3"):
+        operator(torch.randn(1, 3, 8, 8))
+
+
 def test_localwno_2d_replaces_only_windowed_branches() -> None:
     model = LocalFNO2d(
         in_channels=3,

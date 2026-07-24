@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""Train a 2-D Fourier Neural Operator on 21cm lightcone slices.
+"""Train a 2-D operator on density -> x_HI lightcone slices.
 
-Mapping:  matter density → neutral fraction (x_HI) at each redshift.
+The cache contains a small number of slices from many independent cones.
+Splits are made by cone before parameter normalization, preventing correlated
+slices or validation parameters from leaking into training.
 
-Normalization: density is divided by a fixed constant (10) in the dataset.
-Neutral fraction is left in its natural [0, 1] range.  No per-file
-statistics are used — the same scale applies to all cosmologies.
+Environment overrides (defaults in parentheses):
+  CACHE_FILE (trainset.h5), INPUT_FEATURES (density_z_params)
+  MODEL_KIND fno | ufno | localfno | localwno (localwno)
+  N_EPOCHS (50), BATCH_SIZE (16), LEARNING_RATE (1e-4)
+  LOSS_L2_WEIGHT (1.0), LOSS_H1_WEIGHT (0.0)
+  CHECKPOINT_DIR (checkpoints/checkpoints_2d_xhi_<kind>)
+  LOCALFNO_BASE_WIDTH (32), LOCALFNO_WINDOW_X/Y (16),
+  LOCALFNO_GLOBAL_MODES_X/Y (16), LOCALFNO_SPECTRAL_RANK (16),
+  LOCALWNO_LEVELS (2)
 """
 
 from __future__ import annotations
 
+import json
+import os
+import random
 import sys
 from pathlib import Path
 
@@ -21,141 +32,505 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from neuralop import H1Loss, LpLoss, Trainer
 from neuralop.models import FNO
-from neuralop import Trainer
-from neuralop import LpLoss, H1Loss
 from neuralop.utils import count_model_params
 
-# Log which neuralop was actually used (handy when reading the SLURM job log).
 import neuralop as _neuralop
-print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
 from dataset.dataset import SliceCache, split_by_cone
 from losses import AbsoluteLoss, WeightedLoss
 from modeling import TrainerModel
+from util.run_metadata import write_run_metadata
+
+print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
 
-# ------------------------------------------------------------------ config
-# Pre-extracted slice cache from build_trainset.py (few slices per cone, many
-# cones). Run `python -m dataset.build_trainset --data <lightcones> --out trainset.h5`
-# once before training.
-CACHE_FILE = Path("trainset.h5")
+CACHE_FILE = Path(os.environ.get("CACHE_FILE", "trainset.h5"))
+INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_z_params").lower()
+MODEL_KIND = os.environ.get("MODEL_KIND", "localwno").lower()
 
-N_MODES = (32, 32)
-HIDDEN_CHANNELS = 64
-N_LAYERS = 4
-BATCH_SIZE = 32
-LEARNING_RATE = 5e-4
-WEIGHT_DECAY = 1e-5
-N_EPOCHS = 100
+N_MODES = (
+    int(os.environ.get("N_MODES_X", "32")),
+    int(os.environ.get("N_MODES_Y", "32")),
+)
+HIDDEN_CHANNELS = int(os.environ.get("HIDDEN_CHANNELS", "64"))
+N_LAYERS = int(os.environ.get("N_LAYERS", "4"))
+UFNO_WIDTH = int(os.environ.get("UFNO_WIDTH", "32"))
+UFNO_NORM = os.environ.get("UFNO_NORM", "batchnorm").lower()
+LOCALFNO_BASE_WIDTH = int(os.environ.get("LOCALFNO_BASE_WIDTH", "32"))
+LOCALFNO_WINDOW = (
+    int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
+    int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
+)
+LOCALFNO_MODES = (
+    int(os.environ.get("LOCALFNO_MODES_X", "6")),
+    int(os.environ.get("LOCALFNO_MODES_Y", "6")),
+)
+LOCALFNO_GLOBAL_MODES = (
+    int(os.environ.get("LOCALFNO_GLOBAL_MODES_X", "16")),
+    int(os.environ.get("LOCALFNO_GLOBAL_MODES_Y", "16")),
+)
+LOCALFNO_SPECTRAL_RANK = int(
+    os.environ.get("LOCALFNO_SPECTRAL_RANK", "16")
+)
+LOCALFNO_PATCH_CHUNK_SIZE = int(
+    os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "32")
+)
+LOCALWNO_LEVELS = int(os.environ.get("LOCALWNO_LEVELS", "2"))
 
-DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
+LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "1e-4"))
+WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-5"))
+N_EPOCHS = int(os.environ.get("N_EPOCHS", "50"))
+EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
+LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "1.0"))
+LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.0"))
 
-# Train / val / test split: seeded shuffle over cones (~80 / 10 / 10).
-# Splitting by cone (not by slice) prevents correlated slices from the same
-# lightcone leaking across splits.  See dataset.split_by_cone.
-SPLIT_SEED = 42
-VAL_FRACTION = 0.1
-TEST_FRACTION = 0.1
+SPLIT_SEED = int(os.environ.get("SPLIT_SEED", "42"))
+RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
+VAL_FRACTION = float(os.environ.get("VAL_FRACTION", "0.1"))
+TEST_FRACTION = float(os.environ.get("TEST_FRACTION", "0.1"))
+
+_KIND_SUFFIX = {
+    "fno": "fno",
+    "ufno": "ufno",
+    "localfno": "localfno",
+    "localwno": "localwno",
+}
+CHECKPOINT_DIR = Path(os.environ.get(
+    "CHECKPOINT_DIR",
+    f"checkpoints/checkpoints_2d_xhi_{_KIND_SUFFIX.get(MODEL_KIND, MODEL_KIND)}",
+))
+RESUME_DIR = os.environ.get("RESUME_DIR") or None
+DEVICE = os.environ.get(
+    "DEVICE",
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu",
+)
 
 
-# ------------------------------------------------------------------ main
-def main():
-    # ------------------------------------------------- 1. load slice cache
-    if not CACHE_FILE.exists():
-        print(f"Slice cache {CACHE_FILE} not found. "
-              f"Run python -m dataset.build_trainset first.", file=sys.stderr)
-        sys.exit(1)
-    print(f"Loading slice cache {CACHE_FILE} ...")
-    cache = SliceCache(CACHE_FILE)
-    n_cones = len(np.unique(cache.cone_id))
-    print(f"Total slices: {len(cache)}  ({n_cones} cones)")
+class SliceLoggingTrainer(Trainer):
+    """Single-process trainer with dashboard-compatible JSONL metrics."""
 
-    # ------------------------------------------------- 2. split by cone
-    train_ds, val_ds, test_ds = split_by_cone(
-        cache, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION, seed=SPLIT_SEED,
-    )
+    def __init__(self, *args, metrics_path=None, append=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.metrics_path = Path(metrics_path) if metrics_path else None
+        if self.metrics_path is not None:
+            self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            if not append:
+                self.metrics_path.unlink(missing_ok=True)
+        self._last_train: dict | None = None
 
-    def _n_cones(ds):
-        return len(np.unique(cache.cone_id[ds.indices]))
+    def train_one_epoch(self, epoch, train_loader, training_loss):
+        out = super().train_one_epoch(epoch, train_loader, training_loss)
+        train_err, avg_loss, _avg_lasso, elapsed = out
+        row = {
+            "epoch": int(epoch),
+            "train_err": float(train_err),
+            "avg_loss": float(avg_loss),
+            "epoch_train_time": float(elapsed),
+            "train_samples_per_second": (
+                len(train_loader.dataset) / float(elapsed)
+                if elapsed > 0 else 0.0
+            ),
+        }
+        if hasattr(training_loss, "pop_term_means"):
+            row.update({
+                f"train_{name}_term": float(value)
+                for name, value in training_loss.pop_term_means().items()
+            })
+        self._last_train = row
+        if self.eval_interval and epoch % self.eval_interval != 0:
+            self._flush_row({})
+        return out
 
-    print(f"Train: {len(train_ds)} slices ({_n_cones(train_ds)} cones)")
-    print(f"Val:   {len(val_ds)} slices ({_n_cones(val_ds)} cones)")
-    print(f"Test:  {len(test_ds)} slices ({_n_cones(test_ds)} cones)")
+    def evaluate_all(self, *args, **kwargs):
+        metrics = super().evaluate_all(*args, **kwargs)
+        self._flush_row({key: float(value) for key, value in metrics.items()})
+        return metrics
 
-    # ------------------------------------------------- 4. dataloaders
-    dl_kwargs = dict(batch_size=BATCH_SIZE, num_workers=0, pin_memory=(DEVICE != "cpu"))
-    train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
-    val_loader = DataLoader(val_ds, shuffle=False, **dl_kwargs)
-    test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
-    test_loaders = {"val": val_loader, "test": test_loader}
+    def resume_state_from_dir(self, save_dir):
+        super().resume_state_from_dir(save_dir)
+        # neuralop manifests store the epoch that just completed.
+        self.start_epoch += 1
+        if self.verbose:
+            print(f"Continuing with epoch {self.start_epoch}")
 
-    # ------------------------------------------------- 5. model
-    fno = FNO(
+    def _flush_row(self, eval_metrics: dict) -> None:
+        if self.metrics_path is None or self._last_train is None:
+            return
+        with open(self.metrics_path, "a") as handle:
+            handle.write(json.dumps({**self._last_train, **eval_metrics}) + "\n")
+
+
+def _seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def build_2d_model(kind: str, in_channels: int):
+    """Build a 2-D x_HI model and its serialized configuration."""
+    if kind not in _KIND_SUFFIX:
+        raise ValueError(f"MODEL_KIND must be one of {sorted(_KIND_SUFFIX)}")
+    if kind == "ufno":
+        from models_zre_2d import UFNO2d
+
+        model = UFNO2d(
+            modes1=N_MODES[0], modes2=N_MODES[1], width=UFNO_WIDTH,
+            in_channels=in_channels, out_channels=1, sigmoid=True,
+            norm=UFNO_NORM,
+        )
+        config = {
+            "kind": kind, "n_modes": list(N_MODES),
+            "in_channels": in_channels, "out_channels": 1,
+            "ufno_width": UFNO_WIDTH, "ufno_norm": UFNO_NORM,
+        }
+        description = (
+            f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} norm={UFNO_NORM}"
+        )
+        return model, config, description
+    if kind in {"localfno", "localwno"}:
+        from models_zre_2d import LocalFNO2d
+
+        wavelet = kind == "localwno"
+        model = LocalFNO2d(
+            in_channels=in_channels,
+            out_channels=1,
+            base_width=LOCALFNO_BASE_WIDTH,
+            local_window=LOCALFNO_WINDOW,
+            local_modes=LOCALFNO_MODES,
+            global_modes=LOCALFNO_GLOBAL_MODES,
+            spectral_rank=LOCALFNO_SPECTRAL_RANK,
+            patch_chunk_size=LOCALFNO_PATCH_CHUNK_SIZE,
+            output_sigmoid=True,
+            local_operator="wavelet" if wavelet else "fourier",
+            wavelet_levels=LOCALWNO_LEVELS,
+        )
+        config = {
+            "kind": kind,
+            "in_channels": in_channels,
+            "out_channels": 1,
+            "localfno_base_width": LOCALFNO_BASE_WIDTH,
+            "localfno_window": list(LOCALFNO_WINDOW),
+            "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
+            "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK,
+            "localfno_patch_chunk_size": LOCALFNO_PATCH_CHUNK_SIZE,
+        }
+        if wavelet:
+            config.update(localwno_levels=LOCALWNO_LEVELS,
+                          localwno_wavelet="haar")
+        else:
+            config["localfno_modes"] = list(LOCALFNO_MODES)
+        local = (
+            f"wavelet=haar levels={LOCALWNO_LEVELS}"
+            if wavelet else f"local-modes={LOCALFNO_MODES}"
+        )
+        description = (
+            f"{'LocalWNO2d' if wavelet else 'LocalFNO2d'} "
+            f"window={LOCALFNO_WINDOW} {local} "
+            f"global-modes={LOCALFNO_GLOBAL_MODES} "
+            f"width={LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK}"
+        )
+        return model, config, description
+
+    model = FNO(
         n_modes=N_MODES,
         hidden_channels=HIDDEN_CHANNELS,
-        in_channels=1,
+        in_channels=in_channels,
         out_channels=1,
         n_layers=N_LAYERS,
         projection_channel_ratio=2,
         positional_embedding="grid",
     )
-    model = TrainerModel(fno).to(DEVICE)
-    print(f"Model: {count_model_params(model.fno):,} parameters")
-    print(model)
-
-    # ------------------------------------------------- 6. optimizer / scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_EPOCHS)
-
-    # ------------------------------------------------- 7. losses
-    # Both terms ABSOLUTE.  x_HI spans [0, 1] and is *zero* over fully-ionized
-    # regions, so a relative L2 (which divides by ||y||) blows up to millions on
-    # those slices and wrecks training.  Absolute L2 is well scaled here; the
-    # absolute H1 term adds gradient sensitivity -> sharper bubble edges and
-    # discourages the model from collapsing to a constant prediction.
-    l2_loss = LpLoss(d=2, p=2)
-    h1_loss = H1Loss(d=2)
-    train_loss_fn = WeightedLoss(
-        (0.5, AbsoluteLoss(l2_loss)),
-        (0.5, AbsoluteLoss(h1_loss)),
-    )
-    eval_losses = {
-        "l2": AbsoluteLoss(l2_loss),
-        "h1": AbsoluteLoss(h1_loss),
+    config = {
+        "kind": kind,
+        "in_channels": in_channels,
+        "out_channels": 1,
+        "n_modes": list(N_MODES),
+        "hidden_channels": HIDDEN_CHANNELS,
+        "n_layers": N_LAYERS,
     }
+    description = (
+        f"FNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} layers={N_LAYERS}"
+    )
+    return model, config, description
 
-    # ------------------------------------------------- 8. trainer
-    trainer = Trainer(
+
+def build_losses():
+    if LOSS_L2_WEIGHT <= 0 and LOSS_H1_WEIGHT <= 0:
+        raise ValueError("at least one loss weight must be positive")
+    l2 = AbsoluteLoss(LpLoss(d=2, p=2))
+    h1 = AbsoluteLoss(H1Loss(d=2))
+    training = WeightedLoss(
+        (LOSS_L2_WEIGHT, l2),
+        (LOSS_H1_WEIGHT, h1),
+        term_names=("l2", "h1"),
+    )
+    return training, {"l2": l2, "h1": h1}
+
+
+def _gradient_error(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    error = prediction - target
+    dx = torch.roll(error, -1, dims=-2) - error
+    dy = torch.roll(error, -1, dims=-1) - error
+    return dx.square().sum() + dy.square().sum()
+
+
+@torch.no_grad()
+def final_report(model, loaders, device) -> dict[str, float]:
+    """Pixel and high-frequency metrics for resolving transverse detail."""
+    model.eval()
+    report: dict[str, float] = {}
+    for split, loader in loaders.items():
+        squared_error = gradient_error = mean_error = 0.0
+        pixel_count = gradient_count = sample_count = 0
+        pred_power = truth_power = cross_power = 0.0
+        for sample in loader:
+            x = sample["x"].to(device)
+            target = sample["y"].to(device)
+            prediction = model(x)
+            error = prediction - target
+            squared_error += float(error.square().sum())
+            pixel_count += error.numel()
+            gradient_error += float(_gradient_error(prediction, target))
+            gradient_count += 2 * error.numel()
+            mean_error += float(torch.abs(
+                prediction.mean(dim=(-2, -1)) - target.mean(dim=(-2, -1))
+            ).sum())
+            sample_count += prediction.shape[0]
+
+            height, width = prediction.shape[-2:]
+            fx = torch.fft.fftfreq(height, device=prediction.device)[:, None]
+            fy = torch.fft.rfftfreq(width, device=prediction.device)[None, :]
+            high_k = torch.sqrt(fx.square() + fy.square()) >= 0.25
+            pred_fft = torch.fft.rfft2(prediction, norm="ortho")
+            truth_fft = torch.fft.rfft2(target, norm="ortho")
+            pred_high = pred_fft[..., high_k]
+            truth_high = truth_fft[..., high_k]
+            pred_power += float(pred_high.abs().square().sum())
+            truth_power += float(truth_high.abs().square().sum())
+            cross_power += float(
+                (pred_high * truth_high.conj()).real.sum()
+            )
+
+        report[f"{split}_rmse"] = float(np.sqrt(squared_error / pixel_count))
+        report[f"{split}_gradient_rmse"] = float(
+            np.sqrt(gradient_error / gradient_count)
+        )
+        report[f"{split}_mean_xhi_mae"] = mean_error / sample_count
+        report[f"{split}_high_k_power_ratio"] = pred_power / max(
+            truth_power, 1e-12
+        )
+        report[f"{split}_high_k_cross_correlation"] = cross_power / max(
+            np.sqrt(pred_power * truth_power), 1e-12
+        )
+    return report
+
+
+@torch.no_grad()
+def save_test_figure(model, dataset, test_ds, device, out_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    count = min(6, len(test_ds.indices))
+    picker = np.random.default_rng(SPLIT_SEED)
+    indices = picker.choice(test_ds.indices, size=count, replace=False)
+    fig, axes = plt.subplots(count, 3, figsize=(10, 3.1 * count), squeeze=False)
+    model.eval()
+    for row, index in enumerate(indices):
+        sample = dataset[int(index)]
+        prediction = model(sample["x"][None].to(device))[0, 0].cpu().numpy()
+        truth = sample["y"][0].numpy()
+        error = prediction - truth
+        panels = (
+            (truth, "viridis", 0.0, 1.0, "truth"),
+            (prediction, "viridis", 0.0, 1.0, "prediction"),
+            (error, "RdBu_r", -max(abs(error.min()), abs(error.max())),
+             max(abs(error.min()), abs(error.max())), "error"),
+        )
+        for col, (image, cmap, vmin, vmax, title) in enumerate(panels):
+            axis = axes[row, col]
+            rendered = axis.imshow(image, origin="lower", cmap=cmap,
+                                   vmin=vmin, vmax=vmax)
+            prefix = (
+                f"cone {int(sample['cone_id'])}, z={float(sample['z']):.2f}\n"
+                if col == 0 else ""
+            )
+            axis.set_title(prefix + title)
+            axis.set_xticks([])
+            axis.set_yticks([])
+            fig.colorbar(rendered, ax=axis, fraction=0.046)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _cone_ids(cache: SliceCache, subset) -> list[int]:
+    return sorted(np.unique(cache.cone_id[subset.indices]).astype(int).tolist())
+
+
+def main() -> None:
+    if not CACHE_FILE.is_file():
+        print(
+            f"Slice cache {CACHE_FILE} not found. Run "
+            "python -m dataset.build_trainset first.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if MODEL_KIND not in _KIND_SUFFIX:
+        raise SystemExit(f"MODEL_KIND must be one of {sorted(_KIND_SUFFIX)}")
+
+    _seed_everything(RUN_SEED)
+    cache = SliceCache(CACHE_FILE, input_features=INPUT_FEATURES)
+    train_ds, val_ds, test_ds = split_by_cone(
+        cache, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
+        seed=SPLIT_SEED,
+    )
+    normalization = None
+    if cache.input_features.use_params:
+        normalization = cache.fit_parameter_normalization(train_ds.indices)
+
+    train_cones = _cone_ids(cache, train_ds)
+    val_cones = _cone_ids(cache, val_ds)
+    test_cones = _cone_ids(cache, test_ds)
+    if set(train_cones) & set(val_cones) or set(train_cones) & set(test_cones):
+        raise RuntimeError("cone leakage detected between splits")
+
+    print(f"Cache: {CACHE_FILE} ({len(cache)} slices, "
+          f"{len(np.unique(cache.cone_id))} cones)")
+    print(f"Split: {len(train_ds)} / {len(val_ds)} / {len(test_ds)} slices")
+    print(f"Input: {cache.in_channels} channels {cache.channel_names}")
+
+    loader_kwargs = {
+        "batch_size": BATCH_SIZE,
+        "num_workers": 0,
+        "pin_memory": DEVICE == "cuda",
+    }
+    train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_ds, shuffle=False, **loader_kwargs)
+    test_loaders = {"val": val_loader, "test": test_loader}
+
+    inner, model_config, description = build_2d_model(
+        MODEL_KIND, cache.in_channels
+    )
+    model = TrainerModel(inner).to(DEVICE)
+    print(f"Model: {description} -> {count_model_params(model.fno):,} parameters")
+
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=N_EPOCHS
+    )
+    training_loss, eval_losses = build_losses()
+
+    metadata = {
+        "task": "2d",
+        "model_config": model_config,
+        "input_features": {
+            "name": INPUT_FEATURES,
+            "in_channels": cache.in_channels,
+            "channel_names": list(cache.channel_names),
+        },
+        "target": {
+            "name": "x_HI",
+            "field": "neutral_fraction",
+            "spatial_dimensions": 2,
+        },
+        "dataset": {
+            "cache_file": str(CACHE_FILE.resolve()),
+            **cache.selection,
+        },
+        "parameter_normalization": (
+            normalization.to_dict() if normalization is not None else None
+        ),
+        "split": {
+            "seed": SPLIT_SEED,
+            "val_fraction": VAL_FRACTION,
+            "test_fraction": TEST_FRACTION,
+            "train_cone_ids": train_cones,
+            "val_cone_ids": val_cones,
+            "test_cone_ids": test_cones,
+        },
+        "training": {
+            "epochs": N_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
+            "weight_decay": WEIGHT_DECAY,
+            "eval_interval": EVAL_INTERVAL,
+            "loss_weights": {
+                "l2": LOSS_L2_WEIGHT,
+                "h1": LOSS_H1_WEIGHT,
+            },
+            "loss_modes": {"l2": "absolute", "h1": "absolute"},
+            "run_seed": RUN_SEED,
+            "resume_dir": RESUME_DIR,
+        },
+    }
+    write_run_metadata(CHECKPOINT_DIR, metadata)
+
+    trainer = SliceLoggingTrainer(
         model=model,
         n_epochs=N_EPOCHS,
         device=DEVICE,
         data_processor=None,
         wandb_log=False,
-        eval_interval=5,
+        eval_interval=EVAL_INTERVAL,
         use_distributed=False,
         verbose=True,
+        metrics_path=CHECKPOINT_DIR / "metrics.jsonl",
+        append=RESUME_DIR is not None,
     )
 
-    print(f"\nDevice: {DEVICE}")
-    print(f"Batch size: {BATCH_SIZE}, LR: {LEARNING_RATE}")
-    print(f"Epochs: {N_EPOCHS}")
-    print(f"Modes: {N_MODES}, hidden: {HIDDEN_CHANNELS}, pos-emb: grid")
-    print(f"Loss: 0.5*absL2 + 0.5*absH1")
-    print(f"Normalization: density / 10 (physics-based, fixed)")
-
-    # ------------------------------------------------- 9. train
+    print(f"Device: {DEVICE}; batch={BATCH_SIZE}; epochs={N_EPOCHS}; "
+          f"lr={LEARNING_RATE:g}")
+    print(f"Loss: {LOSS_L2_WEIGHT:g}*absL2 + "
+          f"{LOSS_H1_WEIGHT:g}*absH1")
     trainer.train(
         train_loader=train_loader,
         test_loaders=test_loaders,
         optimizer=optimizer,
         scheduler=scheduler,
         regularizer=False,
-        training_loss=train_loss_fn,
+        training_loss=training_loss,
         eval_losses=eval_losses,
-        save_every=10,
-        save_dir="./checkpoints",
+        save_every=max(1, N_EPOCHS // 4),
+        save_dir=str(CHECKPOINT_DIR),
+        resume_from_dir=RESUME_DIR,
     )
+
+    # Periodic resumable state may lag the final epoch. Preserve the exact
+    # model evaluated below before running the comparatively expensive report.
+    model.save_checkpoint(CHECKPOINT_DIR, "final_model")
+    torch.save(optimizer.state_dict(), CHECKPOINT_DIR / "optimizer.pt")
+    torch.save(scheduler.state_dict(), CHECKPOINT_DIR / "scheduler.pt")
+
+    loaders = {"train": train_loader, "val": val_loader, "test": test_loader}
+    report = final_report(model, loaders, DEVICE)
+    report.update(
+        model_kind=MODEL_KIND,
+        model_description=description,
+        n_epochs=N_EPOCHS,
+        n_slices=len(cache),
+        n_cones=len(np.unique(cache.cone_id)),
+    )
+    report_path = CHECKPOINT_DIR / "final_report.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    figure_path = CHECKPOINT_DIR / "xhi2d_test_prediction.png"
+    save_test_figure(model, cache, test_ds, DEVICE, figure_path)
+    print(f"Final report: {report_path}")
+    print(f"Test figure: {figure_path}")
+    print(f"Test RMSE: {report['test_rmse']:.6f}; "
+          f"gradient RMSE: {report['test_gradient_rmse']:.6f}; "
+          f"high-k correlation: {report['test_high_k_cross_correlation']:.6f}")
 
 
 if __name__ == "__main__":

@@ -103,6 +103,9 @@ LOCALFNO_MODES = (
     int(os.environ.get("LOCALFNO_MODES_Y", "6")),
 )
 LOCALFNO_SPECTRAL_RANK = int(os.environ.get("LOCALFNO_SPECTRAL_RANK", "16"))
+LOCALFNO_PATCH_CHUNK_SIZE = int(
+    os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "32")
+)
 LOCALWNO_LEVELS = int(os.environ.get("LOCALWNO_LEVELS", "2"))
 SIREN_HIDDEN_DIM = int(os.environ.get("SIREN_HIDDEN_DIM", "64"))
 SIREN_OMEGA = float(os.environ.get("SIREN_OMEGA", "30.0"))
@@ -221,6 +224,13 @@ class ZreLoggingTrainer(Trainer):
         self._flush_row({k: float(v) for k, v in eval_metrics.items()})
         return eval_metrics
 
+    def resume_state_from_dir(self, save_dir):
+        super().resume_state_from_dir(save_dir)
+        # neuralop manifests store the epoch that just completed.
+        self.start_epoch += 1
+        if self.verbose:
+            print(f"Continuing with epoch {self.start_epoch}")
+
     def _flush_row(self, eval_metrics: dict) -> None:
         if self.metrics_path is None or self._last_train is None:
             return
@@ -259,6 +269,7 @@ def build_zre_model(kind: str, in_channels: int):
             local_modes=LOCALFNO_MODES,
             global_modes=LOCALFNO_GLOBAL_MODES,
             spectral_rank=LOCALFNO_SPECTRAL_RANK,
+            patch_chunk_size=LOCALFNO_PATCH_CHUNK_SIZE,
             output_sigmoid=True,
             siren=siren,
             siren_hidden_dim=SIREN_HIDDEN_DIM,
@@ -289,9 +300,10 @@ def build_zre_model(kind: str, in_channels: int):
         )
         desc = (f"{name} window={LOCALFNO_WINDOW} "
                 f"{local_modes_desc}"
-                f"global-modes={LOCALFNO_GLOBAL_MODES} "
-                f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
-                f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK}"
+                 f"global-modes={LOCALFNO_GLOBAL_MODES} "
+                 f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
+                 f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
+                 f"chunk={LOCALFNO_PATCH_CHUNK_SIZE}"
                 f"{siren_desc}{wavelet_desc} sigmoid-output")
         return model, desc
     if kind == "sirenfno":
@@ -578,6 +590,8 @@ def main() -> None:
         # dashboard), leaving the job log as the only record of what ran.
         "model_config": {
             "kind": MODEL_KIND,
+            "in_channels": dataset.in_channels,
+            "out_channels": 1,
             "n_modes": list(N_MODES),
             "hidden_channels": HIDDEN_CHANNELS,
             "n_layers": N_LAYERS,
@@ -587,7 +601,8 @@ def main() -> None:
                 "localfno_window": list(LOCALFNO_WINDOW),
                 "localfno_modes": list(LOCALFNO_MODES),
                 "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
-                "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK}
+                "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK,
+                "localfno_patch_chunk_size": LOCALFNO_PATCH_CHUNK_SIZE}
                if MODEL_KIND in ("localfno", "localsirenfno", "localwno") else {}),
             **({"localwno_levels": LOCALWNO_LEVELS,
                 "localwno_wavelet": "haar"}
@@ -652,6 +667,10 @@ def main() -> None:
         save_dir=str(CHECKPOINT_DIR),
         resume_from_dir=RESUME_DIR,
     )
+
+    model.save_checkpoint(CHECKPOINT_DIR, "final_model")
+    torch.save(optimizer.state_dict(), CHECKPOINT_DIR / "optimizer.pt")
+    torch.save(scheduler.state_dict(), CHECKPOINT_DIR / "scheduler.pt")
 
     loaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     report = _final_report(model, loaders, dataset, DEVICE)

@@ -96,6 +96,10 @@ class HaarWaveletOperator(nn.Module):
                 f"expected a {self.ndim + 2}-D channels-first tensor, "
                 f"got shape {tuple(x.shape)}"
             )
+        if x.shape[1] != self.channels:
+            raise ValueError(
+                f"expected {self.channels} input channels, got {x.shape[1]}"
+            )
         divisor = 2**self.levels
         if any(size % divisor for size in x.shape[-self.ndim:]):
             raise ValueError(

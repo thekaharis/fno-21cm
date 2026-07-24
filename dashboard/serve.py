@@ -129,6 +129,7 @@ def read_label(run_dir):
 PROGRESS_RE = re.compile(
     r"\[(\w+)\s+(\d+)/(\d+)\]\s+([\d.]+)\s*samples/s.*?elapsed\s+([\d.]+)s\s+ETA\s+([\d.]+)")
 CKPT_DIR_RE = re.compile(r"CHECKPOINT_DIR:\s*(\S+)")
+JOB_ID_RE = re.compile(r"-(\d+)\.out$")
 # rough share of an epoch spent in each phase (train dominates at ~4500s vs ~2x125s)
 PHASE_SPAN = {"train": (0.0, 0.95), "val": (0.95, 0.025), "test": (0.975, 0.025)}
 
@@ -172,11 +173,16 @@ def read_task(run_dir, name):
     try:
         meta = json.loads((run_dir / "run_metadata.json").read_text())
         task = meta.get("task")
-        if isinstance(task, str) and task:
-            return task
+        if isinstance(task, str) and task.strip():
+            return task.strip()
     except (OSError, json.JSONDecodeError):
         pass
-    return "zre" if "zre" in name else "3d"
+    lowered = name.lower()
+    if "zre" in lowered:
+        return "zre"
+    if "2d" in lowered or "xhi_2d" in lowered:
+        return "2d"
+    return "3d"
 
 
 def read_total_epochs(run_dir):
@@ -224,9 +230,25 @@ def find_progress(run_dir, root, metrics_mtime):
             tail = f.read().decode(errors="replace")
     except OSError:
         return None
+    relative_log = str(log.relative_to(root))
+    job_match = JOB_ID_RE.search(log.name)
+    log_info = {
+        "phase": None,
+        "done": None,
+        "total": None,
+        "samples_per_s": None,
+        "elapsed_s": None,
+        "eta_min": None,
+        "epoch_frac": 0.0,
+        "log": relative_log,
+        "job_id": int(job_match.group(1)) if job_match else None,
+        "log_age_s": round(time.time() - st.st_mtime, 1),
+    }
     matches = PROGRESS_RE.findall(tail)
     if not matches:
-        return None
+        # Some trainers only print one line per epoch. Keep the matched SLURM
+        # log visible even though a within-epoch progress bar is unavailable.
+        return log_info
     phase, done, total, sps, elapsed, eta_min = matches[-1]
     done, total = int(done), int(total)
     off, span = PHASE_SPAN.get(phase, (0.0, 1.0))
@@ -236,6 +258,7 @@ def find_progress(run_dir, root, metrics_mtime):
     if st.st_mtime <= metrics_mtime:
         epoch_frac = 0.0
     return {
+        **log_info,
         "phase": phase,
         "done": done,
         "total": total,
@@ -243,8 +266,6 @@ def find_progress(run_dir, root, metrics_mtime):
         "elapsed_s": float(elapsed),
         "eta_min": float(eta_min),
         "epoch_frac": epoch_frac,
-        "log": log.name,
-        "log_age_s": round(time.time() - st.st_mtime, 1),
     }
 
 

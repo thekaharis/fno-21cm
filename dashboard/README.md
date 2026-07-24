@@ -1,5 +1,9 @@
 # Training metrics dashboard
 
+Runs are grouped into independent tabs by the `task` field in
+`run_metadata.json`: `3d` for full x_HI lightcones, `2d` for transverse x_HI
+slices, and `zre` for reionization-redshift maps.
+
 Live-updating dashboard for comparing `metrics.jsonl` files across runs.
 Python stdlib only — no installs, no internet needed from the cluster.
 
