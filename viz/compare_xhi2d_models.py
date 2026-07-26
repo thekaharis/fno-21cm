@@ -28,13 +28,18 @@ from modeling import LOCAL_GLOBAL_KINDS, TrainerModel, load_checkpoint
 from models_zre_2d import LocalFNO2d, UFNO2d
 
 
-ARCHITECTURE_ORDER = ("localwno", "localfno", "ufno")
+ARCHITECTURE_ORDER = ("localwno", "localfno", "ufno", "localop")
 ARCHITECTURE_NAMES = {
     "localwno": "LocalWNO",
     "localfno": "LocalFNO",
     "ufno": "UFNO",
+    # Freely-paired local/global operator slots (operators.py); covers e.g.
+    # the Walsh-Hadamard sweep, which all share kind="localop" and are
+    # distinguished only by local_operator/global_operator in run_metadata.
+    "localop": "LocalOp",
 }
 ARCHITECTURE_COLORS = {
+    "localop": "#e07a5f",
     "localwno": "#168aad",
     "localfno": "#f4a261",
     "ufno": "#7b2cbf",
@@ -110,6 +115,7 @@ def load_run(label: str, path: Path) -> Run | None:
 
 def build_model(config: dict) -> TrainerModel:
     kind = str(config["kind"])
+    contrast_mode = str(config.get("contrast_mode", "off"))
     in_channels = int(config["in_channels"])
     out_channels = int(config.get("out_channels", 1))
     if kind == "ufno":
@@ -146,6 +152,9 @@ def build_model(config: dict) -> TrainerModel:
         )
     else:
         raise ValueError(f"unsupported model kind {kind!r}")
+    if contrast_mode != "off":
+        from contrast import ContrastComposed
+        inner = ContrastComposed(inner, contrast_mode)
     return TrainerModel(inner)
 
 

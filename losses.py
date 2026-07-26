@@ -529,3 +529,209 @@ class LightconeH1Loss:
         else:
             ratio = error / norm.clamp_min(eps)
         return self._reduce(ratio).squeeze()
+
+
+def _edge_measure(field: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """|grad field| on periodic transverse axes, flattened per sample."""
+    dx = torch.roll(field, shifts=-1, dims=-2) - field
+    dy = torch.roll(field, shifts=-1, dims=-1) - field
+    magnitude = torch.sqrt(dx * dx + dy * dy + eps)
+    return magnitude.flatten(start_dim=-2)
+
+
+class SlicedWassersteinEdges:
+    """Sliced 1-Wasserstein distance between predicted and true edge measures.
+
+    The edge measure is ``|grad x_HI|`` normalized to unit mass per sample: a
+    probability distribution over *where* the field's transitions sit. Scoring
+    it with optimal transport rather than pointwise is the whole point. A
+    pointwise gradient loss (H1) is minimized by ``E[grad]``, which turns a
+    tall narrow ridge into a low wide bump whenever the edge position is
+    uncertain -- it rewards exactly the blurring we are trying to remove. The
+    Wasserstein barycenter of shifted sharp edges is still a sharp edge, so
+    the cost grows with *displacement* while smearing mass away from the true
+    boundary increases it.
+
+    The exact 2-D transport is replaced by the standard sliced approximation
+    (Bonneel et al.): project pixel coordinates onto random unit directions
+    and compare 1-D CDFs, which is the exact 1-D Wasserstein along each
+    direction. On a fixed grid the projected coordinates are constant, so the
+    per-direction sort order is precomputed once per spatial shape; each call
+    is then a gather, a cumsum and an L1 difference, with no sorting in the
+    training loop.
+
+    Projections are scaled to unit extent, so the returned value is a mean
+    transport distance in units of the box width and is directly comparable
+    across resolutions.
+    """
+
+    def __init__(
+        self,
+        n_directions: int = 48,
+        seed: int = 0,
+        eps: float = 1e-8,
+    ):
+        if int(n_directions) <= 0:
+            raise ValueError("n_directions must be positive")
+        self.n_directions = int(n_directions)
+        self.seed = int(seed)
+        self.eps = float(eps)
+        # (shape, device, dtype) -> (order, dt); deterministic in `seed`, so
+        # every rank and every restart slices along the same directions.
+        self._cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _projection(self, field: torch.Tensor):
+        height, width = int(field.shape[-2]), int(field.shape[-1])
+        key = (height, width, field.device, field.dtype)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        generator = torch.Generator(device="cpu").manual_seed(self.seed)
+        angles = torch.rand(
+            self.n_directions, generator=generator, dtype=torch.float64
+        ) * math.pi
+        rows = torch.arange(height, dtype=torch.float64)
+        cols = torch.arange(width, dtype=torch.float64)
+        grid_y, grid_x = torch.meshgrid(rows, cols, indexing="ij")
+        coordinates = torch.stack(
+            (grid_y.reshape(-1), grid_x.reshape(-1)), dim=0
+        )
+        # (n_directions, n_pixels)
+        projected = (
+            torch.cos(angles)[:, None] * coordinates[0][None, :]
+            + torch.sin(angles)[:, None] * coordinates[1][None, :]
+        )
+        extent = (projected.amax(dim=1) - projected.amin(dim=1)).clamp_min(1.0)
+        projected = projected / extent[:, None]
+
+        order = torch.argsort(projected, dim=1)
+        sorted_projection = torch.gather(projected, 1, order)
+        # Trapezoid widths between consecutive sorted positions; the 1-D
+        # Wasserstein-1 distance is the |CDF difference| integrated over these.
+        dt = (sorted_projection[:, 1:] - sorted_projection[:, :-1])
+
+        order = order.to(field.device)
+        dt = dt.to(device=field.device, dtype=field.dtype)
+        self._cache[key] = (order, dt)
+        return order, dt
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(
+                f"prediction and target shapes differ: {out.shape} != {y.shape}"
+            )
+        order, dt = self._projection(out)
+
+        prediction = _edge_measure(out, self.eps)
+        target = _edge_measure(y, self.eps)
+        # Flatten every leading (batch, channel, ...) axis into one.
+        prediction = prediction.reshape(-1, prediction.shape[-1])
+        target = target.reshape(-1, target.shape[-1])
+
+        # Unit mass per sample: this term scores *where* the edges are, and
+        # leaves *how much* edge there is to the spectral term.
+        prediction = prediction / prediction.sum(dim=-1, keepdim=True).clamp_min(
+            self.eps
+        )
+        target = target / target.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        # (n_samples, n_directions, n_pixels)
+        expanded = order[None, :, :].expand(prediction.shape[0], -1, -1)
+        cdf_prediction = torch.gather(
+            prediction[:, None, :].expand_as(expanded), 2, expanded
+        ).cumsum(dim=-1)[..., :-1]
+        cdf_target = torch.gather(
+            target[:, None, :].expand_as(expanded), 2, expanded
+        ).cumsum(dim=-1)[..., :-1]
+
+        distance = ((cdf_prediction - cdf_target).abs() * dt[None]).sum(dim=-1)
+        return distance.mean()
+
+
+class HighKPowerRatio:
+    """Squared log-ratio of radially binned power above ``k_min``.
+
+    Targets the measured small-scale power deficit directly. Being computed
+    from ``|FFT|**2`` it is translation invariant, so -- unlike any pointwise
+    loss -- it cannot be reduced by hedging on edge position; it only asks
+    that the prediction carry the right *amount* of structure at each scale.
+    Pair it with a positional term (see :class:`SlicedWassersteinEdges`),
+    which is blind to the amplitude this one constrains.
+
+    ``k_min`` is in cycles per pixel (Nyquist = 0.5). The default 0.2
+    corresponds to k ~ 0.9 Mpc^-1 on the production 200 Mpc / 140 px grid,
+    where the cylindrical power-spectrum diagnostics show the deficit setting
+    in.
+    """
+
+    def __init__(
+        self,
+        k_min: float = 0.2,
+        n_bins: int = 12,
+        eps: float = 1e-12,
+    ):
+        if not 0.0 <= float(k_min) < 0.5:
+            raise ValueError("k_min must lie in [0, 0.5) cycles per pixel")
+        if int(n_bins) <= 0:
+            raise ValueError("n_bins must be positive")
+        self.k_min = float(k_min)
+        self.n_bins = int(n_bins)
+        self.eps = float(eps)
+        self._cache: dict[tuple, tuple[torch.Tensor, int]] = {}
+
+    def _bins(self, field: torch.Tensor) -> tuple[torch.Tensor, int]:
+        height, width = int(field.shape[-2]), int(field.shape[-1])
+        key = (height, width, field.device)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        ky = torch.fft.fftfreq(height, dtype=torch.float64)
+        kx = torch.fft.rfftfreq(width, dtype=torch.float64)
+        radius = torch.sqrt(ky[:, None] ** 2 + kx[None, :] ** 2)
+        edges = torch.linspace(
+            self.k_min, float(radius.max()), self.n_bins + 1, dtype=torch.float64
+        )
+        index = torch.bucketize(radius, edges) - 1
+        # Everything below k_min, and the k=0 mode, is excluded.
+        index = torch.where(
+            (radius < self.k_min) | (index >= self.n_bins),
+            torch.full_like(index, -1),
+            index,
+        )
+        index = index.reshape(-1).to(field.device)
+        self._cache[key] = (index, self.n_bins)
+        return index, self.n_bins
+
+    def _binned_power(
+        self, field: torch.Tensor, index: torch.Tensor, n_bins: int
+    ) -> torch.Tensor:
+        centered = field - field.mean(dim=(-2, -1), keepdim=True)
+        spectrum = torch.fft.rfft2(centered, norm="ortho")
+        power = (spectrum.real**2 + spectrum.imag**2).flatten(start_dim=-2)
+        power = power.reshape(-1, power.shape[-1])
+
+        keep = index >= 0
+        selected = index[keep]
+        weights = power[:, keep]
+        totals = torch.zeros(
+            power.shape[0], n_bins, device=field.device, dtype=power.dtype
+        )
+        totals.index_add_(1, selected, weights)
+        counts = torch.zeros(n_bins, device=field.device, dtype=power.dtype)
+        counts.index_add_(0, selected, torch.ones_like(selected, dtype=power.dtype))
+        return totals / counts.clamp_min(1.0)[None, :]
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(
+                f"prediction and target shapes differ: {out.shape} != {y.shape}"
+            )
+        index, n_bins = self._bins(out)
+        power_prediction = self._binned_power(out, index, n_bins)
+        power_target = self._binned_power(y, index, n_bins)
+        ratio = torch.log(
+            (power_prediction + self.eps) / (power_target + self.eps)
+        )
+        return ratio.square().mean()

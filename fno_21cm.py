@@ -9,7 +9,9 @@ Environment overrides (defaults in parentheses):
   CACHE_FILE (trainset.h5), INPUT_FEATURES (density_z_params)
   MODEL_KIND fno | ufno | localfno | localwno | localwhno | localop (localwno)
   N_EPOCHS (50), BATCH_SIZE (16), LEARNING_RATE (1e-4)
-  LOSS_L2_WEIGHT (1.0), LOSS_H1_WEIGHT (0.0)
+  LOSS_L2_WEIGHT (1.0), LOSS_H1_WEIGHT (0.0), LOSS_BCE_WEIGHT (0.0)
+  LOSS_SWD_WEIGHT (0.0), LOSS_HIGHK_WEIGHT (0.0),
+  LOSS_EDGE_WARMUP_EPOCHS (5), SWD_DIRECTIONS (48), HIGHK_MIN (0.2)
   CHECKPOINT_DIR (checkpoints/checkpoints_2d_xhi_<kind>)
   LOCALFNO_BASE_WIDTH (32), LOCALFNO_WINDOW_X/Y (16),
   LOCALFNO_GLOBAL_MODES_X/Y (16), LOCALFNO_SPECTRAL_RANK (16),
@@ -45,7 +47,14 @@ from neuralop.utils import count_model_params
 import neuralop as _neuralop
 
 from dataset.dataset import SliceCache, split_by_cone
-from losses import AbsoluteLoss, WeightedLoss
+from losses import (
+    AbsoluteLoss,
+    BinaryCrossEntropyTerm,
+    HighKPowerRatio,
+    ScheduledWeightedLoss,
+    SlicedWassersteinEdges,
+)
+from contrast import ContrastComposed
 from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
 from util.run_metadata import write_run_metadata
 
@@ -92,6 +101,24 @@ N_EPOCHS = int(os.environ.get("N_EPOCHS", "50"))
 EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "1.0"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.0"))
+# BCE is a confidence regulariser on the [0, 1] x_HI target (see
+# losses.BinaryCrossEntropyTerm / the 3-D pipeline's LOSS_BCE_WEIGHT);
+# 0 by default so existing L2/H1 runs are unaffected.
+LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
+# Edge-sharpness pair: SWD scores *where* the transitions are (optimal
+# transport on |grad|, so it does not reward the positional hedging that
+# makes L2 and H1 blur), HIGHK scores *how much* small-scale power the
+# prediction carries. Both 0 by default. They are ramped in over
+# LOSS_EDGE_WARMUP_EPOCHS -- their gradients are weak and noisy before L2
+# has established rough structure.
+LOSS_SWD_WEIGHT = float(os.environ.get("LOSS_SWD_WEIGHT", "0.0"))
+LOSS_HIGHK_WEIGHT = float(os.environ.get("LOSS_HIGHK_WEIGHT", "0.0"))
+LOSS_EDGE_WARMUP_EPOCHS = int(os.environ.get("LOSS_EDGE_WARMUP_EPOCHS", "5"))
+SWD_DIRECTIONS = int(os.environ.get("SWD_DIRECTIONS", "48"))
+HIGHK_MIN = float(os.environ.get("HIGHK_MIN", "0.2"))
+# Learnable output contrast map (contrast.py): off | global | head.
+# Initialised at the identity, so "global"/"head" start from the baseline.
+CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
 
 SPLIT_SEED = int(os.environ.get("SPLIT_SEED", "42"))
 RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
@@ -137,6 +164,9 @@ class SliceLoggingTrainer(Trainer):
         self._last_train: dict | None = None
 
     def train_one_epoch(self, epoch, train_loader, training_loss):
+        # Drives ScheduledWeightedLoss' warmup ramp (matches the 3-D trainer).
+        if hasattr(training_loss, "set_epoch"):
+            training_loss.set_epoch(int(epoch))
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, _avg_lasso, elapsed = out
         row = {
@@ -278,16 +308,30 @@ def build_2d_model(kind: str, in_channels: int):
 
 
 def build_losses():
-    if LOSS_L2_WEIGHT <= 0 and LOSS_H1_WEIGHT <= 0:
+    weights = (
+        LOSS_L2_WEIGHT, LOSS_H1_WEIGHT, LOSS_BCE_WEIGHT,
+        LOSS_SWD_WEIGHT, LOSS_HIGHK_WEIGHT,
+    )
+    if all(weight <= 0 for weight in weights):
         raise ValueError("at least one loss weight must be positive")
     l2 = AbsoluteLoss(LpLoss(d=2, p=2))
     h1 = AbsoluteLoss(H1Loss(d=2))
-    training = WeightedLoss(
+    bce = BinaryCrossEntropyTerm()
+    swd = SlicedWassersteinEdges(n_directions=SWD_DIRECTIONS, seed=RUN_SEED)
+    highk = HighKPowerRatio(k_min=HIGHK_MIN)
+    training = ScheduledWeightedLoss(
         (LOSS_L2_WEIGHT, l2),
         (LOSS_H1_WEIGHT, h1),
-        term_names=("l2", "h1"),
+        (LOSS_BCE_WEIGHT, bce),
+        (LOSS_SWD_WEIGHT, swd),
+        (LOSS_HIGHK_WEIGHT, highk),
+        warmup_terms=(3, 4),
+        warmup_epochs=LOSS_EDGE_WARMUP_EPOCHS,
+        term_names=("l2", "h1", "bce", "swd", "highk"),
     )
-    return training, {"l2": l2, "h1": h1}
+    return training, {
+        "l2": l2, "h1": h1, "bce": bce, "swd": swd, "highk": highk,
+    }
 
 
 def _gradient_error(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -437,6 +481,10 @@ def main() -> None:
     inner, model_config, description = build_2d_model(
         MODEL_KIND, cache.in_channels
     )
+    if CONTRAST_MODE != "off":
+        inner = ContrastComposed(inner, CONTRAST_MODE)
+        model_config = {**model_config, "contrast_mode": CONTRAST_MODE}
+        description = f"{description} + contrast[{CONTRAST_MODE}]"
     model = TrainerModel(inner).to(DEVICE)
     print(f"Model: {description} -> {count_model_params(model.fno):,} parameters")
 
@@ -485,8 +533,17 @@ def main() -> None:
             "loss_weights": {
                 "l2": LOSS_L2_WEIGHT,
                 "h1": LOSS_H1_WEIGHT,
+                "bce": LOSS_BCE_WEIGHT,
+                "swd": LOSS_SWD_WEIGHT,
+                "highk": LOSS_HIGHK_WEIGHT,
+            },
+            "edge_terms": {
+                "warmup_epochs": LOSS_EDGE_WARMUP_EPOCHS,
+                "swd_directions": SWD_DIRECTIONS,
+                "highk_k_min": HIGHK_MIN,
             },
             "loss_modes": {"l2": "absolute", "h1": "absolute"},
+            "contrast_mode": CONTRAST_MODE,
             "run_seed": RUN_SEED,
             "resume_dir": RESUME_DIR,
         },
@@ -509,7 +566,11 @@ def main() -> None:
     print(f"Device: {DEVICE}; batch={BATCH_SIZE}; epochs={N_EPOCHS}; "
           f"lr={LEARNING_RATE:g}")
     print(f"Loss: {LOSS_L2_WEIGHT:g}*absL2 + "
-          f"{LOSS_H1_WEIGHT:g}*absH1")
+          f"{LOSS_H1_WEIGHT:g}*absH1 + {LOSS_BCE_WEIGHT:g}*BCE + "
+          f"{LOSS_SWD_WEIGHT:g}*SWD + {LOSS_HIGHK_WEIGHT:g}*highK"
+          + (f" (edge terms warm up over {LOSS_EDGE_WARMUP_EPOCHS} epochs)"
+             if (LOSS_SWD_WEIGHT or LOSS_HIGHK_WEIGHT)
+             and LOSS_EDGE_WARMUP_EPOCHS else ""))
     trainer.train(
         train_loader=train_loader,
         test_loaders=test_loaders,
