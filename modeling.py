@@ -10,11 +10,32 @@ from typing import Mapping
 import torch
 import torch.nn as nn
 
+from operators import resolve_operator_name, resolve_slot_operators, validate_operator
 from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
 
 from neuralop.models import FNO  # noqa: E402
+
+
+#: Model kinds built from the pluggable local/global U-Net skeleton, and the
+#: (local, global) operator pair each one is shorthand for. ``localop`` takes
+#: both operators from the configuration instead.
+LOCAL_GLOBAL_KINDS = {
+    "localfno": ("fourier", "fourier"),
+    "localwno": ("wavelet", "fourier"),
+    "localwhno": ("hadamard", "fourier"),
+    "localsirenfno": ("siren_fourier", "siren_fourier"),
+}
+
+#: Short tags used to name checkpoint directories of explicit ``localop`` runs.
+OPERATOR_TAGS = {
+    "fourier": "fno",
+    "siren_fourier": "sirenfno",
+    "wavelet": "wno",
+    "hadamard": "whno",
+    "cnn": "cnn",
+}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -24,6 +45,183 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+def _env_optional_bool(name: str) -> bool | None:
+    value = os.environ.get(name, "auto").strip().lower()
+    if value in {"", "auto", "default", "none"}:
+        return None
+    return _env_bool(name)
+
+
+def operator_env_settings() -> dict:
+    """Operator-slot switches, shared by the 2-D and 3-D entry points."""
+    return {
+        "local_operator": os.environ.get("LOCAL_OPERATOR", "fourier"),
+        "global_operator": os.environ.get("GLOBAL_OPERATOR", "fourier"),
+        "local_windowed": _env_optional_bool("LOCAL_WINDOWED"),
+        "whno_ordering": os.environ.get("WHNO_ORDERING", "sequency").lower(),
+        "cnn_depth": int(os.environ.get("CNN_DEPTH", "3")),
+        "cnn_kernel_size": int(os.environ.get("CNN_KERNEL_SIZE", "3")),
+        "cnn_dropout": float(os.environ.get("CNN_DROPOUT", "0.0")),
+        "cnn_norm": os.environ.get("CNN_NORM", "groupnorm").lower(),
+        "localwno_levels": int(os.environ.get("LOCALWNO_LEVELS", "2")),
+        "siren_hidden_dim": int(os.environ.get("SIREN_HIDDEN_DIM", "64")),
+        "siren_omega": float(os.environ.get("SIREN_OMEGA", "30.0")),
+        "siren_n_hidden": int(os.environ.get("SIREN_N_HIDDEN", "1")),
+        "siren_feature_dim": int(os.environ.get("SIREN_FEATURE_DIM", "16")),
+        "siren_ff_sigma": float(os.environ.get("SIREN_FF_SIGMA", "128.0")),
+        "siren_learnable_ff": _env_bool("SIREN_LEARNABLE_FF", True),
+    }
+
+
+def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
+    """Pick the hyperparameters one operator reads out of a settings mapping."""
+    if operator == "wavelet":
+        return {"levels": int(settings["localwno_levels"])}
+    if operator == "hadamard":
+        return {"ordering": str(settings["whno_ordering"])}
+    if operator == "cnn":
+        return {
+            "depth": int(settings["cnn_depth"]),
+            "kernel_size": int(settings["cnn_kernel_size"]),
+            "dropout": float(settings["cnn_dropout"]),
+            "norm": str(settings["cnn_norm"]),
+        }
+    if operator == "siren_fourier":
+        return {
+            "hidden_dim": int(settings["siren_hidden_dim"]),
+            "omega": float(settings["siren_omega"]),
+            "n_hidden": int(settings["siren_n_hidden"]),
+            "feature_dim": int(settings["siren_feature_dim"]),
+            "ff_sigma": float(settings["siren_ff_sigma"]),
+            "learnable_ff": bool(settings["siren_learnable_ff"]),
+        }
+    return {}
+
+
+@dataclass(frozen=True)
+class OperatorSlots:
+    """Resolved local/global operator pair for a local-global U-Net run.
+
+    ``ModelConfig`` covers the 3-D pipeline; this is the equivalent for the
+    two 2-D entry points, which read their remaining settings from the
+    environment directly. Both share :data:`LOCAL_GLOBAL_KINDS`, the same
+    environment variables, and the same registry.
+    """
+
+    kind: str
+    local: str
+    global_: str
+    local_kwargs: Mapping
+    global_kwargs: Mapping
+    local_windowed: bool | None = None
+
+    @classmethod
+    def from_env(cls, kind: str) -> "OperatorSlots":
+        settings = operator_env_settings()
+        if kind in LOCAL_GLOBAL_KINDS:
+            local, global_ = LOCAL_GLOBAL_KINDS[kind]
+            explicit = (
+                resolve_operator_name(settings["local_operator"]),
+                resolve_operator_name(settings["global_operator"]),
+            )
+            if explicit not in ((local, global_), ("fourier", "fourier")):
+                raise ValueError(
+                    f"MODEL_KIND={kind!r} implies operators "
+                    f"{(local, global_)}, but LOCAL_OPERATOR/GLOBAL_OPERATOR "
+                    f"select {explicit}; use MODEL_KIND=localop to pair "
+                    "operators freely"
+                )
+        else:
+            local = settings["local_operator"]
+            global_ = settings["global_operator"]
+        (local, local_kwargs), (global_, global_kwargs) = resolve_slot_operators(
+            local,
+            global_,
+            slot_hyperparameters(resolve_operator_name(local), settings),
+            slot_hyperparameters(resolve_operator_name(global_), settings),
+        )
+        return cls(
+            kind=kind,
+            local=local,
+            global_=global_,
+            local_kwargs=local_kwargs,
+            global_kwargs=global_kwargs,
+            local_windowed=settings["local_windowed"],
+        )
+
+    def model_kwargs(self) -> dict:
+        """Keyword arguments selecting these slots on ``LocalFNO2d/3d``."""
+        return {
+            "local_operator": self.local,
+            "global_operator": self.global_,
+            "local_operator_kwargs": dict(self.local_kwargs),
+            "global_operator_kwargs": dict(self.global_kwargs),
+            "local_windowed": self.local_windowed,
+        }
+
+    @property
+    def is_windowed(self) -> bool:
+        from operators import operator_spec
+
+        if self.local_windowed is not None:
+            return bool(self.local_windowed)
+        return operator_spec(self.local).windowed
+
+    @property
+    def checkpoint_tag(self) -> str:
+        if self.kind == "localop":
+            return (
+                f"local_{OPERATOR_TAGS[self.local]}"
+                f"_{OPERATOR_TAGS[self.global_]}"
+            )
+        return self.kind
+
+    @property
+    def model_name(self) -> str:
+        return {
+            "localfno": "LocalFNO",
+            "localsirenfno": "LocalSirenFNO",
+            "localwno": "LocalWNO",
+            "localwhno": "LocalWHNO",
+        }.get(
+            self.kind,
+            f"Local[{OPERATOR_TAGS[self.local]}/{OPERATOR_TAGS[self.global_]}]",
+        )
+
+    def uses_local_modes(self) -> bool:
+        from operators import operator_spec
+
+        return operator_spec(self.local).uses_modes
+
+    def describe(self) -> str:
+        """Operator fragment for the run banner."""
+        parts = [f"local={self.local}", f"global={self.global_}"]
+        for name, values in (
+            (self.local, self.local_kwargs),
+            (self.global_, self.global_kwargs),
+        ):
+            rendered = " ".join(
+                f"{key}={value}" for key, value in sorted(values.items())
+            )
+            fragment = f"{name}[{rendered}]"
+            # Both slots often carry identical settings; report them once.
+            if rendered and fragment not in parts:
+                parts.append(fragment)
+        if not self.is_windowed:
+            parts.append("unwindowed-local")
+        return " ".join(parts)
+
+    def metadata(self) -> dict:
+        """Slot record for ``run_metadata.json``."""
+        return {
+            "local_operator": self.local,
+            "global_operator": self.global_,
+            "local_operator_kwargs": dict(self.local_kwargs),
+            "global_operator_kwargs": dict(self.global_kwargs),
+            "local_windowed": self.is_windowed,
+        }
 
 
 @dataclass(frozen=True)
@@ -56,16 +254,44 @@ class ModelConfig:
     localfno_spectral_rank: int = 16
     localfno_patch_chunk_size: int = 128
     localwno_levels: int = 2
+    # Operator slots of the local/global U-Net. Legacy kinds fill these in
+    # automatically; kind="localop" reads them as given.
+    local_operator: str = "fourier"
+    global_operator: str = "fourier"
+    local_windowed: bool | None = None
+    whno_ordering: str = "sequency"
+    cnn_depth: int = 3
+    cnn_kernel_size: int = 3
+    cnn_dropout: float = 0.0
+    cnn_norm: str = "groupnorm"
 
     def __post_init__(self) -> None:
         if self.kind not in {
             "fno", "ufno", "sirenfno", "localfno", "localsirenfno",
-            "localwno",
+            "localwno", "localwhno", "localop",
         }:
             raise ValueError(
-                "kind must be 'fno', 'ufno', 'sirenfno', 'localfno', or "
-                f"'localsirenfno', or 'localwno', got {self.kind!r}"
+                "kind must be 'fno', 'ufno', 'sirenfno', 'localfno', "
+                "'localsirenfno', 'localwno', 'localwhno', or 'localop', "
+                f"got {self.kind!r}"
             )
+        object.__setattr__(
+            self, "local_operator", resolve_operator_name(self.local_operator)
+        )
+        object.__setattr__(
+            self, "global_operator", resolve_operator_name(self.global_operator)
+        )
+        if self.kind in LOCAL_GLOBAL_KINDS:
+            slots = LOCAL_GLOBAL_KINDS[self.kind]
+            explicit = (self.local_operator, self.global_operator)
+            if explicit not in (slots, ("fourier", "fourier")):
+                raise ValueError(
+                    f"kind={self.kind!r} implies operators {slots}, but "
+                    f"{explicit} were configured; use kind='localop' to pair "
+                    "operators freely"
+                )
+            object.__setattr__(self, "local_operator", slots[0])
+            object.__setattr__(self, "global_operator", slots[1])
         if len(self.modes) != 3 or any(int(value) <= 0 for value in self.modes):
             raise ValueError("modes must contain three positive values")
         if self.ufno_norm not in {"batchnorm", "groupnorm"}:
@@ -110,24 +336,79 @@ class ModelConfig:
             raise ValueError("localfno_patch_chunk_size must be positive")
         if self.localwno_levels <= 0:
             raise ValueError("localwno_levels must be positive")
-        local_limits = (
-            self.localfno_window[0] // 2,
-            self.localfno_window[1] // 2,
-            self.localfno_window[2] // 2 + 1,
+        if self.cnn_depth <= 0:
+            raise ValueError("cnn_depth must be positive")
+        if self.cnn_kernel_size <= 0 or not self.cnn_kernel_size % 2:
+            raise ValueError("cnn_kernel_size must be a positive odd integer")
+        if not 0.0 <= self.cnn_dropout < 1.0:
+            raise ValueError("cnn_dropout must be in [0, 1)")
+        if self.cnn_norm not in {"groupnorm", "batchnorm"}:
+            raise ValueError(
+                f"cnn_norm must be 'groupnorm' or 'batchnorm', "
+                f"got {self.cnn_norm!r}"
+            )
+        if self.whno_ordering not in {"sequency", "natural"}:
+            raise ValueError(
+                f"whno_ordering must be 'sequency' or 'natural', "
+                f"got {self.whno_ordering!r}"
+            )
+        if self.is_local_global:
+            # Reject an unbuildable local slot here, before any data is read.
+            # The global slot's shape is data-dependent, so the model pads to
+            # the operator's requirements at run time instead.
+            local, _ = self.operator_slots()
+            if self.local_slot_is_windowed:
+                validate_operator(
+                    local[0],
+                    self.localfno_window,
+                    self.localfno_modes,
+                    local[1],
+                    context="localfno_window",
+                )
+
+    @property
+    def is_local_global(self) -> bool:
+        """Is this kind built from the pluggable local/global U-Net?"""
+        return self.kind in LOCAL_GLOBAL_KINDS or self.kind == "localop"
+
+    @property
+    def local_slot_is_windowed(self) -> bool:
+        from operators import operator_spec
+
+        if self.local_windowed is not None:
+            return bool(self.local_windowed)
+        return operator_spec(self.local_operator).windowed
+
+    def _slot_kwargs(self, operator: str) -> dict:
+        """Hyperparameters this configuration supplies to one operator."""
+        return slot_hyperparameters(
+            operator,
+            {
+                "localwno_levels": self.localwno_levels,
+                "whno_ordering": self.whno_ordering,
+                "cnn_depth": self.cnn_depth,
+                "cnn_kernel_size": self.cnn_kernel_size,
+                "cnn_dropout": self.cnn_dropout,
+                "cnn_norm": self.cnn_norm,
+                "siren_hidden_dim": self.siren_hidden_dim,
+                "siren_omega": self.siren_omega,
+                "siren_n_hidden": self.siren_n_hidden,
+                "siren_feature_dim": self.siren_feature_dim,
+                "siren_ff_sigma": self.siren_ff_sigma,
+                "siren_learnable_ff": self.siren_learnable_ff,
+            },
         )
-        if self.kind != "localwno" and any(
-            mode > limit
-            for mode, limit in zip(self.localfno_modes, local_limits)
-        ):
-            raise ValueError(
-                "localfno_modes exceeds the local-window FFT limits"
-            )
-        if self.kind == "localwno" and any(
-            size % (2**self.localwno_levels) for size in self.localfno_window
-        ):
-            raise ValueError(
-                "localfno_window must be divisible by 2**localwno_levels"
-            )
+
+    def operator_slots(
+        self,
+    ) -> tuple[tuple[str, dict], tuple[str, dict]]:
+        """Resolve both slots to ``(operator name, hyperparameters)``."""
+        return resolve_slot_operators(
+            self.local_operator,
+            self.global_operator,
+            self._slot_kwargs(self.local_operator),
+            self._slot_kwargs(self.global_operator),
+        )
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -179,7 +460,11 @@ class ModelConfig:
             localfno_patch_chunk_size=int(
                 os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "128")
             ),
-            localwno_levels=int(os.environ.get("LOCALWNO_LEVELS", "2")),
+            **{
+                key: value
+                for key, value in operator_env_settings().items()
+                if not key.startswith("siren_")
+            },
         )
 
     @classmethod
@@ -222,18 +507,33 @@ class ModelConfig:
             "localfno_spectral_rank": self.localfno_spectral_rank,
             "localfno_patch_chunk_size": self.localfno_patch_chunk_size,
             "localwno_levels": self.localwno_levels,
+            "local_operator": self.local_operator,
+            "global_operator": self.global_operator,
+            "local_windowed": self.local_windowed,
+            "whno_ordering": self.whno_ordering,
+            "cnn_depth": self.cnn_depth,
+            "cnn_kernel_size": self.cnn_kernel_size,
+            "cnn_dropout": self.cnn_dropout,
+            "cnn_norm": self.cnn_norm,
         }
 
     @property
     def default_checkpoint_dir(self) -> Path:
-        suffix = {
-            "fno": "",
-            "ufno": "_ufno",
-            "sirenfno": "_sirenfno",
-            "localfno": "_localfno",
-            "localsirenfno": "_localsirenfno",
-            "localwno": "_localwno",
-        }[self.kind]
+        if self.kind == "localop":
+            suffix = (
+                f"_local_{OPERATOR_TAGS[self.local_operator]}"
+                f"_{OPERATOR_TAGS[self.global_operator]}"
+            )
+        else:
+            suffix = {
+                "fno": "",
+                "ufno": "_ufno",
+                "sirenfno": "_sirenfno",
+                "localfno": "_localfno",
+                "localsirenfno": "_localsirenfno",
+                "localwno": "_localwno",
+                "localwhno": "_localwhno",
+            }[self.kind]
         return Path("checkpoints") / f"checkpoints_3d{suffix}"
 
     def describe(self) -> str:
@@ -250,39 +550,63 @@ class ModelConfig:
                 f"sigmoid={self.siren_output_sigmoid} "
                 f"temperature={self.siren_sigmoid_temperature:g}"
             )
-        if self.kind in {"localfno", "localsirenfno", "localwno"}:
+        if self.is_local_global:
+            from operators import operator_spec
+
             name = {
                 "localfno": "LocalFNO",
                 "localsirenfno": "LocalSirenFNO",
                 "localwno": "LocalWNO",
-            }[self.kind]
+                "localwhno": "LocalWHNO",
+            }.get(
+                self.kind,
+                f"Local[{OPERATOR_TAGS[self.local_operator]}/"
+                f"{OPERATOR_TAGS[self.global_operator]}]",
+            )
+            slots = {self.local_operator, self.global_operator}
             siren = (
                 (
                     f" siren={self.siren_hidden_dim}x{self.siren_n_hidden} "
                     f"ff={self.siren_feature_dim}@{self.siren_ff_sigma:g}"
                 )
-                if self.kind == "localsirenfno"
+                if "siren_fourier" in slots
                 else ""
             )
             wavelet = (
                 f" wavelet=haar levels={self.localwno_levels}"
-                if self.kind == "localwno"
+                if "wavelet" in slots
                 else ""
             )
-            local_modes = (
-                ""
-                if self.kind == "localwno"
-                else f"local-modes={self.localfno_modes} "
+            walsh = (
+                f" walsh=hadamard order={self.whno_ordering}"
+                if "hadamard" in slots
+                else ""
             )
+            cnn = (
+                f" cnn=depth{self.cnn_depth}k{self.cnn_kernel_size}"
+                f"/{self.cnn_norm}"
+                if "cnn" in slots
+                else ""
+            )
+            # Only operators that truncate modes report them.
+            local_modes = (
+                f"local-modes={self.localfno_modes} "
+                if operator_spec(self.local_operator).uses_modes
+                else ""
+            )
+            windowed = "" if self.local_slot_is_windowed else " unwindowed-local"
             return (
-                f"{name} window={self.localfno_window} "
+                f"{name} local={self.local_operator} "
+                f"global={self.global_operator} "
+                f"window={self.localfno_window} "
                 f"{local_modes}"
                 f"global-modes={self.modes} widths="
                 f"{self.localfno_base_width}/"
                 f"{2 * self.localfno_base_width}/"
                 f"{4 * self.localfno_base_width} "
                 f"rank={self.localfno_spectral_rank} "
-                f"chunk={self.localfno_patch_chunk_size}{siren}{wavelet} "
+                f"chunk={self.localfno_patch_chunk_size}"
+                f"{siren}{wavelet}{walsh}{cnn}{windowed} "
                 "sigmoid-output"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
@@ -373,9 +697,12 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             output_sigmoid=config.siren_output_sigmoid,
             sigmoid_temperature=config.siren_sigmoid_temperature,
         )
-    if config.kind in {"localfno", "localsirenfno", "localwno"}:
+    if config.is_local_global:
         from local_fno_3d import LocalFNO3d
 
+        (local_name, local_kwargs), (global_name, global_kwargs) = (
+            config.operator_slots()
+        )
         return LocalFNO3d(
             in_channels=in_channels,
             out_channels=1,
@@ -386,16 +713,11 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             spectral_rank=config.localfno_spectral_rank,
             patch_chunk_size=config.localfno_patch_chunk_size,
             output_sigmoid=True,
-            siren=(config.kind == "localsirenfno"),
-            siren_hidden_dim=config.siren_hidden_dim,
-            siren_omega=config.siren_omega,
-            siren_n_hidden=config.siren_n_hidden,
-            siren_feature_dim=config.siren_feature_dim,
-            siren_ff_sigma=config.siren_ff_sigma,
-            siren_learnable_ff=config.siren_learnable_ff,
-            local_operator=(
-                "wavelet" if config.kind == "localwno" else "fourier"
-            ),
+            local_operator=local_name,
+            global_operator=global_name,
+            local_operator_kwargs=local_kwargs,
+            global_operator_kwargs=global_kwargs,
+            local_windowed=config.local_windowed,
             wavelet_levels=config.localwno_levels,
         )
     return FNO(

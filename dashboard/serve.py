@@ -85,13 +85,19 @@ def read_label(run_dir):
     # The 3-D metadata carries every architecture's fields regardless of the
     # kind actually built, so pick only the ones this kind uses.
     kind = str(mc.get("kind", ""))
-    if kind in ("localfno", "localsirenfno", "localwno"):
+    if kind.startswith("local"):
         keys = [("localfno_base_width", "w"), ("localfno_modes", "m"),
-                ("localfno_window", "win")]
-        if kind == "localsirenfno":
+                ("localfno_window", "win"),
+                ("local_operator", "loc"), ("global_operator", "glob")]
+        slots = {mc.get("local_operator"), mc.get("global_operator")}
+        if kind == "localsirenfno" or "siren_fourier" in slots:
             keys.append(("siren_omega", "om"))
-        elif kind == "localwno":
+        if kind == "localwno" or "wavelet" in slots:
             keys.append(("localwno_levels", "levels"))
+        if "hadamard" in slots:
+            keys.append(("whno_ordering", "order"))
+        if "cnn" in slots:
+            keys.append(("cnn_depth", "depth"))
     elif kind == "ufno":
         keys = [("ufno_width", "w"), ("ufno_norm", "norm"),
                 ("modes", "m"), ("n_modes", "m")]

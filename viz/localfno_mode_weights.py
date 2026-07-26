@@ -495,9 +495,20 @@ def _build_model(task: str, checkpoint: Path) -> nn.Module:
         int(size) for size in model_config.get("localfno_window") or ()
     ) or _window_from_env(task)
 
-    siren = not any(
+    fourier = any(
         key.endswith("encoder0.spectral.weights1") for key in state
     )
+    siren = any(
+        "encoder0.spectral.real_weight." in key for key in state
+    )
+    if not (fourier or siren):
+        # Only Fourier branches have per-mode weights to profile. A wavelet,
+        # Walsh-Hadamard, or convolutional local slot needs its own diagnostic.
+        raise ValueError(
+            "This checkpoint's local branches are not Fourier "
+            f"(local operator: {model_config.get('local_operator', 'unknown')}"
+            "). Mode-weight panels only apply to localfno/localsirenfno runs."
+        )
     if siren:
         rank = _shape_of(state, "encoder0.in_projection.weight")[0]
         local_modes, global_modes = _siren_modes(task, model_config)

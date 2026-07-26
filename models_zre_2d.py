@@ -13,9 +13,12 @@ These mirror the repo's 3-D architectures, reduced to the sky plane:
   ``local_fno_3d.LocalFNO3d`` with Hann overlap-add windows, rank-projected
   quadrant spectral convolutions, and a global-FNO bottleneck, on 2-D maps.
   Periodicity again simplifies the window bookkeeping: every axis is gathered
-  and scattered modulo the domain, so no validity masking is needed. Its
-  ``local_operator="wavelet"`` mode replaces only the windowed branches with
-  multilevel Haar operators while retaining the global Fourier bottleneck.
+  and scattered modulo the domain, so no validity masking is needed. Its two
+  operator slots are filled from the :mod:`operators` registry, exactly as in
+  the 3-D model: ``local_operator="wavelet"`` replaces only the windowed
+  branches with multilevel Haar operators while the global bottleneck stays
+  Fourier, ``"hadamard"`` does the same with truncated Walsh-Hadamard
+  operators, and ``"cnn"`` in both slots gives a classical convolutional U-Net.
 
 Both accept channels-first ``(B, C, H, W)`` and return ``(B, 1, H, W)``.
 The sigmoid output matches the task: the z_re target is normalized to [0, 1].
@@ -25,11 +28,26 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from operators import (
+    build_operator,
+    crop_to_original,
+    operator_hyperparameters,
+    operator_spec,
+    pad_to_operator_size,
+    resolve_operator_name,
+    resolve_slot_operators,
+    validate_operator,
+)
+
+
+#: Both map axes are periodic transverse simulation axes.
+PAD_MODES_2D = ("circular", "circular")
 
 
 def _pair(values: Sequence[int], name: str) -> tuple[int, int]:
@@ -532,7 +550,13 @@ class QuadrantSpectralConv2dSiren(nn.Module):
 
 
 class SpectralResidualBlock2d(nn.Module):
-    """Rank-projected Fourier/wavelet residual block."""
+    """2-D twin of ``local_fno_3d.SpectralResidualBlock3d``.
+
+    Hosts one registry operator, rank-projected when the operator declares it,
+    and applied through the overlap-add window grid when the slot is windowed.
+    ``siren=`` and ``wavelet_levels=`` remain accepted as the pre-registry
+    spellings of ``operator="siren_fourier"`` and ``operator="wavelet"``.
+    """
 
     def __init__(
         self,
@@ -543,26 +567,54 @@ class SpectralResidualBlock2d(nn.Module):
         window_size: Sequence[int] | None = None,
         offset: Sequence[int] = (0, 0),
         patch_chunk_size: int = 256,
+        operator: str = "fourier",
+        operator_kwargs: Mapping | None = None,
+        windowed: bool | None = None,
+        pad_modes: Sequence[str] = PAD_MODES_2D,
         siren: dict | None = None,
         wavelet_levels: int | None = None,
     ):
         super().__init__()
         if siren is not None and wavelet_levels is not None:
             raise ValueError("siren and wavelet operators are mutually exclusive")
+        if siren is not None:
+            operator, operator_kwargs = "siren_fourier", dict(siren)
+        elif wavelet_levels is not None:
+            operator = "wavelet"
+            operator_kwargs = {"levels": int(wavelet_levels)}
+
+        self.operator_name = resolve_operator_name(operator)
+        self.operator_kwargs = operator_hyperparameters(
+            self.operator_name, operator_kwargs
+        )
+        spec = operator_spec(self.operator_name)
+        self.pad_modes = tuple(pad_modes)
+
         rank = min(int(spectral_rank), int(channels))
         if rank <= 0:
             raise ValueError("spectral_rank must be positive")
-        self.in_projection = nn.Conv2d(channels, rank, kernel_size=1, bias=False)
-        if wavelet_levels is not None:
-            from wavelet_operator import HaarWaveletOperator
-
-            self.spectral = HaarWaveletOperator(rank, ndim=2,
-                                                levels=wavelet_levels)
-        elif siren is not None:
-            self.spectral = QuadrantSpectralConv2dSiren(rank, modes, **siren)
-        else:
-            self.spectral = QuadrantSpectralConv2d(rank, modes)
-        self.out_projection = nn.Conv2d(rank, channels, kernel_size=1, bias=False)
+        if not spec.rank_projected:
+            rank = int(channels)
+        # Submodules are registered in the pre-registry order -- projection in,
+        # operator, projection out -- because optimizer state dicts are keyed
+        # by parameter position, and runs resume from them.
+        self.in_projection = (
+            nn.Conv2d(channels, rank, kernel_size=1, bias=False)
+            if spec.rank_projected
+            else nn.Identity()
+        )
+        self.spectral = build_operator(
+            self.operator_name,
+            channels=rank,
+            ndim=2,
+            modes=modes,
+            hyperparameters=self.operator_kwargs,
+        )
+        self.out_projection = (
+            nn.Conv2d(rank, channels, kernel_size=1, bias=False)
+            if spec.rank_projected
+            else nn.Identity()
+        )
         self.spatial = nn.Conv2d(channels, channels, kernel_size=1)
         self.norm = _group_norm(channels)
         self.mlp = nn.Sequential(
@@ -570,13 +622,27 @@ class SpectralResidualBlock2d(nn.Module):
             nn.GELU(),
             nn.Conv2d(2 * channels, channels, kernel_size=1),
         )
+        use_window = window_size is not None and (
+            spec.windowed if windowed is None else bool(windowed)
+        )
         self.window_grid = (
             OverlapAddWindow2d(
                 window_size, offset=offset, chunk_size=patch_chunk_size
             )
-            if window_size is not None
+            if use_window
             else None
         )
+
+    def _apply_operator(
+        self,
+        transform: Callable[[torch.Tensor], torch.Tensor],
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the operator on a shape it accepts, then restore the shape."""
+        padded, amounts = pad_to_operator_size(
+            x, self.operator_name, self.operator_kwargs, self.pad_modes
+        )
+        return crop_to_original(transform(padded), amounts)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         projected = self.in_projection(x)
@@ -595,22 +661,25 @@ class SpectralResidualBlock2d(nn.Module):
                 return spectral_conv(patches, weights=weights)
 
         if self.window_grid is None:
-            spectral = transform(projected)
+            spectral = self._apply_operator(transform, projected)
         else:
-            spectral = self.window_grid.apply(projected, transform)
+            spectral = self.window_grid.apply(
+                projected,
+                lambda patches: self._apply_operator(transform, patches),
+            )
         y = F.gelu(self.norm(self.out_projection(spectral) + self.spatial(x)))
         return y + self.mlp(y)
 
 
 class LocalFNO2d(nn.Module):
-    """Two-level local-spectral U-Net with a global FNO bottleneck (2-D).
+    """2-D twin of ``local_fno_3d.LocalFNO3d``: fixed U-Net, pluggable slots.
 
-    With ``siren=True`` every spectral branch (both windowed levels and the
-    global bottleneck) generates its signed-X weight blocks from per-branch
-    SIREN networks instead of storing dense per-mode parameters -- the
-    "LocalSirenFNO" variant. With ``local_operator="wavelet"``, only the four
-    windowed branches use multilevel Haar operators and the global bottleneck
-    stays Fourier, yielding the hybrid "LocalWNO" variant.
+    The four windowed encoder/decoder branches form the "local" slot and the
+    two whole-map bottleneck blocks the "global" slot; each takes any operator
+    from the :mod:`operators` registry. ``local_operator="wavelet"`` with the
+    default Fourier bottleneck is the LocalWNO variant, ``"hadamard"`` the
+    LocalWHNO one, and ``siren=True`` remains the legacy spelling of
+    ``siren_fourier`` in both slots.
     """
 
     def __init__(
@@ -632,6 +701,10 @@ class LocalFNO2d(nn.Module):
         siren_ff_sigma: float = 128.0,
         siren_learnable_ff: bool = True,
         local_operator: str = "fourier",
+        global_operator: str = "fourier",
+        local_operator_kwargs: Mapping | None = None,
+        global_operator_kwargs: Mapping | None = None,
+        local_windowed: bool | None = None,
         wavelet_levels: int = 2,
     ):
         super().__init__()
@@ -641,33 +714,44 @@ class LocalFNO2d(nn.Module):
         width1, width2 = 2 * width0, 4 * width0
         window = _pair(local_window, "local_window")
         local_modes = _pair(local_modes, "local_modes")
-        local_operator = str(local_operator).lower()
-        if local_operator not in {"fourier", "wavelet"}:
-            raise ValueError("local_operator must be 'fourier' or 'wavelet'")
-        if siren and local_operator == "wavelet":
-            raise ValueError("siren cannot be combined with wavelet local layers")
+        wavelet_levels = int(wavelet_levels)
+        if wavelet_levels <= 0:
+            raise ValueError("wavelet_levels must be positive")
+        siren_spec = dict(
+            hidden_dim=int(siren_hidden_dim),
+            omega=float(siren_omega),
+            n_hidden=int(siren_n_hidden),
+            feature_dim=int(siren_feature_dim),
+            ff_sigma=float(siren_ff_sigma),
+            learnable_ff=bool(siren_learnable_ff),
+        )
+        (local_name, local_kwargs), (global_name, global_kwargs) = (
+            resolve_slot_operators(
+                local_operator,
+                global_operator,
+                local_operator_kwargs,
+                global_operator_kwargs,
+                siren=bool(siren),
+                siren_kwargs=siren_spec,
+                wavelet_levels=wavelet_levels,
+            )
+        )
         if any(value % 4 for value in window):
             raise ValueError(
                 "local_window values must be divisible by four for 50% "
                 "overlap and half-stride shifted grids"
             )
-        limits = (window[0] // 2, window[1] // 2 + 1)
-        if local_operator == "fourier" and (
-            local_modes[0] > limits[0] or local_modes[1] > limits[1]
-        ):
-            raise ValueError(
-                f"local_modes={local_modes} exceeds window FFT limits {limits}"
-            )
-        wavelet_levels = int(wavelet_levels)
-        wavelet_divisor = 2**wavelet_levels
-        if wavelet_levels <= 0:
-            raise ValueError("wavelet_levels must be positive")
-        if local_operator == "wavelet" and any(
-            value % wavelet_divisor for value in window
-        ):
-            raise ValueError(
-                f"local_window values must be divisible by {wavelet_divisor} "
-                f"for {wavelet_levels} wavelet levels"
+        local_spec = operator_spec(local_name)
+        windowed = (
+            local_spec.windowed if local_windowed is None else bool(local_windowed)
+        )
+        if windowed:
+            # A windowed operator only ever sees exactly one window, so its
+            # requirements can be checked once, here. The global slot's shape
+            # is data-dependent and is padded per forward instead.
+            validate_operator(
+                local_name, window, local_modes, local_kwargs,
+                context="local_window",
             )
         if int(spectral_rank) > width0:
             raise ValueError("spectral_rank cannot exceed base_width")
@@ -683,30 +767,28 @@ class LocalFNO2d(nn.Module):
         self.patch_chunk_size = int(patch_chunk_size)
         self.output_sigmoid = bool(output_sigmoid)
         self.siren = bool(siren)
-        self.local_operator = local_operator
+        self.local_operator = local_name
+        self.global_operator = global_name
+        self.local_operator_kwargs = dict(local_kwargs)
+        self.global_operator_kwargs = dict(global_kwargs)
+        self.local_windowed = windowed
         self.wavelet_levels = wavelet_levels
-        siren_spec = (
-            dict(
-                hidden_dim=int(siren_hidden_dim),
-                omega=float(siren_omega),
-                n_hidden=int(siren_n_hidden),
-                feature_dim=int(siren_feature_dim),
-                ff_sigma=float(siren_ff_sigma),
-                learnable_ff=bool(siren_learnable_ff),
-            )
-            if self.siren
-            else None
+
+        local_block = dict(
+            operator=local_name,
+            operator_kwargs=local_kwargs,
+            windowed=windowed,
+            patch_chunk_size=patch_chunk_size,
         )
-        local_wavelet_levels = (
-            self.wavelet_levels if self.local_operator == "wavelet" else None
+        global_block = dict(
+            operator=global_name,
+            operator_kwargs=global_kwargs,
         )
 
         self.lifting = nn.Conv2d(self.in_channels, width0, kernel_size=1)
         self.encoder0 = SpectralResidualBlock2d(
             width0, local_modes, spectral_rank,
-            window_size=window, offset=(0, 0),
-            patch_chunk_size=patch_chunk_size, siren=siren_spec,
-            wavelet_levels=local_wavelet_levels,
+            window_size=window, offset=(0, 0), **local_block,
         )
         self.down0 = nn.Sequential(
             nn.AvgPool2d(kernel_size=2, stride=2),
@@ -714,9 +796,7 @@ class LocalFNO2d(nn.Module):
         )
         self.encoder1 = SpectralResidualBlock2d(
             width1, local_modes, spectral_rank,
-            window_size=window, offset=shifted,
-            patch_chunk_size=patch_chunk_size, siren=siren_spec,
-            wavelet_levels=local_wavelet_levels,
+            window_size=window, offset=shifted, **local_block,
         )
         self.down1 = nn.Sequential(
             nn.AvgPool2d(kernel_size=2, stride=2),
@@ -724,25 +804,21 @@ class LocalFNO2d(nn.Module):
         )
         self.bottleneck = nn.Sequential(
             SpectralResidualBlock2d(
-                width2, self.global_modes, spectral_rank, siren=siren_spec,
+                width2, self.global_modes, spectral_rank, **global_block,
             ),
             SpectralResidualBlock2d(
-                width2, self.global_modes, spectral_rank, siren=siren_spec,
+                width2, self.global_modes, spectral_rank, **global_block,
             ),
         )
         self.fuse1 = nn.Conv2d(width2 + width1, width1, kernel_size=1)
         self.decoder1 = SpectralResidualBlock2d(
             width1, local_modes, spectral_rank,
-            window_size=window, offset=(0, 0),
-            patch_chunk_size=patch_chunk_size, siren=siren_spec,
-            wavelet_levels=local_wavelet_levels,
+            window_size=window, offset=(0, 0), **local_block,
         )
         self.fuse0 = nn.Conv2d(width1 + width0, width0, kernel_size=1)
         self.decoder0 = SpectralResidualBlock2d(
             width0, local_modes, spectral_rank,
-            window_size=window, offset=shifted,
-            patch_chunk_size=patch_chunk_size, siren=siren_spec,
-            wavelet_levels=local_wavelet_levels,
+            window_size=window, offset=shifted, **local_block,
         )
         self.projection = nn.Sequential(
             nn.Conv2d(width0, 2 * width0, kernel_size=1),

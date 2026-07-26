@@ -186,7 +186,86 @@ MODEL_KIND=sirenfno python fno_21cm_3d.py
 MODEL_KIND=localfno python fno_21cm_3d.py
 MODEL_KIND=localsirenfno python fno_21cm_3d.py
 MODEL_KIND=localwno python fno_21cm_3d.py
+MODEL_KIND=localwhno python fno_21cm_3d.py
 ```
+
+### Modular local/global operator slots
+
+`localfno`, `localwno`, `localwhno`, and `localsirenfno` are all the same
+U-Net skeleton — lifting, two windowed encoder levels, two whole-volume
+bottleneck blocks, two windowed decoder levels, projection — differing only in
+which operator fills its two slots. The **local** slot is the four overlap-add
+windowed branches; the **global** slot is the two whole-field bottleneck
+blocks. Each takes any operator from the registry in `operators.py`:
+
+| `LOCAL_OPERATOR` / `GLOBAL_OPERATOR` | operator | hyperparameters |
+| --- | --- | --- |
+| `fourier` | truncated rFFT over signed quadrants | `LOCALFNO_MODES_*`, `N_MODES_*` |
+| `siren_fourier` | quadrants with SIREN-generated per-mode weights | `SIREN_*` |
+| `wavelet` | multilevel orthonormal Haar, all bands retained | `LOCALWNO_LEVELS` |
+| `hadamard` | truncated Walsh-Hadamard in sequency order | `WHNO_ORDERING`, mode counts |
+| `cnn` | classical U-Net convolution path | `CNN_DEPTH`, `CNN_KERNEL_SIZE`, `CNN_DROPOUT`, `CNN_NORM` |
+
+The named kinds are shorthand for a fixed pair; `MODEL_KIND=localop` pairs them
+freely and names its checkpoint directory after the pair:
+
+```bash
+# Shorthands: (local, global)
+#   localfno       (fourier,       fourier)
+#   localwno       (wavelet,       fourier)
+#   localwhno      (hadamard,      fourier)
+#   localsirenfno  (siren_fourier, siren_fourier)
+
+# Anything else goes through localop, e.g. a Walsh-Hadamard local branch
+# over a convolutional bottleneck (-> checkpoints_3d_local_whno_cnn):
+MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=cnn \
+    python fno_21cm_3d.py
+
+# Both slots convolutional is a classical U-Net baseline on the same skeleton:
+MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=cnn python fno_21cm_3d.py
+```
+
+Operator aliases are accepted (`fno`, `wno`, `whno`/`walsh`, `siren`, `unet`).
+A named kind rejects a contradicting `LOCAL_OPERATOR`/`GLOBAL_OPERATOR` rather
+than silently ignoring it.
+
+Each operator declares what it needs, and the skeleton adapts:
+
+* **Rank projection.** Spectral operators run inside the 1×1 projection down to
+  `LOCALFNO_SPECTRAL_RANK` channels and back. `cnn` does not — the rank
+  bottleneck would only throttle a convolution — so it runs at full width.
+* **Windowing.** `cnn` in the local slot defaults to running on the whole field
+  rather than through the Hann overlap-add grid: a convolution is already
+  local, and windowing its input only modulates the signal it sees. Set
+  `LOCAL_WINDOWED=1` to force it through the window grid for a strict ablation
+  (or `0` to unwindow a spectral operator).
+* **Sizes.** Local windows are validated against the operator up front. The
+  global slot's shape is data-dependent (35×35×64 on production cubes), so the
+  block pads to what the operator accepts and crops back — circular on the
+  periodic transverse axes, replicate on the finite line of sight. This is what
+  lets the power-of-two-only Walsh-Hadamard transform run whole-volume.
+
+`localwhno` is the Walsh-Hadamard variant: the four windowed branches use a
+truncated Walsh-Hadamard transform while the bottleneck stays Fourier, exactly
+paralleling `localwno`. The transform is real and orthonormal, so its inverse
+is its own transpose; coefficients are ordered by *sequency* (number of sign
+changes — the Walsh analogue of frequency) so that retaining the first
+`LOCALFNO_MODES_*` per axis keeps the smoothest components. Set
+`WHNO_ORDERING=natural` for Kronecker order instead. Each axis is contracted
+with a dense `(modes, size)` matrix holding exactly the retained Walsh
+functions, which is faster than both the O(N log N) butterfly and the
+equivalent rFFT at these window sizes and never materializes the full
+spectrum. Every local-window dimension must be a power of two (the default
+`(16,16,32)` already is), and unlike the rFFT the retained modes may span the
+whole window. With rank 16 and modes `(6,6,12)` the operator holds 110,592 real
+parameters per branch against the Fourier quadrants' 884,736 — a real basis
+needs one block, not four signed complex ones.
+
+Note for interpretation: Walsh functions are not shift eigenfunctions, so a
+sequency-truncated Walsh-Hadamard operator is a dyadic-aligned structured
+linear map, not a convolution — its output depends on where the window grid
+falls. The Haar `localwno` operator shares this property, and the alternating
+half-window-shifted grids already in the skeleton partly compensate.
 
 `localfno` is a two-level 3-D U-Net built from overlapping local Fourier
 blocks. Its default windows are `(16,16,32)` with 50% overlap, retained local
@@ -219,6 +298,10 @@ independent learned channel-mixing matrix, and all bands are reconstructed, so
 the operator preserves the window shape. Set the decomposition depth with
 `LOCALWNO_LEVELS` (default `2`); each local-window dimension must be divisible
 by `2**LOCALWNO_LEVELS`. The 2-D z_re pipeline supports the same model kind.
+
+Both 2-D pipelines (`fno_21cm.py` for x_HI slices, `fno_zre.py` for z_re maps)
+read the same `MODEL_KIND` values and the same `LOCAL_OPERATOR`/
+`GLOBAL_OPERATOR` slots as the 3-D one.
 
 An optional one-sided ionized-wall loss penalizes excess predicted neutral
 fraction on the ionized side of true transverse bubble boundaries:

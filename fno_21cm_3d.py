@@ -383,12 +383,19 @@ class LoggingTrainer(Trainer):
         self.best_metric: float | None = None
         self.spectral_history = None
         if spectral_history_path is not None and self._is_rank_0:
-            self.spectral_history = SpectralWeightHistory(
-                spectral_history_path,
-                self.model,
-                reset=True,
-            )
-            self.spectral_history.record(-1)
+            try:
+                self.spectral_history = SpectralWeightHistory(
+                    spectral_history_path,
+                    self.model,
+                    reset=True,
+                )
+            except ValueError as error:
+                # Architectures with no Fourier layer at all (say wavelet or
+                # Walsh-Hadamard in both operator slots) have no mode-weight
+                # profile to track. That is not a reason to refuse to train.
+                print(f"[spectral-weights] disabled: {error}")
+            else:
+                self.spectral_history.record(-1)
 
     def train_one_epoch(self, epoch, train_loader, training_loss):
         # DistributedSampler must be told the epoch so it reshuffles
@@ -755,10 +762,7 @@ def main():
         "fno": LEARNING_RATE,
         "ufno": UFNO_LEARNING_RATE,
         "sirenfno": SIRENFNO_LEARNING_RATE,
-        "localfno": LOCALFNO_LEARNING_RATE,
-        "localsirenfno": LOCALFNO_LEARNING_RATE,
-        "localwno": LOCALFNO_LEARNING_RATE,
-    }[MODEL_KIND]
+    }.get(MODEL_KIND, LOCALFNO_LEARNING_RATE)
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
         if LR_SCALE_RULE == "linear":
@@ -774,10 +778,7 @@ def main():
         "fno": 0.0,
         "ufno": UFNO_GRAD_CLIP_NORM,
         "sirenfno": SIRENFNO_GRAD_CLIP_NORM,
-        "localfno": LOCALFNO_GRAD_CLIP_NORM,
-        "localsirenfno": LOCALFNO_GRAD_CLIP_NORM,
-        "localwno": LOCALFNO_GRAD_CLIP_NORM,
-    }[MODEL_KIND]
+    }.get(MODEL_KIND, LOCALFNO_GRAD_CLIP_NORM)
     if grad_clip_norm > 0:
         def _clip_before_step(optim, args, kwargs):
             norm = torch.nn.utils.clip_grad_norm_(
@@ -828,10 +829,7 @@ def main():
         "fno": 0,
         "ufno": UFNO_H1_WARMUP_EPOCHS,
         "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
-        "localfno": LOCALFNO_H1_WARMUP_EPOCHS,
-        "localsirenfno": LOCALFNO_H1_WARMUP_EPOCHS,
-        "localwno": LOCALFNO_H1_WARMUP_EPOCHS,
-    }[MODEL_KIND]
+    }.get(MODEL_KIND, LOCALFNO_H1_WARMUP_EPOCHS)
     if h1_warmup_epochs > 0:
         train_loss_fn = ScheduledWeightedLoss(
             *loss_terms,
@@ -905,19 +903,21 @@ def main():
             f"output sigmoid={MODEL_CONFIG.siren_output_sigmoid}, "
             f"temperature={MODEL_CONFIG.siren_sigmoid_temperature:g}"
         )
-    elif MODEL_KIND in ("localfno", "localsirenfno", "localwno"):
-        local_operator = (
-            f"haar wavelet levels={MODEL_CONFIG.localwno_levels}"
-            if MODEL_KIND == "localwno"
-            else f"Fourier modes={MODEL_CONFIG.localfno_modes}"
+    elif MODEL_CONFIG.is_local_global:
+        (local_slot, local_kwargs), (global_slot, global_kwargs) = (
+            MODEL_CONFIG.operator_slots()
         )
         rprint(
             f"{MODEL_KIND} stability: "
             f"H1 warmup={LOCALFNO_H1_WARMUP_EPOCHS} epochs, "
             f"gradient clip={LOCALFNO_GRAD_CLIP_NORM:g}, "
             f"window={MODEL_CONFIG.localfno_window}, "
-            f"local operator={local_operator}, "
             f"chunk={MODEL_CONFIG.localfno_patch_chunk_size}"
+        )
+        rprint(
+            f"Operator slots: local={local_slot}{local_kwargs or ''} "
+            f"global={global_slot}{global_kwargs or ''} "
+            f"windowed-local={MODEL_CONFIG.local_slot_is_windowed}"
         )
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
@@ -991,12 +991,12 @@ def main():
             ),
             "localfno_h1_warmup_epochs": (
                 LOCALFNO_H1_WARMUP_EPOCHS
-                if MODEL_KIND in ("localfno", "localsirenfno", "localwno")
+                if MODEL_CONFIG.is_local_global
                 else 0
             ),
             "localfno_grad_clip_norm": (
                 LOCALFNO_GRAD_CLIP_NORM
-                if MODEL_KIND in ("localfno", "localsirenfno", "localwno")
+                if MODEL_CONFIG.is_local_global
                 else None
             ),
             "best_metric_name": "val_l2",

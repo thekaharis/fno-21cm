@@ -18,8 +18,14 @@ Environment overrides (defaults in parentheses):
   TARGET_KIND       gompertz | step (gompertz)
   INPUT_FEATURES    density | density_params (density_params)
   N_Z_IN            LOS slices used as input channels (64)
-  MODEL_KIND        fno | ufno | localfno | localwno | sirenfno |
-                    localsirenfno (fno)
+  MODEL_KIND        fno | ufno | localfno | localwno | localwhno |
+                    sirenfno | localsirenfno | localop (fno)
+  LOCAL_OPERATOR / GLOBAL_OPERATOR   with MODEL_KIND=localop, the two
+                    operator slots of the local-global U-Net: fourier |
+                    siren_fourier | wavelet | hadamard | cnn (fourier)
+  WHNO_ORDERING sequency|natural (sequency)                [hadamard]
+  CNN_DEPTH (3), CNN_KERNEL_SIZE (3), CNN_DROPOUT (0.0),
+  CNN_NORM groupnorm|batchnorm                             [cnn]
   N_MODES_X/Y (32), HIDDEN_CHANNELS (64), N_LAYERS (4)   [fno]
   UFNO_WIDTH (32), UFNO_NORM batchnorm|groupnorm          [ufno]
   LOCALFNO_BASE_WIDTH (16), LOCALFNO_WINDOW_X/Y (16),
@@ -68,7 +74,7 @@ print(f"[fno_zre] using neuralop from {_neuralop.__file__}")
 from dataset.dataset_zre import ZreMapDataset, split_by_cone
 from dataset.zre_target import TARGET_KINDS, build_target_cache
 from losses import AbsoluteLoss, H2Loss2d, RelativeLoss, WeightedLoss
-from modeling import TrainerModel
+from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
 
 
 # ------------------------------------------------------------------ config
@@ -156,14 +162,20 @@ EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 
 # Separate checkpoint directories per model kind so runs never overwrite
 # each other (same convention as the 3-D pipeline).
-_KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "localfno": "_localfno",
-                 "sirenfno": "_sirenfno",
-                 "localsirenfno": "_localsirenfno",
-                 "localwno": "_localwno"}
+_LOCAL_KINDS = tuple(LOCAL_GLOBAL_KINDS) + ("localop",)
+_KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "sirenfno": "_sirenfno",
+                **{kind: f"_{kind}" for kind in _LOCAL_KINDS}}
+OPERATOR_SLOTS = (
+    OperatorSlots.from_env(MODEL_KIND) if MODEL_KIND in _LOCAL_KINDS else None
+)
+_KIND_TAG = (
+    f"_{OPERATOR_SLOTS.checkpoint_tag}" if OPERATOR_SLOTS is not None
+    else _KIND_SUFFIX.get(MODEL_KIND, "")
+)
 CHECKPOINT_DIR = Path(
     os.environ.get(
         "CHECKPOINT_DIR",
-        f"checkpoints/checkpoints_zre{_KIND_SUFFIX.get(MODEL_KIND, '')}",
+        f"checkpoints/checkpoints_zre{_KIND_TAG}",
     )
 )
 
@@ -256,11 +268,13 @@ def build_zre_model(kind: str, in_channels: int):
         desc = (f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} "
                 f"norm={UFNO_NORM} sigmoid-output")
         return model, desc
-    if kind in ("localfno", "localsirenfno", "localwno"):
+    if kind in _LOCAL_KINDS:
         from models_zre_2d import LocalFNO2d
 
-        siren = kind == "localsirenfno"
-        wavelet = kind == "localwno"
+        slots = (
+            OPERATOR_SLOTS if kind == MODEL_KIND
+            else OperatorSlots.from_env(kind)
+        )
         model = LocalFNO2d(
             in_channels=in_channels,
             out_channels=1,
@@ -271,40 +285,18 @@ def build_zre_model(kind: str, in_channels: int):
             spectral_rank=LOCALFNO_SPECTRAL_RANK,
             patch_chunk_size=LOCALFNO_PATCH_CHUNK_SIZE,
             output_sigmoid=True,
-            siren=siren,
-            siren_hidden_dim=SIREN_HIDDEN_DIM,
-            siren_omega=SIREN_OMEGA,
-            siren_n_hidden=SIREN_N_HIDDEN,
-            siren_feature_dim=SIREN_FEATURE_DIM,
-            siren_ff_sigma=SIREN_FF_SIGMA,
-            siren_learnable_ff=SIREN_LEARNABLE_FF,
-            local_operator="wavelet" if wavelet else "fourier",
-            wavelet_levels=LOCALWNO_LEVELS,
-        )
-        name = (
-            "LocalWNO2d" if wavelet
-            else "LocalSirenFNO2d" if siren
-            else "LocalFNO2d"
-        )
-        siren_desc = (
-            f" siren={SIREN_HIDDEN_DIM}x{SIREN_N_HIDDEN} "
-            f"ff={SIREN_FEATURE_DIM}@{SIREN_FF_SIGMA:g}"
-            if siren
-            else ""
-        )
-        wavelet_desc = (
-            f" wavelet=haar levels={LOCALWNO_LEVELS}" if wavelet else ""
+            **slots.model_kwargs(),
         )
         local_modes_desc = (
-            "" if wavelet else f"local-modes={LOCALFNO_MODES} "
+            f"local-modes={LOCALFNO_MODES} " if slots.uses_local_modes() else ""
         )
-        desc = (f"{name} window={LOCALFNO_WINDOW} "
+        desc = (f"{slots.model_name}2d window={LOCALFNO_WINDOW} "
                 f"{local_modes_desc}"
-                 f"global-modes={LOCALFNO_GLOBAL_MODES} "
-                 f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
-                 f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
-                 f"chunk={LOCALFNO_PATCH_CHUNK_SIZE}"
-                f"{siren_desc}{wavelet_desc} sigmoid-output")
+                f"global-modes={LOCALFNO_GLOBAL_MODES} "
+                f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
+                f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
+                f"chunk={LOCALFNO_PATCH_CHUNK_SIZE} "
+                f"{slots.describe()} sigmoid-output")
         return model, desc
     if kind == "sirenfno":
         from models_zre_2d import SirenFNO2d
@@ -603,10 +595,13 @@ def main() -> None:
                 "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
                 "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK,
                 "localfno_patch_chunk_size": LOCALFNO_PATCH_CHUNK_SIZE}
-               if MODEL_KIND in ("localfno", "localsirenfno", "localwno") else {}),
+               if MODEL_KIND in _LOCAL_KINDS else {}),
+            **(OPERATOR_SLOTS.metadata() if OPERATOR_SLOTS is not None else {}),
             **({"localwno_levels": LOCALWNO_LEVELS,
                 "localwno_wavelet": "haar"}
-               if MODEL_KIND == "localwno" else {}),
+               if OPERATOR_SLOTS is not None
+               and "wavelet" in {OPERATOR_SLOTS.local, OPERATOR_SLOTS.global_}
+               else {}),
             **({"siren_omega": SIREN_OMEGA,
                 "siren_hidden_dim": SIREN_HIDDEN_DIM,
                 "siren_n_hidden": SIREN_N_HIDDEN,

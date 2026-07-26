@@ -24,7 +24,7 @@ import torch
 
 from dataset.dataset import SliceCache
 from dataset.dataset_3d import ParameterNormalization
-from modeling import TrainerModel, load_checkpoint
+from modeling import LOCAL_GLOBAL_KINDS, TrainerModel, load_checkpoint
 from models_zre_2d import LocalFNO2d, UFNO2d
 
 
@@ -123,7 +123,10 @@ def build_model(config: dict) -> TrainerModel:
             sigmoid=True,
             norm=str(config["ufno_norm"]),
         )
-    elif kind in {"localfno", "localwno"}:
+    elif kind in LOCAL_GLOBAL_KINDS or kind == "localop":
+        # Runs predating the operator registry record only their kind, so fall
+        # back to the pair that kind is shorthand for.
+        local, global_ = LOCAL_GLOBAL_KINDS.get(kind, ("fourier", "fourier"))
         inner = LocalFNO2d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -134,7 +137,11 @@ def build_model(config: dict) -> TrainerModel:
             spectral_rank=int(config["localfno_spectral_rank"]),
             patch_chunk_size=int(config["localfno_patch_chunk_size"]),
             output_sigmoid=True,
-            local_operator="wavelet" if kind == "localwno" else "fourier",
+            local_operator=config.get("local_operator", local),
+            global_operator=config.get("global_operator", global_),
+            local_operator_kwargs=config.get("local_operator_kwargs"),
+            global_operator_kwargs=config.get("global_operator_kwargs"),
+            local_windowed=config.get("local_windowed"),
             wavelet_levels=int(config.get("localwno_levels", 2)),
         )
     else:

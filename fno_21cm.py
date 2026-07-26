@@ -7,13 +7,19 @@ slices or validation parameters from leaking into training.
 
 Environment overrides (defaults in parentheses):
   CACHE_FILE (trainset.h5), INPUT_FEATURES (density_z_params)
-  MODEL_KIND fno | ufno | localfno | localwno (localwno)
+  MODEL_KIND fno | ufno | localfno | localwno | localwhno | localop (localwno)
   N_EPOCHS (50), BATCH_SIZE (16), LEARNING_RATE (1e-4)
   LOSS_L2_WEIGHT (1.0), LOSS_H1_WEIGHT (0.0)
   CHECKPOINT_DIR (checkpoints/checkpoints_2d_xhi_<kind>)
   LOCALFNO_BASE_WIDTH (32), LOCALFNO_WINDOW_X/Y (16),
   LOCALFNO_GLOBAL_MODES_X/Y (16), LOCALFNO_SPECTRAL_RANK (16),
   LOCALWNO_LEVELS (2)
+
+With MODEL_KIND=localop the two operator slots of the local-global U-Net are
+chosen freely with LOCAL_OPERATOR / GLOBAL_OPERATOR (fourier | siren_fourier |
+wavelet | hadamard | cnn); the other kinds are shorthand for a fixed pair. See
+``operators.py`` for each operator's hyperparameters: LOCALWNO_LEVELS,
+WHNO_ORDERING, CNN_DEPTH / CNN_KERNEL_SIZE / CNN_DROPOUT / CNN_NORM.
 """
 
 from __future__ import annotations
@@ -40,7 +46,7 @@ import neuralop as _neuralop
 
 from dataset.dataset import SliceCache, split_by_cone
 from losses import AbsoluteLoss, WeightedLoss
-from modeling import TrainerModel
+from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
 from util.run_metadata import write_run_metadata
 
 print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
@@ -92,15 +98,22 @@ RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
 VAL_FRACTION = float(os.environ.get("VAL_FRACTION", "0.1"))
 TEST_FRACTION = float(os.environ.get("TEST_FRACTION", "0.1"))
 
+_LOCAL_KINDS = tuple(LOCAL_GLOBAL_KINDS) + ("localop",)
 _KIND_SUFFIX = {
     "fno": "fno",
     "ufno": "ufno",
-    "localfno": "localfno",
-    "localwno": "localwno",
+    **{kind: kind for kind in _LOCAL_KINDS},
 }
+OPERATOR_SLOTS = (
+    OperatorSlots.from_env(MODEL_KIND) if MODEL_KIND in _LOCAL_KINDS else None
+)
+_CHECKPOINT_TAG = (
+    OPERATOR_SLOTS.checkpoint_tag if OPERATOR_SLOTS is not None
+    else _KIND_SUFFIX.get(MODEL_KIND, MODEL_KIND)
+)
 CHECKPOINT_DIR = Path(os.environ.get(
     "CHECKPOINT_DIR",
-    f"checkpoints/checkpoints_2d_xhi_{_KIND_SUFFIX.get(MODEL_KIND, MODEL_KIND)}",
+    f"checkpoints/checkpoints_2d_xhi_{_CHECKPOINT_TAG}",
 ))
 RESUME_DIR = os.environ.get("RESUME_DIR") or None
 DEVICE = os.environ.get(
@@ -194,10 +207,13 @@ def build_2d_model(kind: str, in_channels: int):
             f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} norm={UFNO_NORM}"
         )
         return model, config, description
-    if kind in {"localfno", "localwno"}:
+    if kind in _LOCAL_KINDS:
         from models_zre_2d import LocalFNO2d
 
-        wavelet = kind == "localwno"
+        slots = (
+            OPERATOR_SLOTS if kind == MODEL_KIND
+            else OperatorSlots.from_env(kind)
+        )
         model = LocalFNO2d(
             in_channels=in_channels,
             out_channels=1,
@@ -208,8 +224,7 @@ def build_2d_model(kind: str, in_channels: int):
             spectral_rank=LOCALFNO_SPECTRAL_RANK,
             patch_chunk_size=LOCALFNO_PATCH_CHUNK_SIZE,
             output_sigmoid=True,
-            local_operator="wavelet" if wavelet else "fourier",
-            wavelet_levels=LOCALWNO_LEVELS,
+            **slots.model_kwargs(),
         )
         config = {
             "kind": kind,
@@ -220,19 +235,20 @@ def build_2d_model(kind: str, in_channels: int):
             "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
             "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK,
             "localfno_patch_chunk_size": LOCALFNO_PATCH_CHUNK_SIZE,
+            **slots.metadata(),
         }
-        if wavelet:
+        if slots.uses_local_modes():
+            config["localfno_modes"] = list(LOCALFNO_MODES)
+        if "wavelet" in {slots.local, slots.global_}:
+            # Retained for readers of older metadata that predate the registry.
             config.update(localwno_levels=LOCALWNO_LEVELS,
                           localwno_wavelet="haar")
-        else:
-            config["localfno_modes"] = list(LOCALFNO_MODES)
-        local = (
-            f"wavelet=haar levels={LOCALWNO_LEVELS}"
-            if wavelet else f"local-modes={LOCALFNO_MODES}"
+        local_modes = (
+            f"local-modes={LOCALFNO_MODES} " if slots.uses_local_modes() else ""
         )
         description = (
-            f"{'LocalWNO2d' if wavelet else 'LocalFNO2d'} "
-            f"window={LOCALFNO_WINDOW} {local} "
+            f"{slots.model_name}2d window={LOCALFNO_WINDOW} {local_modes}"
+            f"{slots.describe()} "
             f"global-modes={LOCALFNO_GLOBAL_MODES} "
             f"width={LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK}"
         )
