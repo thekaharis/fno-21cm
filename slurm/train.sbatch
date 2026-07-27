@@ -93,7 +93,7 @@ export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
 # If this file exists, fno_21cm_3d.py and viz/visualize_3d.py use it directly --
 # ~10x faster than streaming the raw lightcones.  If it doesn't exist yet,
 # the scripts auto-fall-back to streaming from LIGHTCONE_DIR.
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe scratch (28 TB on the H200 node) so reads
 # go at ~3 GB/s local instead of through the shared project FS.  One-time

@@ -75,7 +75,7 @@ export N_EPOCHS=30
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe (mirrors the FNO sbatch -- see that file
 # for the rationale).  ~5-10 min one-time copy of 180 GB; reads run at

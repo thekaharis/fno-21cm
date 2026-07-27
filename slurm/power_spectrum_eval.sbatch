@@ -88,7 +88,7 @@ SAVED_CUBES_DIR="${SAVED_CUBES_DIR:-${OUT_DIR}/cubes}"
 
 # ---------------------------------------------------------------- data cache
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5}"
+PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 
 if [ "$LOCAL_SCRATCH" = "yes" ]; then

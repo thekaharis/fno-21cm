@@ -72,7 +72,7 @@ SAVED_CUBES_DIR="${SAVED_CUBES_DIR:-${OUT_DIR}/cubes}"
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-32}"
 
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5}"
+PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-auto}"
 if [ "$LOCAL_SCRATCH" != "auto" ] && [ "$LOCAL_SCRATCH" != "yes" ] && [ "$LOCAL_SCRATCH" != "no" ]; then
     echo "LOCAL_SCRATCH must be auto, yes, or no" >&2

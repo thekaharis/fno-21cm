@@ -54,7 +54,7 @@ NUM_SHARDS=33                       # MUST equal the array width above
 # Pick where the cache lives.  Project FS is the right home -- the file will
 # be 100-250 GB depending on compression.  The training script reads
 # CUBES_CACHE if set, otherwise looks for ./cubes_3d.h5 next to the script.
-OUT_PATH=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+OUT_PATH=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 echo "shard ${SLURM_ARRAY_TASK_ID}/${NUM_SHARDS} on $(hostname)"
 python -m dataset.build_cubes \

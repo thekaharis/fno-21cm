@@ -58,7 +58,7 @@ export PYTHONUNBUFFERED=1
 # val/test split (driven by len(dataset) + SPLIT_SEED) reproduces the same
 # held-out cones used during training.
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

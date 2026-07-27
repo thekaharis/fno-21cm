@@ -53,6 +53,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from dataset import paths
 from dataset.lightcone_params import PARAM_NAMES, read_sampled_params
 from dataset.loader import LightconeFile
 
@@ -342,7 +343,7 @@ def main() -> None:
     )
     ap.add_argument("--data", type=Path,
                     help="directory of lightcone .h5 files")
-    ap.add_argument("--out", type=Path, default=Path("cubes_3d.h5"))
+    ap.add_argument("--out", type=Path, default=paths.CUBES)
     ap.add_argument("--n-z", type=int, default=256,
                     help="LOS resolution after interpolation (default 256)")
     ap.add_argument("--z-min", type=float, default=5.0)

@@ -61,7 +61,7 @@ export SIREN_OUTPUT_SIGMOID="${SIREN_OUTPUT_SIGMOID:-true}"
 export SIREN_SIGMOID_TEMPERATURE="${SIREN_SIGMOID_TEMPERATURE:-2.0}"
 
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5}"
+export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 
 echo "================ SirenFNO visualization =========="
 echo "Host:               $(hostname)"

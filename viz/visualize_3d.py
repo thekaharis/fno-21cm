@@ -28,6 +28,7 @@ from torch.utils.data import Subset
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
+from dataset import paths
 from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeDataset,
@@ -108,7 +109,7 @@ VIZ_TAG = os.environ.get("VIZ_TAG", MODEL_KIND)
 # Data source: prefer the pre-built cube cache if it exists, otherwise stream
 # from raw lightcones.  Must match what training used so the deterministic
 # split (driven by len(dataset) + SPLIT_SEED) lines up.
-CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
+CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", paths.CUBES))
 DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 

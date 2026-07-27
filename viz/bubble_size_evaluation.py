@@ -646,7 +646,8 @@ def run_from_checkpoints(
     from util.run_metadata import load_run_metadata
     from viz.visualize_3d import load_model, predict_cube
 
-    cache = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
+    from dataset import paths
+    cache = Path(os.environ.get("CUBES_CACHE", paths.CUBES))
     metadata_by_name = {
         name: load_run_metadata(Path(path).parent)
         for name, path in checkpoints.items()

@@ -85,7 +85,7 @@ export IONIZED_WALL_KERNEL_SIZE="${IONIZED_WALL_KERNEL_SIZE:-7}"
 export IONIZED_WALL_THRESHOLD="${IONIZED_WALL_THRESHOLD:-0.5}"
 
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5}"
+PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 if [ "$LOCAL_SCRATCH" = "yes" ]; then
     LOCAL_CUBES="$TMPDIR/cubes_3d.h5"

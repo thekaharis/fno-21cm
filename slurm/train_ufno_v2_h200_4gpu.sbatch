@@ -92,7 +92,7 @@ export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v2}"
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe (28 TB on the H200 node).
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"

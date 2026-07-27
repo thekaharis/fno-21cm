@@ -3,7 +3,8 @@
 Datasets live outside the repository, under the work directory's ``data/``:
 
     <work>/data/data/        raw 21cmFAST lightcone HDF5 files
-    <work>/data/compressed/  derived caches (trainset.h5, zre_*.h5, band sets)
+    <work>/data/compressed/  derived caches (trainset.h5, cubes_3d*.h5,
+                             zre_*.h5, x_HI band sets)
 
 Nothing large belongs in the project root.  Import from here rather than
 hard-coding paths, so a relocation is a one-line change.
@@ -28,6 +29,7 @@ COMPRESSED = Path(os.environ.get("FNO_COMPRESSED", DATA_ROOT / "compressed"))
 
 # Named caches, so callers never spell the filenames themselves.
 TRAINSET = COMPRESSED / "trainset.h5"
+CUBES = COMPRESSED / "cubes_3d.h5"
 ZRE_TARGETS = COMPRESSED / "zre_targets.h5"
 ZRE_INPUTS = COMPRESSED / "zre_inputs.h5"
 
@@ -39,5 +41,5 @@ def compressed(name: str) -> Path:
 
 __all__ = [
     "PROJECT_ROOT", "DATA_ROOT", "LIGHTCONES", "COMPRESSED",
-    "TRAINSET", "ZRE_TARGETS", "ZRE_INPUTS", "compressed",
+    "TRAINSET", "CUBES", "ZRE_TARGETS", "ZRE_INPUTS", "compressed",
 ]

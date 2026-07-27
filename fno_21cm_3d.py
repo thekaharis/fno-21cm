@@ -39,6 +39,7 @@ from neuralop.utils import count_model_params
 import neuralop as _neuralop
 print(f"[fno_21cm_3d] using neuralop from {_neuralop.__file__}")
 
+from dataset import paths
 from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeDataset,
@@ -74,7 +75,7 @@ FILE_GLOB = "21cmfast_11d_sample*.h5"
 # exists at startup, the training script uses LightconeCubeCache (fast,
 # pre-interpolated cubes); otherwise it falls back to LightconeCubeDataset
 # (raw streaming, ~10x slower per epoch).
-CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
+CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", paths.CUBES))
 
 N_Z = 256                           # LOS resolution after interpolation
 Z_MIN, Z_MAX = 5.0, 25.0

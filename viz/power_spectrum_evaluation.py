@@ -733,7 +733,8 @@ def run_from_checkpoints(checkpoints: dict[str, str], cfg: SpectrumConfig,
     from viz.visualize_3d import load_model, predict_cube
     from util.run_metadata import load_run_metadata
 
-    cache = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
+    from dataset import paths
+    cache = Path(os.environ.get("CUBES_CACHE", paths.CUBES))
     first_checkpoint = Path(next(iter(checkpoints.values())))
     first_meta = load_run_metadata(first_checkpoint.parent)
     input_features = InputFeatures(

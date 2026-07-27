@@ -75,7 +75,7 @@ export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v3_lo
 
 # --- Data paths + NVMe staging ---------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 if [ "$LOCAL_SCRATCH" = "yes" ]; then

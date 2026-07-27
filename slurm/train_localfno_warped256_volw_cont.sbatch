@@ -32,7 +32,7 @@ export LOCALFNO_MODES_Z=16
 export LOSS_L2_MODE=relative
 export LOSS_H1_MODE=relative
 export LOSS_LOS_VOLUME_WEIGHTS=1
-export PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d_warped256.h5
+export PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d_warped256.h5
 
 # continuation-specific: restarted cosine at half peak, no H1 re-ramp
 export LOCALFNO_LEARNING_RATE=1e-4

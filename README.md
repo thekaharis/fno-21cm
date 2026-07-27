@@ -49,7 +49,8 @@ Datasets are **outside the repository**, under the work directory:
 
 ```
 <work>/data/data/            raw 21cmFAST lightcone HDF5 files
-<work>/data/compressed/      derived caches: trainset.h5, zre_*.h5, xhi_band_*.h5
+<work>/data/compressed/      derived caches: trainset.h5, cubes_3d*.h5,
+                             zre_*.h5, xhi_band_*.h5
 <work>/fno-21cm/             this repository -- code only
 ```
 
@@ -186,9 +187,9 @@ export LIGHTCONE_DIR=/path/to/21cmfast_11d_sample_h5_files
 #     AID=$(sbatch --parsable slurm/build_cubes.sbatch)
 #     sbatch --dependency=afterok:"$AID" slurm/build_cubes_merge.sbatch
 # Locally:
-python -m dataset.build_cubes --data "$LIGHTCONE_DIR" --out cubes_3d.h5
+python -m dataset.build_cubes --data "$LIGHTCONE_DIR"   # -> data/compressed/cubes_3d.h5
 
-# If the cache exists at ./cubes_3d.h5 (or $CUBES_CACHE), training and
+# If the cache exists at data/compressed/cubes_3d.h5 (or $CUBES_CACHE), training and
 # visualization use it automatically; otherwise they stream raw lightcones.
 python fno_21cm_3d.py
 

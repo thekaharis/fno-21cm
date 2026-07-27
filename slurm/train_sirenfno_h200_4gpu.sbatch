@@ -80,7 +80,7 @@ export N_EPOCHS="${N_EPOCHS:-70}"
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5}"
+PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 
 # Stage the cube cache on the node-local NVMe, matching the plain-FNO job.
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"

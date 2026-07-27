@@ -64,7 +64,7 @@ export PYTHONUNBUFFERED=1
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe scratch (node has 28 TB NVMe SSD) so all 4
 # ranks read from ~3 GB/s local storage instead of contending on the shared
