@@ -139,6 +139,11 @@ class ThetaSchedule(nn.Module):
     """
 
     EPS = 1e-4
+    # The transition width is bounded rather than clamped. With an unbounded
+    # log-width the fit degenerates whenever there is no signal to find: the
+    # width collapsed 0.19 -> 0.00 -> 0.04 over three refits and then went
+    # non-finite, which poisoned the model it was installed into.
+    S_MIN, S_MAX = 0.02, 2.0
 
     def __init__(self, theta_lo: float = THETA_MAX, theta_hi: float = THETA_MAX,
                  c: float = -1.5, s: float = 0.4):
@@ -146,27 +151,39 @@ class ThetaSchedule(nn.Module):
         self.raw_lo = nn.Parameter(torch.tensor(_inv_squash(theta_lo)))
         self.raw_hi = nn.Parameter(torch.tensor(_inv_squash(theta_hi)))
         self.c = nn.Parameter(torch.tensor(float(c)))
-        self.log_s = nn.Parameter(torch.tensor(float(np.log(max(s, 1e-3)))))
+        self.raw_s = nn.Parameter(torch.tensor(self._inv_width(s)))
+
+    @classmethod
+    def _inv_width(cls, s: float) -> float:
+        p = (float(s) - cls.S_MIN) / (cls.S_MAX - cls.S_MIN)
+        p = min(max(p, 1e-6), 1 - 1e-6)
+        return float(np.log(p / (1 - p)))
+
+    def width(self) -> torch.Tensor:
+        return self.S_MIN + (self.S_MAX - self.S_MIN) * torch.sigmoid(self.raw_s)
 
     def forward(self, mean_value: torch.Tensor) -> torch.Tensor:
         lo = _squash(self.raw_lo)
         hi = _squash(self.raw_hi)
         m = torch.log10(mean_value.clamp_min(0.0) + self.EPS)
-        gate = torch.sigmoid((m - self.c) / self.log_s.exp().clamp_min(1e-3))
+        gate = torch.sigmoid((m - self.c) / self.width())
         return lo + (hi - lo) * gate
 
     # -- persistence / reporting -----------------------------------------
     def state_dict_floats(self) -> dict:
         return {"theta_lo": float(_squash(self.raw_lo)),
                 "theta_hi": float(_squash(self.raw_hi)),
-                "c": float(self.c), "s": float(self.log_s.exp())}
+                "c": float(self.c), "s": float(self.width())}
 
     def load_floats(self, d: dict) -> "ThetaSchedule":
+        need = ("theta_lo", "theta_hi", "c", "s")
+        if not all(np.isfinite(float(d[k])) for k in need):
+            raise ValueError(f"non-finite schedule: {[float(d[k]) for k in need]}")
         with torch.no_grad():
             self.raw_lo.copy_(torch.tensor(_inv_squash(d["theta_lo"])))
             self.raw_hi.copy_(torch.tensor(_inv_squash(d["theta_hi"])))
             self.c.copy_(torch.tensor(float(d["c"])))
-            self.log_s.copy_(torch.tensor(float(np.log(max(d["s"], 1e-3)))))
+            self.raw_s.copy_(torch.tensor(self._inv_width(d["s"])))
         return self
 
     def describe(self) -> str:

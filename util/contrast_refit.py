@@ -71,7 +71,10 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
         opt.zero_grad()
         th = sched(key).view((-1,) + (1,) * (pred.dim() - 1))
         loss = ((apply_contrast(pred, th, 0.5) - truth) ** 2).mean()
+        if not torch.isfinite(loss):
+            break                       # keep the last finite parameters
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(sched.parameters(), 1.0)
         opt.step()
     with torch.no_grad():
         base = float(((pred - truth) ** 2).mean().sqrt())
@@ -91,7 +94,16 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
         raise RuntimeError("refit requires a model wrapped with CONTRAST_MODE=xhi")
     pred, truth = collect_base_outputs(model, loader, device, max_samples)
     stats = fit_schedule(pred, truth, steps=steps)
-    contrast.schedule.load_floats(stats)
+    # Never install a degenerate fit: a non-finite schedule produces NaN
+    # predictions, which propagate into the weights and end the run.
+    try:
+        contrast.schedule.load_floats(stats)
+    except ValueError as exc:
+        print(f"[contrast] refit rejected ({exc}); keeping previous schedule",
+              flush=True)
+        stats["rejected"] = 1.0
+        return stats
+    stats["rejected"] = 0.0
     for p in contrast.schedule.parameters():      # keep it fixed during the M-step
         p.requires_grad_(False)
     contrast.enabled = True
