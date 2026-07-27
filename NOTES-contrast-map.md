@@ -356,9 +356,74 @@ Incidental but physical: driving `theta -> 0.02` hard-binarises the truth and
 costs 0.0879 RMSE. The partial ionisation in the transition band is real
 information worth ~58% of the model's entire error -- binarising is not free.
 
+### 6.1 Theta resolved against x_HI -- where the map does work
+
+The pooled sweeps above hide a real effect. `theta` was expected to depend on
+ionisation state: early on the field is a few small bubbles in a neutral sea,
+late on a few neutral islands in an ionised sea, and those need different
+sharpening. Resolving it required more statistics than the training cache
+holds -- its sampler down-weights the tails ~50x, leaving only 379 of 3960 test
+slices below x_HI = 0.36 -- so `dataset/build_xhi_band.py` builds a cache that
+saturates the band from **val + test cones only**: 6292 slices, 566 cones,
+~700-1100 per 0.05 bin against 34-68 before.
+
+`theta` fitted per bin on one set of cones, scored on disjoint cones, CI from a
+cone-level bootstrap. `edge_t` is truth edge density -- the control that says
+whether a bin contains any boundaries to sharpen.
+
+| x_HI | n | nB | edge_t | w_p/w_t | th_pred | identity | +theta | gain | 95% CI |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| *0.000-0.005* | *497* | *247* | *0.0001* | *10.65* | *0.161* | *0.06017* | *0.05247* | *-12.79%* | *[-26.4,-4.7]* |
+| **0.005-0.010** | 60 | 24 | 0.0038 | 1.72 | 0.289 | 0.13323 | 0.12103 | **-9.16%** | [-15.7,-4.4] |
+| **0.010-0.020** | 117 | 62 | 0.0076 | 1.73 | 0.311 | 0.13361 | 0.12321 | **-7.78%** | [-11.6,-4.7] |
+| **0.020-0.030** | 133 | 69 | 0.0108 | 2.02 | 0.482 | 0.18623 | 0.18246 | **-2.02%** | [-3.3,-0.9] |
+| **0.030-0.050** | 263 | 122 | 0.0162 | 2.14 | 0.482 | 0.17660 | 0.17293 | **-2.08%** | [-3.3,-1.1] |
+| 0.050-0.100 | 785 | 407 | 0.0279 | 3.01 | 0.804 | 0.21602 | 0.21565 | -0.17% | [-0.32,-0.02] |
+| 0.100-0.200 | 1612 | 807 | 0.0501 | 3.54 | 5.000 | 0.25824 | 0.25825 | +0.00% | [+0.00,+0.01] |
+| 0.200-0.360 | 2189 | 1076 | 0.0856 | 3.70 | 5.000 | 0.28232 | 0.28235 | +0.01% | [+0.01,+0.01] |
+
+**There is a genuine, realizable gain at x_HI ~ 0.005-0.05**: 2-9% held out,
+every CI clear of zero. It is *not* the degenerate artefact -- those bins carry
+edge densities 40-160x the near-empty bin's and width ratios of 1.7-2.1 rather
+than 10.65.
+
+The first row stays italicised and excluded from every headline. At
+`edge_t = 0.0001` the truth has essentially no boundaries; the model emits faint
+spurious structure and a small `theta` squashes it. That is thresholding noise
+off a blank field, not sharpening an edge, and it is the same artefact as the
+x_HI = 1.000 bin's -42% at the opposite end of reionisation. Any bin whose gain
+is not accompanied by real `edge_t` should be read as this.
+
+`theta_pred` rises monotonically with x_HI -- 0.29, 0.31, 0.48, 0.48, 0.80,
+identity, identity -- i.e. **sharp -> blurred**, the predicted direction.
+Spearman(`theta_pred`, x_HI) = **+0.448** over 0-0.36 and **+0.721** over
+0-0.10. Over the full test set it was +0.003: the decile binning averaged it
+away entirely.
+
+Two caveats on the size of the prize. Pooled over the whole 0.005-0.36 range
+the gain is only **-0.16%**, because the responsive regime is a thin slice of
+the data. And the effect is confined to x_HI < 0.05, which is a small part of
+any lightcone. This is a targeted correction for very-late-reionisation maps,
+not a general improvement.
+
+Why here and nowhere else, consistent with section 6: at x_HI ~ 0.01 the field
+is a handful of isolated neutral islands that the model renders as low-contrast
+blobs -- correctly located, just under-committed, which is exactly the defect a
+pointwise map fixes. By x_HI > 0.1 the field is a dense bubble network where the
+errors are *positional*, and there sharpening does nothing at all (+0.00%, CI
+width 0.01%, on 800-1100 held-out slices).
+
 ## 7. Verdict and open items
 
-**Verdict.** All routes are closed, and section 6 explains why in one line: the
+**Verdict, amended by 6.1.** The map is not useless -- it has one real regime.
+At x_HI ~ 0.005-0.05, very late reionisation, a per-bin `theta(x_HI)` buys a
+held-out 2-9% with intervals clear of zero, and `theta` there depends only on
+x_HI, which the model estimates from its own mean output. That is realizable.
+It is also narrow: pooled over x_HI < 0.36 it is worth -0.16%, and above
+x_HI = 0.1 it is exactly zero to within 0.01% on ~1900 held-out slices.
+
+Everywhere else the original verdict stands, and section 6 explains why in one
+line: the
 map is a working deblurrer (-9.28% on a field whose only defect is blur) that
 buys exactly 0.00% on the model, at matched sharpness. **The model's edges are
 not blurred, they are hedged** -- soft because their *position* is uncertain,
