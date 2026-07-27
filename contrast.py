@@ -204,6 +204,9 @@ class ContrastOutput(nn.Module):
                 f"contrast mode must be one of {'|'.join(self.MODES)}, got {mode!r}")
         self.mode = mode
         self.freeze = bool(freeze)
+        # Runtime gate for the alternating refit scheme: epoch 0 trains with no
+        # map because no prediction exists yet to fit a schedule against.
+        self.enabled = True
         if mode == "global":
             # sigmoid(3) -> theta near THETA_MAX, sigmoid(0) -> tau = 1/2
             self.raw = nn.Parameter(torch.tensor([3.0, 0.0]))
@@ -240,7 +243,7 @@ class ContrastOutput(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.mode == "off":
+        if self.mode == "off" or not self.enabled:
             return x
         if self.mode == "global":
             gate = torch.sigmoid(self.raw)

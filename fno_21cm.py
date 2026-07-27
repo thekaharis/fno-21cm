@@ -126,6 +126,12 @@ CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
 # i.e. the identity), so freezing is the only way to make the network face it.
 CONTRAST_SCHEDULE = os.environ.get("CONTRAST_SCHEDULE", "")
 CONTRAST_FREEZE = os.environ.get("CONTRAST_FREEZE", "0") not in ("0", "", "false")
+# Alternating refit (util/contrast_refit.py): epoch 0 trains with no map, then
+# each epoch refits theta(mean_pred) from the previous epoch's predictions and
+# trains through the frozen result.
+CONTRAST_REFIT = os.environ.get("CONTRAST_REFIT", "0") not in ("0", "", "false")
+CONTRAST_REFIT_SAMPLES = int(os.environ.get("CONTRAST_REFIT_SAMPLES", "2048"))
+CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "400"))
 
 SPLIT_SEED = int(os.environ.get("SPLIT_SEED", "42"))
 RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
@@ -161,8 +167,15 @@ DEVICE = os.environ.get(
 class SliceLoggingTrainer(Trainer):
     """Single-process trainer with dashboard-compatible JSONL metrics."""
 
-    def __init__(self, *args, metrics_path=None, append=False, **kwargs):
+    def __init__(self, *args, metrics_path=None, append=False,
+                 contrast_refit=False, refit_loader=None,
+                 refit_samples=2048, refit_steps=400, **kwargs):
         super().__init__(*args, **kwargs)
+        self.contrast_refit = contrast_refit
+        self.refit_loader = refit_loader
+        self.refit_samples = refit_samples
+        self.refit_steps = refit_steps
+        self._schedule_stats: dict | None = None
         self.metrics_path = Path(metrics_path) if metrics_path else None
         if self.metrics_path is not None:
             self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,6 +187,24 @@ class SliceLoggingTrainer(Trainer):
         # Drives ScheduledWeightedLoss' warmup ramp (matches the 3-D trainer).
         if hasattr(training_loss, "set_epoch"):
             training_loss.set_epoch(int(epoch))
+        if self.contrast_refit:
+            from util import contrast_refit as _refit
+            if int(epoch) == 0:
+                # No prediction exists yet to fit a schedule against.
+                _refit.disable(self.model)
+                self._schedule_stats = None
+                print("[contrast] epoch 0: map disabled", flush=True)
+            else:
+                st = _refit.refit_and_install(
+                    self.model, self.refit_loader or train_loader,
+                    DEVICE, self.refit_samples, self.refit_steps)
+                self._schedule_stats = st
+                print(f"[contrast] epoch {int(epoch)}: theta "
+                      f"{st['theta_lo']:.3f}->{st['theta_hi']:.3f} "
+                      f"@log10(m)={st['c']:.2f} w={st['s']:.2f} "
+                      f"median={st['theta_median']:.3f} "
+                      f"(train gain {st['train_gain_pct']:+.2f}% on "
+                      f"{st['n_slices']} slices)", flush=True)
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, _avg_lasso, elapsed = out
         row = {
@@ -186,6 +217,9 @@ class SliceLoggingTrainer(Trainer):
                 if elapsed > 0 else 0.0
             ),
         }
+        if self._schedule_stats:
+            row.update({f"contrast_{k}": float(v)
+                        for k, v in self._schedule_stats.items()})
         if hasattr(training_loss, "pop_term_means"):
             row.update({
                 f"train_{name}_term": float(value)
@@ -583,8 +617,15 @@ def main() -> None:
         verbose=True,
         metrics_path=CHECKPOINT_DIR / "metrics.jsonl",
         append=RESUME_DIR is not None,
+        contrast_refit=CONTRAST_REFIT,
+        refit_samples=CONTRAST_REFIT_SAMPLES,
+        refit_steps=CONTRAST_REFIT_STEPS,
     )
 
+    if CONTRAST_REFIT:
+        print(f"Contrast refit: ON -- epoch 0 unmapped, then theta(mean_pred) "
+              f"refit each epoch on {CONTRAST_REFIT_SAMPLES} slices "
+              f"({CONTRAST_REFIT_STEPS} steps), frozen during training")
     print(f"Device: {DEVICE}; batch={BATCH_SIZE}; epochs={N_EPOCHS}; "
           f"lr={LEARNING_RATE:g}")
     print(f"Loss: {LOSS_L2_WEIGHT:g}*absL2 + "
