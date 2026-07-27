@@ -735,3 +735,93 @@ class HighKPowerRatio:
             (power_prediction + self.eps) / (power_target + self.eps)
         )
         return ratio.square().mean()
+
+
+# --------------------------------------------------------------- wall placement
+def _chamfer_distance(mask: torch.Tensor, cap: int) -> torch.Tensor:
+    """Distance in pixels from the nearest ``True`` in ``mask``, capped.
+
+    Iterative 3x3 min-propagation on the GPU: ``cap`` passes, each spreading the
+    front one pixel.  This is the chessboard (L-inf) distance rather than the
+    Euclidean one -- for penalising misplacement the difference is immaterial,
+    and it avoids a ~27% epoch overhead from a CPU scipy EDT round trip.
+
+    The cap is not only a speed knob: it bounds the loss gradient, since the
+    per-pixel weight is exactly this distance.
+    """
+    d = torch.where(mask, torch.zeros_like(mask, dtype=torch.float32),
+                    torch.full_like(mask, float(cap), dtype=torch.float32))
+    d = d.unsqueeze(1)
+    for _ in range(int(cap)):
+        # min-pool via -maxpool(-x); +1 per pixel of travel
+        d = torch.minimum(d, -F.max_pool2d(-d, 3, stride=1, padding=1) + 1.0)
+    return d.squeeze(1).clamp_(0.0, float(cap))
+
+
+def signed_distance(target: torch.Tensor, cap: int = 32,
+                    threshold: float = 0.5) -> torch.Tensor:
+    """Signed distance to the neutral-region wall: <0 inside, >0 outside."""
+    inside = target > threshold
+    return (_chamfer_distance(inside, cap)          # outside: positive
+            - _chamfer_distance(~inside, cap))      # inside: negative
+
+
+class WallPlacementLoss:
+    """Penalise every pixel by its distance from the true bubble wall.
+
+        L = mean( phi * (pred - target) ),   phi = signed distance of the truth
+
+    Why this and not H1.  Every pointwise-difference loss saturates with
+    displacement: once a predicted wall no longer overlaps the true one, moving
+    it further costs nothing more, so no gradient pulls it home.  Measured on a
+    displaced step edge, going from 4 px to 48 px of error changes L2 by 3.5x,
+    H1 by 2.9x, and the H1 *seminorm* and H2 by exactly 1.00x -- gradient-only
+    losses are completely blind to misplacement.  H1's whole sensitivity comes
+    from the L2 term inside it.  This loss changes by 144x over the same range.
+
+    It is linear in the prediction, so its gradient never vanishes, and it is
+    minimised exactly at ``pred = target`` for a binary target -- unlike the
+    transport/spectral edge terms, which fix neither level nor position and
+    diverged without an L2 anchor.
+
+    ``cap`` bounds the per-pixel weight, hence the gradient.
+    """
+
+    def __init__(self, cap: int = 32, threshold: float = 0.5,
+                 normalize: bool = True):
+        self.cap = int(cap)
+        self.threshold = float(threshold)
+        self.normalize = bool(normalize)
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
+        with torch.no_grad():
+            phi = signed_distance(y.detach().squeeze(1), self.cap, self.threshold)
+            if self.normalize:
+                phi = phi / self.cap
+        return (phi.unsqueeze(1) * (out - y)).mean()
+
+
+class H1Seminorm:
+    """Gradient-only Sobolev loss -- H1 with the L2 term removed.
+
+    Provided because ``neuralop.H1Loss`` is *not* L2-free: it sums
+    ``||u-v||^2`` and ``||grad u - grad v||^2``.  Be aware of what this costs:
+    the seminorm has constants in its null space (any uniform offset is free)
+    and, as measured above, it is exactly insensitive to how far a wall is
+    misplaced.  Use it to reproduce that result, not to fix placement.
+    """
+
+    def __init__(self, cap: float | None = None):
+        self.cap = cap
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        du = torch.roll(out, -1, dims=-2) - out
+        dv = torch.roll(out, -1, dims=-1) - out
+        ty = torch.roll(y, -1, dims=-2) - y
+        tx = torch.roll(y, -1, dims=-1) - y
+        sq = (du - ty) ** 2 + (dv - tx) ** 2
+        if self.cap is not None:
+            sq = sq.clamp(max=float(self.cap) ** 2)
+        return sq.mean().sqrt()

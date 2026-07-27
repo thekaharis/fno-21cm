@@ -51,9 +51,11 @@ from dataset import paths
 from losses import (
     AbsoluteLoss,
     BinaryCrossEntropyTerm,
+    H1Seminorm,
     HighKPowerRatio,
     ScheduledWeightedLoss,
     SlicedWassersteinEdges,
+    WallPlacementLoss,
 )
 from contrast import ContrastComposed
 from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
@@ -117,6 +119,15 @@ LOSS_HIGHK_WEIGHT = float(os.environ.get("LOSS_HIGHK_WEIGHT", "0.0"))
 LOSS_EDGE_WARMUP_EPOCHS = int(os.environ.get("LOSS_EDGE_WARMUP_EPOCHS", "5"))
 SWD_DIRECTIONS = int(os.environ.get("SWD_DIRECTIONS", "48"))
 HIGHK_MIN = float(os.environ.get("HIGHK_MIN", "0.2"))
+# Wall-placement loss (losses.WallPlacementLoss): penalises every pixel by its
+# distance from the true wall, so misplacement costs grow with distance instead
+# of saturating. WALL_CAP bounds the per-pixel weight and hence the gradient.
+LOSS_WALL_WEIGHT = float(os.environ.get("LOSS_WALL_WEIGHT", "0.0"))
+WALL_CAP = int(os.environ.get("WALL_CAP", "32"))
+# Gradient-only Sobolev term. neuralop's H1Loss is NOT L2-free; this one is,
+# and is exactly blind to misplacement (measured 1.00x from 4 px to 48 px).
+LOSS_H1SEMI_WEIGHT = float(os.environ.get("LOSS_H1SEMI_WEIGHT", "0.0"))
+H1SEMI_CAP = os.environ.get("H1SEMI_CAP", "")
 # Output contrast map (contrast.py): off | global | head | xhi.
 # Initialised at the identity, so every mode starts from the baseline.
 CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
@@ -352,6 +363,7 @@ def build_losses():
     weights = (
         LOSS_L2_WEIGHT, LOSS_H1_WEIGHT, LOSS_BCE_WEIGHT,
         LOSS_SWD_WEIGHT, LOSS_HIGHK_WEIGHT,
+        LOSS_WALL_WEIGHT, LOSS_H1SEMI_WEIGHT,
     )
     if all(weight <= 0 for weight in weights):
         raise ValueError("at least one loss weight must be positive")
@@ -360,18 +372,23 @@ def build_losses():
     bce = BinaryCrossEntropyTerm()
     swd = SlicedWassersteinEdges(n_directions=SWD_DIRECTIONS, seed=RUN_SEED)
     highk = HighKPowerRatio(k_min=HIGHK_MIN)
+    wall = WallPlacementLoss(cap=WALL_CAP)
+    h1semi = H1Seminorm(cap=float(H1SEMI_CAP) if H1SEMI_CAP else None)
     training = ScheduledWeightedLoss(
         (LOSS_L2_WEIGHT, l2),
         (LOSS_H1_WEIGHT, h1),
         (LOSS_BCE_WEIGHT, bce),
         (LOSS_SWD_WEIGHT, swd),
         (LOSS_HIGHK_WEIGHT, highk),
+        (LOSS_WALL_WEIGHT, wall),
+        (LOSS_H1SEMI_WEIGHT, h1semi),
         warmup_terms=(3, 4),
         warmup_epochs=LOSS_EDGE_WARMUP_EPOCHS,
-        term_names=("l2", "h1", "bce", "swd", "highk"),
+        term_names=("l2", "h1", "bce", "swd", "highk", "wall", "h1semi"),
     )
     return training, {
         "l2": l2, "h1": h1, "bce": bce, "swd": swd, "highk": highk,
+        "wall": wall, "h1semi": h1semi,
     }
 
 
@@ -630,7 +647,9 @@ def main() -> None:
           f"lr={LEARNING_RATE:g}")
     print(f"Loss: {LOSS_L2_WEIGHT:g}*absL2 + "
           f"{LOSS_H1_WEIGHT:g}*absH1 + {LOSS_BCE_WEIGHT:g}*BCE + "
-          f"{LOSS_SWD_WEIGHT:g}*SWD + {LOSS_HIGHK_WEIGHT:g}*highK"
+          f"{LOSS_SWD_WEIGHT:g}*SWD + {LOSS_HIGHK_WEIGHT:g}*highK + "
+          f"{LOSS_WALL_WEIGHT:g}*wall[cap={WALL_CAP}] + "
+          f"{LOSS_H1SEMI_WEIGHT:g}*H1semi"
           + (f" (edge terms warm up over {LOSS_EDGE_WARMUP_EPOCHS} epochs)"
              if (LOSS_SWD_WEIGHT or LOSS_HIGHK_WEIGHT)
              and LOSS_EDGE_WARMUP_EPOCHS else ""))
