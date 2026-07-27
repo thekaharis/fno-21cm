@@ -72,18 +72,19 @@ import neuralop as _neuralop
 print(f"[fno_zre] using neuralop from {_neuralop.__file__}")
 
 from dataset.dataset_zre import ZreMapDataset, split_by_cone
+from dataset import paths
 from dataset.zre_target import TARGET_KINDS, build_target_cache
 from losses import AbsoluteLoss, H2Loss2d, RelativeLoss, WeightedLoss
 from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
 
 
 # ------------------------------------------------------------------ config
-DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
+DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", paths.LIGHTCONES))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
-TARGET_CACHE = Path(os.environ.get("ZRE_TARGET_CACHE", "zre_targets.h5"))
+TARGET_CACHE = Path(os.environ.get("ZRE_TARGET_CACHE", paths.ZRE_TARGETS))
 # Input sidecar (density slices + params; dataset/zre_input_cache.py).
 # Missing file -> silent fallback to reading the raw lightcones.
-INPUT_CACHE = Path(os.environ.get("ZRE_INPUT_CACHE", "zre_inputs.h5"))
+INPUT_CACHE = Path(os.environ.get("ZRE_INPUT_CACHE", paths.ZRE_INPUTS))
 TARGET_KIND = os.environ.get("TARGET_KIND", "gompertz").lower()
 INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_params").lower()
 

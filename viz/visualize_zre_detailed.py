@@ -47,6 +47,7 @@ from fno_zre import (
     VAL_FRACTION, Z_MAX, Z_MIN, build_zre_model,
 )
 from dataset.dataset_zre import ZreMapDataset, split_by_cone
+from dataset import paths
 from modeling import TrainerModel, load_checkpoint
 from util.run_metadata import resolve_checkpoint
 
@@ -315,7 +316,7 @@ def main():
         z_max=Z_MAX,
         use_params=(INPUT_FEATURES == "density_params"),
         preload=False,
-        density_cache=os.environ.get("ZRE_INPUT_CACHE", "zre_inputs.h5"),
+        density_cache=os.environ.get("ZRE_INPUT_CACHE", paths.ZRE_INPUTS),
     )
     train_ds, val_ds, test_ds = split_by_cone(
         dataset, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,

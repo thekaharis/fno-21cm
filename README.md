@@ -43,12 +43,38 @@ Two pipelines live side by side:
 └── neuraloperator/                # vendored third-party lib (gitignored)
 ```
 
+## Where the data lives
+
+Datasets are **outside the repository**, under the work directory:
+
+```
+<work>/data/data/            raw 21cmFAST lightcone HDF5 files
+<work>/data/compressed/      derived caches: trainset.h5, zre_*.h5, xhi_band_*.h5
+<work>/fno-21cm/             this repository -- code only
+```
+
+Nothing large belongs in the project root. Resolve paths through
+`dataset/paths.py` (`paths.TRAINSET`, `paths.compressed("name.h5")`) rather than
+writing them out, and in SLURM scripts use the `DATA_DIR` variable. Override the
+root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
+
+### Analysis helpers
+
+| File | Purpose |
+|------|---------|
+| `util/field_metrics.py` | Sharpness/blur statistics (`width_px`, `peak_grad`, `lowpass`, ...). Mean \|grad\| is **not** a sharpness measure -- see the module docstring. |
+| `util/slice_eval.py` | Rebuild a trained 2-D run and gather predictions; cone-grouped splits. |
+| `util/contrast_sweep.py` | (theta, tau) grid sweeps, held-out scoring, cone-level bootstrap CIs. |
+| `contrast.py` | The contrast map itself, and its learnable output stage. |
+
 ### 2-D pipeline (v2)
 | File | Purpose |
 |------|---------|
 | `fno_21cm.py` | 2-D training entry point. |
 | `dataset/dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
 | `dataset/build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
+| `dataset/build_xhi_band.py` | Slice cache saturating a chosen x_HI band, for regime-specific analysis. |
+| `dataset/paths.py` | Canonical dataset locations. Import from here; never hard-code a path. |
 | `viz/visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
 | `figures/comparison_*.png`, `figures/scatter_*.png` | Example outputs from the v2 run. |
 
@@ -499,10 +525,10 @@ is visible after the first epoch.
 ### 2-D (legacy, kept for comparison)
 
 ```bash
-# 1. Build the compact slice cache (once)
-python -m dataset.build_trainset --data ./data --out trainset.h5
+# 1. Build the compact slice cache (once) -> data/compressed/trainset.h5
+python -m dataset.build_trainset
 
-# 2. Train (expects trainset.h5 in the project root)
+# 2. Train (resolves the cache via dataset/paths.py; override with CACHE_FILE)
 python fno_21cm.py
 
 # 3. Visualize predictions from the latest 2-D checkpoint

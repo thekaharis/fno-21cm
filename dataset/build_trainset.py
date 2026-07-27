@@ -39,6 +39,7 @@ import h5py
 import numpy as np
 
 from dataset.lightcone_params import PARAM_NAMES, read_sampled_params
+from dataset import paths
 
 PARAMS = list(PARAM_NAMES)
 SLICE_CACHE_VERSION = 2
@@ -282,7 +283,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, help="directory of lightcone .h5 files")
-    ap.add_argument("--out", type=Path, default=Path("trainset.h5"))
+    ap.add_argument("--out", type=Path, default=paths.TRAINSET)
     ap.add_argument("--k", type=int, default=6, help="slices per cone")
     ap.add_argument("--lo", type=float, default=0.05, help="reionization window low")
     ap.add_argument("--hi", type=float, default=0.95, help="reionization window high")

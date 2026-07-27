@@ -27,7 +27,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:a30:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/localsirenfno-zre-%j.out
@@ -42,6 +42,9 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
+
+# Datasets live outside the repo; see dataset/paths.py
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/../data/compressed}"
 mkdir -p logs
 
 # --- Activate the conda environment -----------------------------------------
@@ -57,7 +60,7 @@ export PYTHONUNBUFFERED=1
 
 # --- Data & experiment configuration ----------------------------------------
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$PROJECT_ROOT/zre_targets.h5}"
+export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 
 # MODEL_KIND picks the architecture; CHECKPOINT_DIR is deliberately NOT set
 # here -- fno_zre.py derives a per-kind default

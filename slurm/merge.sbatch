@@ -31,6 +31,9 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
+
+# Datasets live outside the repo; see dataset/paths.py
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/../data/compressed}"
 mkdir -p logs
 
 module load devel/miniforge
@@ -40,5 +43,5 @@ export PYTHONUNBUFFERED=1
 
 NUM_SHARDS=33                                       # MUST match build.sbatch
 
-python -m dataset.build_trainset --out trainset.h5 --merge --num-shards "$NUM_SHARDS"
-echo "merge complete -> trainset.h5"
+python -m dataset.build_trainset --out "$DATA_DIR/trainset.h5" --merge --num-shards "$NUM_SHARDS"
+echo "merge complete -> $DATA_DIR/trainset.h5"

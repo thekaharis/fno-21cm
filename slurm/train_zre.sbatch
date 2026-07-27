@@ -28,7 +28,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:a30:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/fno-zre-%j.out
@@ -45,6 +45,9 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
+
+# Datasets live outside the repo; see dataset/paths.py
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/../data/compressed}"
 mkdir -p logs
 
 # --- Activate the conda environment -----------------------------------------
@@ -68,12 +71,12 @@ export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/d
 # Fitted z_re target maps live on the work FS next to the checkpoints so
 # every job (and the viz scripts) share one cache. Delete the file to force
 # a refit after changing the fit grids in dataset/zre_target.py.
-export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$PROJECT_ROOT/zre_targets.h5}"
+export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 
 # Input sidecar (density slices + params; build with
 # slurm/build_zre_inputs.sbatch). If absent, falls back to reading all raw
 # lightcones at startup (~1.5-2 h); with the cache, startup is minutes.
-export ZRE_INPUT_CACHE="${ZRE_INPUT_CACHE:-$PROJECT_ROOT/zre_inputs.h5}"
+export ZRE_INPUT_CACHE="${ZRE_INPUT_CACHE:-$DATA_DIR/zre_inputs.h5}"
 
 # Defaults mirror fno_zre.py; listed here so an experiment can flip them via
 # `sbatch --export=ALL,...` without editing files.  MODEL_KIND picks the

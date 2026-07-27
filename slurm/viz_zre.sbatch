@@ -41,6 +41,9 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
+
+# Datasets live outside the repo; see dataset/paths.py
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/../data/compressed}"
 mkdir -p logs figures
 
 # --- Conda env --------------------------------------------------------------
@@ -56,7 +59,7 @@ export PYTHONUNBUFFERED=1
 
 # --- Data & experiment configuration (keep in sync with train_zre.sbatch) ---
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
-export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$PROJECT_ROOT/zre_targets.h5}"
+export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 export MODEL_KIND="${MODEL_KIND:-fno}"
 export TARGET_KIND="${TARGET_KIND:-gompertz}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_params}"

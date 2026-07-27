@@ -42,6 +42,9 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
+
+# Datasets live outside the repo; see dataset/paths.py
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/../data/compressed}"
 mkdir -p logs
 
 # --- Activate the conda environment -----------------------------------------
@@ -65,7 +68,7 @@ export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/d
 # Fitted z_re target maps live on the work FS next to the checkpoints so
 # every job (and the viz scripts) share one cache. Delete the file to force
 # a refit after changing the fit grids in dataset/zre_target.py.
-export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$PROJECT_ROOT/zre_targets.h5}"
+export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 
 # Model and loss ablation. CHECKPOINT_DIR is explicit so the run never
 # collides with the default per-kind directory or the L2-only companion run.

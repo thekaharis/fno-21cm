@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:a30:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --mem=32G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/localwno-xhi2d-%j.out
@@ -18,6 +18,9 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
+
+# Datasets live outside the repo; see dataset/paths.py
+DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/../data/compressed}"
 mkdir -p logs
 
 module load devel/miniforge
@@ -28,7 +31,7 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
-export CACHE_FILE="${CACHE_FILE:-$PROJECT_ROOT/trainset.h5}"
+export CACHE_FILE="${CACHE_FILE:-$DATA_DIR/trainset.h5}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_z_params}"
 export MODEL_KIND="${MODEL_KIND:-localwno}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_2d_xhi_${MODEL_KIND}}"

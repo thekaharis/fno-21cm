@@ -47,6 +47,7 @@ from neuralop.utils import count_model_params
 import neuralop as _neuralop
 
 from dataset.dataset import SliceCache, split_by_cone
+from dataset import paths
 from losses import (
     AbsoluteLoss,
     BinaryCrossEntropyTerm,
@@ -61,7 +62,7 @@ from util.run_metadata import write_run_metadata
 print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
 
-CACHE_FILE = Path(os.environ.get("CACHE_FILE", "trainset.h5"))
+CACHE_FILE = Path(os.environ.get("CACHE_FILE", paths.TRAINSET))
 INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_z_params").lower()
 MODEL_KIND = os.environ.get("MODEL_KIND", "localwno").lower()
 

@@ -28,6 +28,7 @@ from typing import Sequence
 
 import h5py
 import numpy as np
+from dataset import paths
 
 TARGET_KINDS = ("gompertz", "step")
 
@@ -139,7 +140,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data", type=Path, required=True,
                         help="directory containing 21cmfast_11d_sample*.h5")
-    parser.add_argument("--out", type=Path, default=Path("zre_targets.h5"))
+    parser.add_argument("--out", type=Path, default=paths.ZRE_TARGETS)
     parser.add_argument("--kind", choices=TARGET_KINDS, default="gompertz")
     args = parser.parse_args()
 
