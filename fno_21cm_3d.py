@@ -49,6 +49,7 @@ from losses import (
     AbsoluteLoss,
     BinaryCrossEntropyTerm,
     IonizedWallRMSE,
+    ExponentialWallDistance,
     LightconeH1Loss,
     LOSVolumeWeightedLoss,
     RelativeLoss,
@@ -144,6 +145,14 @@ LOSS_IONIZED_WALL_WEIGHT = float(
 IONIZED_WALL_KERNEL_SIZE = int(
     os.environ.get("IONIZED_WALL_KERNEL_SIZE", "7")
 )
+# Exponential-in-distance wall placement (losses.ExponentialWallDistance).
+# The 2-D sweep picked scale=16: it matched truth sharpness (width 1.33 vs
+# 1.47, blur 0.108 vs 0.111) and halved the wall-placement error, at ~20% more
+# RMSE. scale=4 diverged. Distances are in voxels, so the penalty is mildly
+# anisotropic here -- the LOS axis is not on the transverse physical scale.
+LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
+EXPWALL_SCALE = float(os.environ.get("EXPWALL_SCALE", "16.0"))
+WALL_CAP = int(os.environ.get("WALL_CAP", "32"))
 IONIZED_WALL_THRESHOLD = float(
     os.environ.get("IONIZED_WALL_THRESHOLD", "0.5")
 )
@@ -818,13 +827,15 @@ def main():
         print(f"[loss] LOS volume weights ON: w in "
               f"[{float(los_w.min()):.2f}, {float(los_w.max()):.2f}] "
               f"(mean 1.0, {len(los_w)} slices)")
+    expwall_loss = ExponentialWallDistance(scale=EXPWALL_SCALE, cap=WALL_CAP)
     loss_terms = (
         (LOSS_L2_WEIGHT, l2_term),
         (LOSS_H1_WEIGHT, h1_term),
         (LOSS_BCE_WEIGHT, bce_loss),
         (LOSS_IONIZED_WALL_WEIGHT, ionized_wall_loss),
+        (LOSS_EXPWALL_WEIGHT, expwall_loss),
     )
-    loss_term_names = ("l2", "h1", "bce", "ionized_wall")
+    loss_term_names = ("l2", "h1", "bce", "ionized_wall", "expwall")
     h1_warmup_epochs = {
         "fno": 0,
         "ufno": UFNO_H1_WARMUP_EPOCHS,
@@ -851,6 +862,7 @@ def main():
         "h1_rel": RelativeLoss(h1_loss),
         "bce": bce_loss,
         "ionized_wall": ionized_wall_loss,
+        "expwall": expwall_loss,
     }
 
     # -------------------------------------------- 7. trainer
@@ -965,6 +977,7 @@ def main():
                 "h1": LOSS_H1_WEIGHT,
                 "bce": LOSS_BCE_WEIGHT,
                 "ionized_wall": LOSS_IONIZED_WALL_WEIGHT,
+                "expwall": LOSS_EXPWALL_WEIGHT,
             },
             "loss_modes": {
                 "l2": LOSS_L2_MODE,

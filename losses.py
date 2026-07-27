@@ -752,15 +752,24 @@ def _chamfer_distance(mask: torch.Tensor, cap: int) -> torch.Tensor:
     d = torch.where(mask, torch.zeros_like(mask, dtype=torch.float32),
                     torch.full_like(mask, float(cap), dtype=torch.float32))
     d = d.unsqueeze(1)
+    # 2-D slices or 3-D cubes; same propagation, different pooling rank.
+    pool = {4: F.max_pool2d, 5: F.max_pool3d}.get(d.dim())
+    if pool is None:
+        raise ValueError(f"expected (N,H,W) or (N,D,H,W) mask, got {mask.shape}")
     for _ in range(int(cap)):
         # min-pool via -maxpool(-x); +1 per pixel of travel
-        d = torch.minimum(d, -F.max_pool2d(-d, 3, stride=1, padding=1) + 1.0)
+        d = torch.minimum(d, -pool(-d, 3, stride=1, padding=1) + 1.0)
     return d.squeeze(1).clamp_(0.0, float(cap))
 
 
 def signed_distance(target: torch.Tensor, cap: int = 32,
                     threshold: float = 0.5) -> torch.Tensor:
-    """Signed distance to the neutral-region wall: <0 inside, >0 outside."""
+    """Signed distance to the neutral-region wall: <0 inside, >0 outside.
+
+    Works on 2-D slices and 3-D cubes.  Note the distance is in *voxels*: for
+    a lightcone the transverse and line-of-sight axes are not on the same
+    physical scale, so the penalty is mildly anisotropic in Mpc.
+    """
     inside = target > threshold
     return (_chamfer_distance(inside, cap)          # outside: positive
             - _chamfer_distance(~inside, cap))      # inside: negative
