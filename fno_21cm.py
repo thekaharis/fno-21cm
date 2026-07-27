@@ -117,9 +117,15 @@ LOSS_HIGHK_WEIGHT = float(os.environ.get("LOSS_HIGHK_WEIGHT", "0.0"))
 LOSS_EDGE_WARMUP_EPOCHS = int(os.environ.get("LOSS_EDGE_WARMUP_EPOCHS", "5"))
 SWD_DIRECTIONS = int(os.environ.get("SWD_DIRECTIONS", "48"))
 HIGHK_MIN = float(os.environ.get("HIGHK_MIN", "0.2"))
-# Learnable output contrast map (contrast.py): off | global | head.
-# Initialised at the identity, so "global"/"head" start from the baseline.
+# Output contrast map (contrast.py): off | global | head | xhi.
+# Initialised at the identity, so every mode starts from the baseline.
 CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
+# xhi mode: JSON of theta-schedule floats from tests/fit_theta_schedule.py, or
+# "theta=<v>" for a constant map. CONTRAST_FREEZE stops the map being learned --
+# a learnable map is simply neutralised (a learned global theta went to 4.43,
+# i.e. the identity), so freezing is the only way to make the network face it.
+CONTRAST_SCHEDULE = os.environ.get("CONTRAST_SCHEDULE", "")
+CONTRAST_FREEZE = os.environ.get("CONTRAST_FREEZE", "0") not in ("0", "", "false")
 
 SPLIT_SEED = int(os.environ.get("SPLIT_SEED", "42"))
 RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
@@ -483,9 +489,22 @@ def main() -> None:
         MODEL_KIND, cache.in_channels
     )
     if CONTRAST_MODE != "off":
-        inner = ContrastComposed(inner, CONTRAST_MODE)
-        model_config = {**model_config, "contrast_mode": CONTRAST_MODE}
-        description = f"{description} + contrast[{CONTRAST_MODE}]"
+        schedule = None
+        if CONTRAST_SCHEDULE.startswith("theta="):
+            v = float(CONTRAST_SCHEDULE.split("=", 1)[1])
+            schedule = {"theta_lo": v, "theta_hi": v, "c": -1.5, "s": 0.4}
+        elif CONTRAST_SCHEDULE:
+            schedule = {k: float(v) for k, v in
+                        json.loads(Path(CONTRAST_SCHEDULE).read_text()).items()
+                        if k in ("theta_lo", "theta_hi", "c", "s")}
+        inner = ContrastComposed(inner, CONTRAST_MODE, schedule=schedule,
+                                 freeze=CONTRAST_FREEZE)
+        model_config = {**model_config, "contrast_mode": CONTRAST_MODE,
+                        "contrast_schedule": schedule,
+                        "contrast_freeze": CONTRAST_FREEZE}
+        detail = inner.contrast.describe()
+        description = (f"{description} + contrast[{CONTRAST_MODE}"
+                       f"{'' if detail is None else ': ' + detail}]")
     model = TrainerModel(inner).to(DEVICE)
     print(f"Model: {description} -> {count_model_params(model.fno):,} parameters")
 
@@ -545,6 +564,8 @@ def main() -> None:
             },
             "loss_modes": {"l2": "absolute", "h1": "absolute"},
             "contrast_mode": CONTRAST_MODE,
+            "contrast_schedule": CONTRAST_SCHEDULE,
+            "contrast_freeze": CONTRAST_FREEZE,
             "run_seed": RUN_SEED,
             "resume_dir": RESUME_DIR,
         },

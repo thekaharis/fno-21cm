@@ -1,0 +1,15 @@
+{
+  "form": "theta_lo + (theta_hi-theta_lo)*sigmoid((log10(m+eps)-c)/s)",
+  "fitted_on": "checkpoints/xhi2d_whno_glob_lr3e4",
+  "cache": "xhi_band_000_036.h5",
+  "key": "mean_pred+z",
+  "held_out_gain_pct": 0.0020898338042751874,
+  "held_out_ci": [
+    -0.00012759264612999255,
+    0.004181485661784445
+  ],
+  "theta_lo": 0.9824787974357605,
+  "theta_hi": 4.997396469116211,
+  "c": -2.488553524017334,
+  "s": 0.10623917728662491
+}
