@@ -61,7 +61,7 @@ def _mse(out, y):
 
 def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
                  init_lo: float = 0.5, init_hi: float = 4.0,
-                 objective=None) -> dict:
+                 objective=None, batch: int = 128) -> dict:
     """Fit theta(mean_pred) against ``objective`` (default MSE).
 
     Pass the run's own training loss for ``objective``.  Fitting the map under
@@ -78,19 +78,37 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
     sched = ThetaSchedule(theta_lo=init_lo, theta_hi=init_hi).to(device)
     opt = torch.optim.Adam(sched.parameters(), lr=lr)
     key = pred.flatten(1).mean(1).detach()
+    n = len(pred)
+    gen = torch.Generator(device="cpu").manual_seed(0)
     for _ in range(steps):
+        # A minibatch, not the whole set: some loss terms build very large
+        # intermediates (SWD's cumsum asked for 7.18 GiB over 2048 slices).
+        sel = (torch.randperm(n, generator=gen)[:batch].to(pred.device)
+               if n > batch else slice(None))
         opt.zero_grad()
-        th = sched(key).view((-1,) + (1,) * (pred.dim() - 1))
-        loss = objective(apply_contrast(pred, th, 0.5), truth)
+        th = sched(key[sel]).view((-1,) + (1,) * (pred.dim() - 1))
+        loss = objective(apply_contrast(pred[sel], th, 0.5), truth[sel])
         if not torch.isfinite(loss):
             break                       # keep the last finite parameters
         loss.backward()
+        # A single non-finite gradient would otherwise make clip_grad_norm_'s
+        # total norm NaN and poison every parameter in one step.
+        if not all(p.grad is None or torch.isfinite(p.grad).all()
+                   for p in sched.parameters()):
+            opt.zero_grad()
+            continue
         torch.nn.utils.clip_grad_norm_(sched.parameters(), 1.0)
         opt.step()
     with torch.no_grad():
-        base = float(objective(pred, truth))
-        th = sched(key).view((-1,) + (1,) * (pred.dim() - 1))
-        got = float(objective(apply_contrast(pred, th, 0.5), truth))
+        b_sum = g_sum = 0.0
+        chunks = 0
+        for s in range(0, n, batch):
+            pc, tc = pred[s:s + batch], truth[s:s + batch]
+            th = sched(key[s:s + batch]).view((-1,) + (1,) * (pred.dim() - 1))
+            b_sum += float(objective(pc, tc))
+            g_sum += float(objective(apply_contrast(pc, th, 0.5), tc))
+            chunks += 1
+        base, got = b_sum / max(chunks, 1), g_sum / max(chunks, 1)
     out = sched.state_dict_floats()
     out["train_gain_pct"] = 100.0 * (got / base - 1.0) if base > 0 else 0.0
     out["theta_median"] = float(sched(key).median())
@@ -105,6 +123,7 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
         raise RuntimeError("refit requires a model wrapped with CONTRAST_MODE=xhi")
     pred, truth = collect_base_outputs(model, loader, device, max_samples)
     stats = fit_schedule(pred, truth, steps=steps, objective=objective)
+    stats["n_slices"] = int(len(pred))      # set before any early return
     # Never install a degenerate fit: a non-finite schedule produces NaN
     # predictions, which propagate into the weights and end the run.
     try:
@@ -118,7 +137,6 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
     for p in contrast.schedule.parameters():      # keep it fixed during the M-step
         p.requires_grad_(False)
     contrast.enabled = True
-    stats["n_slices"] = int(len(pred))
     return stats
 
 
