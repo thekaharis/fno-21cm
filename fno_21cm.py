@@ -186,12 +186,15 @@ class SliceLoggingTrainer(Trainer):
 
     def __init__(self, *args, metrics_path=None, append=False,
                  contrast_refit=False, refit_loader=None,
-                 refit_samples=2048, refit_steps=400, **kwargs):
+                 refit_samples=2048, refit_steps=400,
+                 refit_objective=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.contrast_refit = contrast_refit
         self.refit_loader = refit_loader
         self.refit_samples = refit_samples
         self.refit_steps = refit_steps
+        # Fit the map under the loss actually being trained on.
+        self.refit_objective = refit_objective
         self._schedule_stats: dict | None = None
         self.metrics_path = Path(metrics_path) if metrics_path else None
         if self.metrics_path is not None:
@@ -214,7 +217,8 @@ class SliceLoggingTrainer(Trainer):
             else:
                 st = _refit.refit_and_install(
                     self.model, self.refit_loader or train_loader,
-                    DEVICE, self.refit_samples, self.refit_steps)
+                    DEVICE, self.refit_samples, self.refit_steps,
+                    objective=self.refit_objective)
                 self._schedule_stats = st
                 print(f"[contrast] epoch {int(epoch)}: theta "
                       f"{st['theta_lo']:.3f}->{st['theta_hi']:.3f} "
@@ -575,6 +579,18 @@ def main() -> None:
         optimizer, T_max=N_EPOCHS
     )
     training_loss, eval_losses = build_losses()
+    # Stateless copy of the active terms, so refitting the contrast map does
+    # not pollute the trainer's per-term running means, and so the map is
+    # fitted under the loss the run actually trains on.
+    _active = [(w, eval_losses[n]) for n, w in zip(
+        ("l2", "h1", "bce", "swd", "highk", "wall", "h1semi", "expwall"),
+        (LOSS_L2_WEIGHT, LOSS_H1_WEIGHT, LOSS_BCE_WEIGHT, LOSS_SWD_WEIGHT,
+         LOSS_HIGHK_WEIGHT, LOSS_WALL_WEIGHT, LOSS_H1SEMI_WEIGHT,
+         LOSS_EXPWALL_WEIGHT)) if w > 0]
+
+    def refit_objective(out, y):
+        return sum(w * term(out, y) for w, term in _active)
+
 
     metadata = {
         "task": "2d",
@@ -646,6 +662,7 @@ def main() -> None:
         contrast_refit=CONTRAST_REFIT,
         refit_samples=CONTRAST_REFIT_SAMPLES,
         refit_steps=CONTRAST_REFIT_STEPS,
+        refit_objective=refit_objective,
     )
 
     if CONTRAST_REFIT:

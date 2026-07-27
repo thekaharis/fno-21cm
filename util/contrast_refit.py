@@ -55,14 +55,25 @@ def collect_base_outputs(model, loader, device, max_samples: int = 2048):
     return torch.cat(preds), torch.cat(truths)
 
 
+def _mse(out, y):
+    return ((out - y) ** 2).mean()
+
+
 def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
-                 init_lo: float = 0.5, init_hi: float = 4.0) -> dict:
-    """Fit theta(mean_pred) by direct post-map MSE minimisation.
+                 init_lo: float = 0.5, init_hi: float = 4.0,
+                 objective=None) -> dict:
+    """Fit theta(mean_pred) against ``objective`` (default MSE).
+
+    Pass the run's own training loss for ``objective``.  Fitting the map under
+    MSE while the network trains under something else optimises the map for a
+    criterion nobody is using -- and in a deliberately L2-free run it quietly
+    reintroduces L2 through the back door.
 
     Initialised mid-range on purpose: at theta = THETA_MAX the sigmoid squash
     sits at sigmoid(13.8), where d(theta)/d(raw) ~ 1e-6 and the fit cannot move
     at all.
     """
+    objective = objective or _mse
     device = pred.device
     sched = ThetaSchedule(theta_lo=init_lo, theta_hi=init_hi).to(device)
     opt = torch.optim.Adam(sched.parameters(), lr=lr)
@@ -70,16 +81,16 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
     for _ in range(steps):
         opt.zero_grad()
         th = sched(key).view((-1,) + (1,) * (pred.dim() - 1))
-        loss = ((apply_contrast(pred, th, 0.5) - truth) ** 2).mean()
+        loss = objective(apply_contrast(pred, th, 0.5), truth)
         if not torch.isfinite(loss):
             break                       # keep the last finite parameters
         loss.backward()
         torch.nn.utils.clip_grad_norm_(sched.parameters(), 1.0)
         opt.step()
     with torch.no_grad():
-        base = float(((pred - truth) ** 2).mean().sqrt())
+        base = float(objective(pred, truth))
         th = sched(key).view((-1,) + (1,) * (pred.dim() - 1))
-        got = float(((apply_contrast(pred, th, 0.5) - truth) ** 2).mean().sqrt())
+        got = float(objective(apply_contrast(pred, th, 0.5), truth))
     out = sched.state_dict_floats()
     out["train_gain_pct"] = 100.0 * (got / base - 1.0) if base > 0 else 0.0
     out["theta_median"] = float(sched(key).median())
@@ -87,13 +98,13 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
 
 
 def refit_and_install(model, loader, device, max_samples: int = 2048,
-                      steps: int = 400) -> dict:
+                      steps: int = 400, objective=None) -> dict:
     """One E-step: refit from current predictions and install the result."""
     contrast = getattr(getattr(model, "fno", model), "contrast", None)
     if contrast is None or contrast.mode != "xhi":
         raise RuntimeError("refit requires a model wrapped with CONTRAST_MODE=xhi")
     pred, truth = collect_base_outputs(model, loader, device, max_samples)
-    stats = fit_schedule(pred, truth, steps=steps)
+    stats = fit_schedule(pred, truth, steps=steps, objective=objective)
     # Never install a degenerate fit: a non-finite schedule produces NaN
     # predictions, which propagate into the weights and end the run.
     try:
