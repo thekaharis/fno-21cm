@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from dataset import paths
 from dataset.dataset import SliceCache
 from dataset.dataset_3d import ParameterNormalization
 from modeling import load_checkpoint
@@ -58,8 +59,17 @@ def open_run(run_dir, checkpoint: str = "final_model_state_dict.pt",
     load_checkpoint(model, str(run_dir / checkpoint))
     model = model.to(device).eval()
     norm = meta.get("parameter_normalization")
+    # Runs from before the datasets moved record an absolute path in the old
+    # project root; fall back to the same filename under data/compressed.
+    recorded = Path(meta["dataset"]["cache_file"])
+    if cache_file is None and not recorded.exists():
+        moved = paths.compressed(recorded.name)
+        if not moved.exists():
+            raise FileNotFoundError(
+                f"cache {recorded} not found, and no {moved}")
+        recorded = moved
     cache = SliceCache(
-        cache_file or meta["dataset"]["cache_file"],
+        cache_file or recorded,
         input_features=meta["input_features"]["name"],
         parameter_normalization=(ParameterNormalization.from_dict(norm)
                                  if norm else None),

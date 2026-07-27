@@ -785,6 +785,15 @@ class WallPlacementLoss:
     diverged without an L2 anchor.
 
     ``cap`` bounds the per-pixel weight, hence the gradient.
+
+    Do not use this term alone.  Being linear in the prediction, its gradient
+    is the constant ``phi`` and never diminishes as the optimum is approached,
+    so through a sigmoid output it drives the logits straight into saturation --
+    where the sigmoid derivative is ~0 and learning stops.  Run alone it
+    collapsed to a uniform field of 1.0 (std 0, 100% saturated) by epoch 0 and
+    never moved again.  Pair it with a region term whose gradient is largest
+    exactly where this one dies: BCE, whose gradient ``sigma(z) - y`` is maximal
+    for a confidently wrong pixel.  BCE is not an L2 term, so "no L2" survives.
     """
 
     def __init__(self, cap: int = 32, threshold: float = 0.5,
