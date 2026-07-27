@@ -149,6 +149,13 @@ CONTRAST_FREEZE = os.environ.get("CONTRAST_FREEZE", "0") not in ("0", "", "false
 CONTRAST_REFIT = os.environ.get("CONTRAST_REFIT", "0") not in ("0", "", "false")
 CONTRAST_REFIT_SAMPLES = int(os.environ.get("CONTRAST_REFIT_SAMPLES", "2048"))
 CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "400"))
+# Floor on an *installed* theta. The refit optimises theta for a frozen
+# prediction and is blind to what it does to the next epoch's gradients: the
+# map amplifies them by ~1/(2*theta), so a fitted theta of 0.031 amplified by
+# 16x and took the model to NaN inside one epoch. 0.25 caps that at ~2x.
+CONTRAST_THETA_FLOOR = float(os.environ.get("CONTRAST_THETA_FLOOR", "0.25"))
+# The 2-D trainer had no clipping at all, unlike fno_zre.py.
+GRAD_CLIP_NORM = float(os.environ.get("GRAD_CLIP_NORM", "0.0"))
 
 SPLIT_SEED = int(os.environ.get("SPLIT_SEED", "42"))
 RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
@@ -218,7 +225,8 @@ class SliceLoggingTrainer(Trainer):
                 st = _refit.refit_and_install(
                     self.model, self.refit_loader or train_loader,
                     DEVICE, self.refit_samples, self.refit_steps,
-                    objective=self.refit_objective)
+                    objective=self.refit_objective,
+                    theta_floor=CONTRAST_THETA_FLOOR)
                 self._schedule_stats = st
                 print(f"[contrast] epoch {int(epoch)}: theta "
                       f"{st['theta_lo']:.3f}->{st['theta_hi']:.3f} "
@@ -572,9 +580,17 @@ def main() -> None:
     model = TrainerModel(inner).to(DEVICE)
     print(f"Model: {description} -> {count_model_params(model.fno):,} parameters")
 
+    if GRAD_CLIP_NORM > 0:
+        def _clip_before_step(optim, args, kwargs):
+            torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                           max_norm=GRAD_CLIP_NORM)
+            return None
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
+    if GRAD_CLIP_NORM > 0:
+        optimizer.register_step_pre_hook(_clip_before_step)
+        print(f"Gradient clipping: max_norm={GRAD_CLIP_NORM}")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=N_EPOCHS
     )

@@ -116,7 +116,8 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
 
 
 def refit_and_install(model, loader, device, max_samples: int = 2048,
-                      steps: int = 400, objective=None) -> dict:
+                      steps: int = 400, objective=None,
+                      theta_floor: float = 0.25) -> dict:
     """One E-step: refit from current predictions and install the result."""
     contrast = getattr(getattr(model, "fno", model), "contrast", None)
     if contrast is None or contrast.mode != "xhi":
@@ -124,6 +125,13 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
     pred, truth = collect_base_outputs(model, loader, device, max_samples)
     stats = fit_schedule(pred, truth, steps=steps, objective=objective)
     stats["n_slices"] = int(len(pred))      # set before any early return
+    # The E-step optimises theta for a frozen prediction and is blind to the
+    # M-step's dynamics: the map amplifies gradients by ~1/(2*theta), and a
+    # fitted 0.031 amplified 16x and produced NaN weights within one epoch.
+    for k in ("theta_lo", "theta_hi"):
+        if stats[k] < theta_floor:
+            stats[k + "_prefloor"] = stats[k]
+            stats[k] = theta_floor
     # Never install a degenerate fit: a non-finite schedule produces NaN
     # predictions, which propagate into the weights and end the run.
     try:
