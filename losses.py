@@ -834,3 +834,54 @@ class H1Seminorm:
         if self.cap is not None:
             sq = sq.clamp(max=float(self.cap) ** 2)
         return sq.mean().sqrt()
+
+
+class ExponentialWallDistance:
+    """Absolute error weighted exponentially by distance from the true wall.
+
+        L = mean( w(phi) * |pred - y| ) / mean(w),   w = exp(|phi| / scale)
+
+    Two deliberate choices.
+
+    *Exponential in distance* -- a pixel wrong far from any true wall is
+    punished exponentially harder than one wrong at the boundary.  A hedged
+    ramp is wrong over a wide band, so its tails land in the expensive region;
+    a sharp wall misplaced by d is wrong over a band of width d, costing
+    ~scale*(exp(d/scale) - 1).  Both blur and displacement are punished, and
+    neither saturates.
+
+    *Absolute error, not squared* -- this is what removes hedging rather than
+    merely discouraging it.  The minimiser of a weighted squared error is a
+    weighted conditional *mean*, which is exactly the blurred compromise L2
+    and BCE both converge to.  The minimiser of a weighted absolute error is a
+    weighted conditional *median*, and the median of a binary field is binary:
+    under uncertainty this loss picks a side instead of averaging.
+
+    It also fixes the collapse of :class:`WallPlacementLoss`, whose gradient
+    ``phi`` has no sign change and so drove the logits to saturation (a uniform
+    1.0 field, 100% saturated, frozen from epoch 0).  Here the gradient is
+    ``w * sign(pred - y)``: same non-vanishing magnitude, but it reverses at
+    ``pred = y``, so the optimum is a fixed point rather than something the
+    optimiser sails through.
+
+    ``cap`` bounds the distance, hence ``w``, hence the gradient.
+    """
+
+    def __init__(self, scale: float = 8.0, cap: int = 32,
+                 threshold: float = 0.5, power: float = 1.0):
+        self.scale = float(scale)
+        self.cap = int(cap)
+        self.threshold = float(threshold)
+        self.power = float(power)
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
+        with torch.no_grad():
+            phi = signed_distance(y.detach().squeeze(1), self.cap, self.threshold)
+            w = torch.exp(phi.abs() / self.scale).unsqueeze(1)
+            w = w / w.mean()                      # keep the loss scale stable
+        err = (out - y).abs()
+        if self.power != 1.0:
+            err = err.clamp_min(1e-12) ** self.power
+        return (w * err).mean()
