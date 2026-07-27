@@ -14,6 +14,7 @@ View from your laptop through an SSH tunnel:
 """
 import argparse
 import json
+import math
 import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +38,23 @@ def load_extra_runs():
 
 def save_extra_runs(paths):
     EXTRA_RUNS_FILE.write_text(json.dumps(sorted(set(paths)), indent=2) + "\n")
+
+
+def json_safe(obj):
+    """Replace NaN/Inf with None so the payload is valid JSON.
+
+    A diverged run writes NaN into metrics.jsonl.  Python's json emits those as
+    bare ``NaN``/``Infinity`` literals, which JSON.parse rejects -- one such run
+    would otherwise break the whole dashboard, not just its own curve.  The
+    frontend already drops null points from plots and shows them as "-".
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
 
 
 def read_metrics(path):
@@ -369,6 +387,8 @@ class Handler(BaseHTTPRequestHandler):
         return super().parse_request()
 
     def _send(self, code, body, ctype="application/json"):
+        if not isinstance(body, bytes):
+            body = json_safe(body)
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
