@@ -45,8 +45,10 @@ def collect_base_outputs(model, loader, device, max_samples: int = 2048):
     for sample in loader:
         x = sample["x"].to(device, non_blocking=True)
         y = sample["y"].to(device, non_blocking=True)
-        preds.append(base(x)[:, 0].float())
-        truths.append(y[:, 0].float())
+        # Keep the channel axis: the refit objective is the run's own training
+        # loss, and it must see the shapes it sees during training.
+        preds.append(base(x).float())
+        truths.append(y.float())
         seen += len(x)
         if seen >= max_samples:
             break

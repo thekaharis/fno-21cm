@@ -738,6 +738,23 @@ class HighKPowerRatio:
 
 
 # --------------------------------------------------------------- wall placement
+def _drop_channel(field: torch.Tensor) -> torch.Tensor:
+    """(N,1,...) -> (N,...); leave an already channel-less field alone."""
+    return field.squeeze(1) if field.dim() in (4, 5) and field.shape[1] == 1 else field
+
+
+def _match_rank(weight: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    """Give ``weight`` the rank of ``like`` by restoring a channel axis.
+
+    Without this the weight is built at (N,H,W) while the prediction may be
+    (N,1,H,W) -- or vice versa in the refit path, where predictions carry no
+    channel axis. The two then broadcast to (N,N,H,W) instead of raising:
+    every sample's weight lands on every other sample's error, the gradients
+    are wrong, and memory grows as N^2. The values stay plausible, so it does
+    not announce itself.
+    """
+    return weight.unsqueeze(1) if like.dim() == weight.dim() + 1 else weight
+
 def _chamfer_distance(mask: torch.Tensor, cap: int) -> torch.Tensor:
     """Distance in pixels from the nearest ``True`` in ``mask``, capped.
 
@@ -815,10 +832,11 @@ class WallPlacementLoss:
         if out.shape != y.shape:
             raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
         with torch.no_grad():
-            phi = signed_distance(y.detach().squeeze(1), self.cap, self.threshold)
+            phi = signed_distance(_drop_channel(y.detach()), self.cap,
+                                  self.threshold)
             if self.normalize:
                 phi = phi / self.cap
-        return (phi.unsqueeze(1) * (out - y)).mean()
+        return (_match_rank(phi, out) * (out - y)).mean()
 
 
 class H1Seminorm:
@@ -887,8 +905,9 @@ class ExponentialWallDistance:
         if out.shape != y.shape:
             raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
         with torch.no_grad():
-            phi = signed_distance(y.detach().squeeze(1), self.cap, self.threshold)
-            w = torch.exp(phi.abs() / self.scale).unsqueeze(1)
+            phi = signed_distance(_drop_channel(y.detach()), self.cap,
+                                  self.threshold)
+            w = _match_rank(torch.exp(phi.abs() / self.scale), out)
             w = w / w.mean()                      # keep the loss scale stable
         err = (out - y).abs()
         if self.power != 1.0:
