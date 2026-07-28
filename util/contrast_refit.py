@@ -154,11 +154,24 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
         pre = list(stats["thetas"])
         stats["thetas"] = [max(v, theta_floor) for v in pre]
         stats["n_bins_floored"] = sum(1 for a, b in zip(pre, stats["thetas"]) if a < b)
+        # theta_median came from the *unfloored* fit, so the log would otherwise
+        # report a median below values it also prints as floored. Recompute it
+        # over the installed table, weighted by how many slices each bin holds.
+        counts = stats.get("bin_counts") or []
+        if counts:
+            paired = sorted((v, c) for v, c in zip(stats["thetas"], counts) if c)
+            total, acc = sum(c for _, c in paired), 0
+            for v, c in paired:
+                acc += c
+                if acc * 2 >= total:
+                    stats["theta_median"] = v
+                    break
     else:
         for k in ("theta_lo", "theta_hi"):
             if stats[k] < theta_floor:
                 stats[k + "_prefloor"] = stats[k]
                 stats[k] = theta_floor
+        stats["theta_median"] = max(stats["theta_median"], theta_floor)
     # Never install a degenerate fit: a non-finite schedule produces NaN
     # predictions, which propagate into the weights and end the run.
     try:
@@ -173,6 +186,30 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
         p.requires_grad_(False)
     contrast.enabled = True
     return stats
+
+
+def summary_line(stats: dict) -> str:
+    """One line describing a refit, for either schedule shape.
+
+    Lives here rather than in the trainer so the formatting is exercised by the
+    same tests as the fit. Three separate consumers of this dict have now been
+    broken by assuming the sigmoid's keys; there should only be one.
+    """
+    if stats.get("rejected"):
+        return "refit rejected; keeping previous schedule"
+    tail = (f"median={stats['theta_median']:.3f} "
+            f"(train gain {stats['train_gain_pct']:+.2f}% on "
+            f"{stats['n_slices']} slices)")
+    if "thetas" in stats:                       # stepped: a per-bin table
+        th, counts = stats["thetas"], stats.get("bin_counts") or []
+        edges = stats["edges"]
+        seen = [i for i in range(len(th)) if not counts or counts[i]]
+        body = " ".join(f"{edges[i]:.3g}:{th[i]:.2f}" for i in seen)
+        floored = stats.get("n_bins_floored") or 0
+        return (f"bins[{len(seen)}/{len(th)} seen"
+                f"{f', {floored} floored' if floored else ''}] {body}  {tail}")
+    return (f"theta {stats['theta_lo']:.3f}->{stats['theta_hi']:.3f} "
+            f"@log10(m)={stats['c']:.2f} w={stats['s']:.2f} {tail}")
 
 
 def disable(model) -> None:

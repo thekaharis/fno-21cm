@@ -234,12 +234,8 @@ class SliceLoggingTrainer(Trainer):
                     objective=self.refit_objective,
                     theta_floor=CONTRAST_THETA_FLOOR)
                 self._schedule_stats = st
-                print(f"[contrast] epoch {int(epoch)}: theta "
-                      f"{st['theta_lo']:.3f}->{st['theta_hi']:.3f} "
-                      f"@log10(m)={st['c']:.2f} w={st['s']:.2f} "
-                      f"median={st['theta_median']:.3f} "
-                      f"(train gain {st['train_gain_pct']:+.2f}% on "
-                      f"{st['n_slices']} slices)", flush=True)
+                print(f"[contrast] epoch {int(epoch)}: "
+                      f"{_refit.summary_line(st)}", flush=True)
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, _avg_lasso, elapsed = out
         row = {
