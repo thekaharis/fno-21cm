@@ -682,12 +682,24 @@ def main() -> None:
             "learning_rate": LEARNING_RATE,
             "weight_decay": WEIGHT_DECAY,
             "eval_interval": EVAL_INTERVAL,
+            # Every term, so a checkpoint records which loss produced it.
+            # wall/h1semi/expwall were missing here when they were added, so
+            # runs that used them recorded all-zero weights and are not
+            # self-describing; util/backfill_2d_loss_weights.py repairs those.
             "loss_weights": {
                 "l2": LOSS_L2_WEIGHT,
                 "h1": LOSS_H1_WEIGHT,
                 "bce": LOSS_BCE_WEIGHT,
                 "swd": LOSS_SWD_WEIGHT,
                 "highk": LOSS_HIGHK_WEIGHT,
+                "wall": LOSS_WALL_WEIGHT,
+                "h1semi": LOSS_H1SEMI_WEIGHT,
+                "expwall": LOSS_EXPWALL_WEIGHT,
+            },
+            "loss_params": {
+                "wall_cap": WALL_CAP,
+                "expwall_scale": EXPWALL_SCALE,
+                "h1semi_cap": H1SEMI_CAP,
             },
             "edge_terms": {
                 "warmup_epochs": LOSS_EDGE_WARMUP_EPOCHS,
