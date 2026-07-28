@@ -34,14 +34,18 @@ from util.slice_eval import gather, open_run, split_indices
 from viz.compare_xhi2d_models import representative_indices
 from viz.visualize_xhi2d_representative import DEFAULT_QUANTILES
 
+# Dropped from the first version: expwall s=4 (collapsed to uniform fields,
+# RMSE 0.511) and the H1 seminorm (strictly dominated by the L2 baseline on
+# RMSE, wall placement and width alike). Replaced by the two alternating-refit
+# contrast runs, whose final fitted schedules ride along in their checkpoints.
 MODELS = [
     ("L2 baseline", "checkpoints/xhi2d_whno_glob_lr3e4"),
-    ("H1 seminorm", "checkpoints/xhi2d_whno_glob_h1semi"),
     ("expwall s=16", "checkpoints/xhi2d_whno_glob_expwall16"),
     ("expwall s=8", "checkpoints/xhi2d_whno_glob_expwall8"),
-    ("expwall s=4", "checkpoints/xhi2d_whno_glob_expwall4"),
+    ("ctr-refit (L2)", "checkpoints/xhi2d_whno_glob_ctrrefit"),
+    ("ctr-refit +SWD", "checkpoints/xhi2d_whno_glob_ctrrefit_swd"),
 ]
-OUT = "figures/xhi2d_wall_models_grid.png"
+OUT = "figures/xhi2d_wall_models_grid_v2.png"
 CMAP = "magma"
 
 
