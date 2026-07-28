@@ -155,6 +155,13 @@ CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "400"))
 # 0.1); the table can, and can be non-monotonic.
 CONTRAST_SCHEDULE_KIND = os.environ.get("CONTRAST_SCHEDULE_KIND", "sigmoid").lower()
 CONTRAST_BINS = int(os.environ.get("CONTRAST_BINS", "14"))
+# Slice cache the refit draws from, if not the training loader. The training
+# sampler down-weights the x_HI tails ~50x, so a refit over it leaves the low
+# bins empty -- the first stepped run populated 4 of 14, none below x_HI = 0.1,
+# which is exactly the band where sharpening was measured to help. Must be
+# built from TRAIN cones: the schedule is part of the model, so fitting it on
+# val/test slices would leak.
+CONTRAST_REFIT_CACHE = os.environ.get("CONTRAST_REFIT_CACHE", "")
 # Floor on an *installed* theta. The refit optimises theta for a frozen
 # prediction and is blind to what it does to the next epoch's gradients: the
 # map amplifies them by ~1/(2*theta), so a fitted theta of 0.031 amplified by
@@ -560,6 +567,26 @@ def main() -> None:
         "pin_memory": DEVICE == "cuda",
     }
     train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+
+    refit_loader = None
+    if CONTRAST_REFIT and CONTRAST_REFIT_CACHE:
+        refit_cache = SliceCache(
+            paths.compressed(CONTRAST_REFIT_CACHE),
+            input_features=INPUT_FEATURES,
+            parameter_normalization=cache.parameter_normalization,
+        )
+        # Hard guard rather than a comment: a refit pool containing held-out
+        # cones would leak them into the model through the fitted schedule.
+        pool_cones = set(int(c) for c in np.unique(refit_cache.cone_id))
+        held_out = pool_cones - set(int(c) for c in train_cones)
+        if held_out:
+            raise SystemExit(
+                f"CONTRAST_REFIT_CACHE {CONTRAST_REFIT_CACHE} contains "
+                f"{len(held_out)} cones outside the training split "
+                f"(e.g. {sorted(held_out)[:5]}); refitting on it would leak")
+        refit_loader = DataLoader(refit_cache, shuffle=True, **loader_kwargs)
+        print(f"Contrast refit pool: {CONTRAST_REFIT_CACHE} "
+              f"({len(refit_cache)} slices, {len(pool_cones)} train cones)")
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
     test_loader = DataLoader(test_ds, shuffle=False, **loader_kwargs)
     test_loaders = {"val": val_loader, "test": test_loader}
@@ -691,6 +718,7 @@ def main() -> None:
         metrics_path=CHECKPOINT_DIR / "metrics.jsonl",
         append=RESUME_DIR is not None,
         contrast_refit=CONTRAST_REFIT,
+        refit_loader=refit_loader,
         refit_samples=CONTRAST_REFIT_SAMPLES,
         refit_steps=CONTRAST_REFIT_STEPS,
         refit_objective=refit_objective,
