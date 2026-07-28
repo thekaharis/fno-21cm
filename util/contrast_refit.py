@@ -27,8 +27,7 @@ from __future__ import annotations
 
 import torch
 
-from contrast import (THETA_MAX, SteppedThetaSchedule, ThetaSchedule,
-                      apply_contrast)
+from contrast import SteppedThetaSchedule, ThetaSchedule, apply_contrast
 
 
 @torch.no_grad()
@@ -177,9 +176,14 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
 
 
 def disable(model) -> None:
-    """Identity map, for the first epoch before any prediction exists."""
+    """Identity map, for the first epoch before any prediction exists.
+
+    The ``enabled`` gate is an exact passthrough, so there is nothing else to
+    do.  This used to also overwrite the schedule with sigmoid-shaped floats,
+    which raised KeyError('thetas') against a stepped schedule -- and was
+    redundant even for the sigmoid, since both kinds initialise at the identity
+    and a resumed run wants its learned values kept.
+    """
     contrast = getattr(getattr(model, "fno", model), "contrast", None)
     if contrast is not None:
         contrast.enabled = False
-        contrast.schedule.load_floats(
-            {"theta_lo": THETA_MAX, "theta_hi": THETA_MAX, "c": -1.5, "s": 0.4})
