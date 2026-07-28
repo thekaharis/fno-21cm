@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import torch
 
-from contrast import THETA_MAX, ThetaSchedule, apply_contrast
+from contrast import (THETA_MAX, SteppedThetaSchedule, ThetaSchedule,
+                      apply_contrast)
 
 
 @torch.no_grad()
@@ -61,7 +62,8 @@ def _mse(out, y):
 
 def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
                  init_lo: float = 0.5, init_hi: float = 4.0,
-                 objective=None, batch: int = 128) -> dict:
+                 objective=None, batch: int = 128,
+                 template=None) -> dict:
     """Fit theta(mean_pred) against ``objective`` (default MSE).
 
     Pass the run's own training loss for ``objective``.  Fitting the map under
@@ -75,7 +77,23 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
     """
     objective = objective or _mse
     device = pred.device
-    sched = ThetaSchedule(theta_lo=init_lo, theta_hi=init_hi).to(device)
+    if isinstance(template, SteppedThetaSchedule):
+        # Warm-start from the installed table: a refit batch does not populate
+        # every bin, and an unvisited bin must keep its value rather than
+        # snapping back to the initialisation.
+        sched = SteppedThetaSchedule(n_bins=template.n_bins,
+                                     edges=[0.0] + [float(e) for e in template.edges])
+        warm = template.state_dict_floats()
+        # Unstick saturated bins. theta = THETA_MAX maps to sigmoid(13.8), where
+        # d(theta)/d(raw) ~ 1e-6 and the bin cannot move at all -- so an
+        # identity-initialised table would stay identity forever. Clamp the
+        # starting point into the responsive part of the squash; learned values
+        # below init_hi are carried over untouched.
+        warm["thetas"] = [min(v, init_hi) for v in warm["thetas"]]
+        sched.load_floats(warm)
+        sched = sched.to(device)
+    else:
+        sched = ThetaSchedule(theta_lo=init_lo, theta_hi=init_hi).to(device)
     opt = torch.optim.Adam(sched.parameters(), lr=lr)
     key = pred.flatten(1).mean(1).detach()
     n = len(pred)
@@ -112,6 +130,10 @@ def fit_schedule(pred, truth, steps: int = 400, lr: float = 0.05,
     out = sched.state_dict_floats()
     out["train_gain_pct"] = 100.0 * (got / base - 1.0) if base > 0 else 0.0
     out["theta_median"] = float(sched(key).median())
+    if isinstance(sched, SteppedThetaSchedule):
+        counts = torch.bincount(sched.bin_of(key), minlength=sched.n_bins)
+        out["bin_counts"] = [int(c) for c in counts]
+        out["n_bins_seen"] = int((counts > 0).sum())
     return out
 
 
@@ -123,15 +145,21 @@ def refit_and_install(model, loader, device, max_samples: int = 2048,
     if contrast is None or contrast.mode != "xhi":
         raise RuntimeError("refit requires a model wrapped with CONTRAST_MODE=xhi")
     pred, truth = collect_base_outputs(model, loader, device, max_samples)
-    stats = fit_schedule(pred, truth, steps=steps, objective=objective)
+    stats = fit_schedule(pred, truth, steps=steps, objective=objective,
+                         template=contrast.schedule)
     stats["n_slices"] = int(len(pred))      # set before any early return
     # The E-step optimises theta for a frozen prediction and is blind to the
     # M-step's dynamics: the map amplifies gradients by ~1/(2*theta), and a
     # fitted 0.031 amplified 16x and produced NaN weights within one epoch.
-    for k in ("theta_lo", "theta_hi"):
-        if stats[k] < theta_floor:
-            stats[k + "_prefloor"] = stats[k]
-            stats[k] = theta_floor
+    if "thetas" in stats:
+        pre = list(stats["thetas"])
+        stats["thetas"] = [max(v, theta_floor) for v in pre]
+        stats["n_bins_floored"] = sum(1 for a, b in zip(pre, stats["thetas"]) if a < b)
+    else:
+        for k in ("theta_lo", "theta_hi"):
+            if stats[k] < theta_floor:
+                stats[k + "_prefloor"] = stats[k]
+                stats[k] = theta_floor
     # Never install a degenerate fit: a non-finite schedule produces NaN
     # predictions, which propagate into the weights and end the run.
     try:

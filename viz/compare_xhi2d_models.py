@@ -154,9 +154,12 @@ def build_model(config: dict) -> TrainerModel:
         raise ValueError(f"unsupported model kind {kind!r}")
     if contrast_mode != "off":
         from contrast import ContrastComposed
-        inner = ContrastComposed(inner, contrast_mode,
-                                 schedule=config.get("contrast_schedule"),
-                                 freeze=bool(config.get("contrast_freeze", False)))
+        inner = ContrastComposed(
+            inner, contrast_mode,
+            schedule=config.get("contrast_schedule"),
+            freeze=bool(config.get("contrast_freeze", False)),
+            schedule_kind=str(config.get("contrast_schedule_kind", "sigmoid")),
+            n_bins=int(config.get("contrast_bins", 14)))
     return TrainerModel(inner)
 
 

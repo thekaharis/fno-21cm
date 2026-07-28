@@ -149,6 +149,12 @@ CONTRAST_FREEZE = os.environ.get("CONTRAST_FREEZE", "0") not in ("0", "", "false
 CONTRAST_REFIT = os.environ.get("CONTRAST_REFIT", "0") not in ("0", "", "false")
 CONTRAST_REFIT_SAMPLES = int(os.environ.get("CONTRAST_REFIT_SAMPLES", "2048"))
 CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "400"))
+# sigmoid = 4-parameter curve; stepped = one learned theta per x_HI bin. The
+# curve can only express a single monotone step, so it cannot represent the
+# band the data wants (identity below 0.005, sharpen 0.005-0.05, identity above
+# 0.1); the table can, and can be non-monotonic.
+CONTRAST_SCHEDULE_KIND = os.environ.get("CONTRAST_SCHEDULE_KIND", "sigmoid").lower()
+CONTRAST_BINS = int(os.environ.get("CONTRAST_BINS", "14"))
 # Floor on an *installed* theta. The refit optimises theta for a frozen
 # prediction and is blind to what it does to the next epoch's gradients: the
 # map amplifies them by ~1/(2*theta), so a fitted theta of 0.031 amplified by
@@ -248,7 +254,12 @@ class SliceLoggingTrainer(Trainer):
         }
         if self._schedule_stats:
             row.update({f"contrast_{k}": float(v)
-                        for k, v in self._schedule_stats.items()})
+                        for k, v in self._schedule_stats.items()
+                        if isinstance(v, (int, float))})
+            if "thetas" in self._schedule_stats:
+                row["contrast_thetas"] = list(self._schedule_stats["thetas"])
+                row["contrast_bin_counts"] = list(
+                    self._schedule_stats.get("bin_counts", []))
         if hasattr(training_loss, "pop_term_means"):
             row.update({
                 f"train_{name}_term": float(value)
@@ -570,10 +581,16 @@ def main() -> None:
                         json.loads(Path(CONTRAST_SCHEDULE).read_text()).items()
                         if k in ("theta_lo", "theta_hi", "c", "s")}
         inner = ContrastComposed(inner, CONTRAST_MODE, schedule=schedule,
-                                 freeze=CONTRAST_FREEZE)
+                                 freeze=CONTRAST_FREEZE,
+                                 schedule_kind=CONTRAST_SCHEDULE_KIND,
+                                 n_bins=CONTRAST_BINS)
         model_config = {**model_config, "contrast_mode": CONTRAST_MODE,
                         "contrast_schedule": schedule,
-                        "contrast_freeze": CONTRAST_FREEZE}
+                        "contrast_freeze": CONTRAST_FREEZE,
+            "contrast_schedule_kind": CONTRAST_SCHEDULE_KIND,
+            "contrast_bins": CONTRAST_BINS,
+                        "contrast_schedule_kind": CONTRAST_SCHEDULE_KIND,
+                        "contrast_bins": CONTRAST_BINS}
         detail = inner.contrast.describe()
         description = (f"{description} + contrast[{CONTRAST_MODE}"
                        f"{'' if detail is None else ': ' + detail}]")
@@ -658,6 +675,8 @@ def main() -> None:
             "contrast_mode": CONTRAST_MODE,
             "contrast_schedule": CONTRAST_SCHEDULE,
             "contrast_freeze": CONTRAST_FREEZE,
+            "contrast_schedule_kind": CONTRAST_SCHEDULE_KIND,
+            "contrast_bins": CONTRAST_BINS,
             "run_seed": RUN_SEED,
             "resume_dir": RESUME_DIR,
         },

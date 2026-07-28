@@ -192,6 +192,67 @@ class ThetaSchedule(nn.Module):
                 f"@ log10(m)={d['c']:.2f} width {d['s']:.2f}")
 
 
+class SteppedThetaSchedule(nn.Module):
+    """One independently learned theta per x_HI bin -- a lookup table, not a curve.
+
+    :class:`ThetaSchedule` is a 4-parameter sigmoid, so it can only express a
+    single monotone step: sharpen below some ionisation level, or above it.  The
+    shape the data actually wants is a *band* (NOTES-contrast-map.md 6.1): the
+    identity below x_HI ~ 0.005 where slices are near-empty and sharpening only
+    thresholds noise, strong sharpening across 0.005-0.05 where the field is a
+    few isolated neutral islands, and the identity again above 0.1 where the
+    errors are positional rather than blur.  A sigmoid cannot represent that
+    notch at all; a per-bin table can, and can also be non-monotonic.
+
+    Bin edges are log-spaced by default because the interesting range spans a
+    decade near zero while everything above 0.1 behaves identically.
+
+    Empty bins keep their previous value rather than drifting: a refit batch
+    will not populate every bin, and a bin with no samples gets no gradient.
+    """
+
+    def __init__(self, n_bins: int = 14, lo: float = 1e-3, hi: float = 1.0,
+                 init: float = THETA_MAX, edges=None):
+        super().__init__()
+        if edges is None:
+            inner = np.geomspace(lo, hi, n_bins - 1)
+            edges = np.concatenate([[0.0], inner])
+        edges = np.asarray(edges, dtype=np.float64)
+        self.register_buffer("edges", torch.tensor(edges[1:], dtype=torch.float32))
+        self.n_bins = len(edges)
+        self.raw = nn.Parameter(
+            torch.full((self.n_bins,), _inv_squash(init), dtype=torch.float32))
+
+    def thetas(self) -> torch.Tensor:
+        return _squash(self.raw)
+
+    def bin_of(self, key: torch.Tensor) -> torch.Tensor:
+        return torch.bucketize(key.detach(), self.edges)
+
+    def forward(self, mean_value: torch.Tensor) -> torch.Tensor:
+        return self.thetas()[self.bin_of(mean_value)]
+
+    # -- persistence / reporting -----------------------------------------
+    def state_dict_floats(self) -> dict:
+        return {"kind": "stepped",
+                "edges": [0.0] + [float(e) for e in self.edges],
+                "thetas": [float(v) for v in self.thetas()]}
+
+    def load_floats(self, d: dict) -> "SteppedThetaSchedule":
+        th = [float(v) for v in d["thetas"]]
+        if not all(np.isfinite(v) for v in th):
+            raise ValueError(f"non-finite stepped schedule: {th}")
+        with torch.no_grad():
+            self.raw.copy_(torch.tensor([_inv_squash(v) for v in th]))
+        return self
+
+    def describe(self) -> str:
+        th = self.thetas()
+        e = [0.0] + [float(x) for x in self.edges]
+        parts = [f"{e[i]:.3g}:{float(th[i]):.2f}" for i in range(self.n_bins)]
+        return "theta/bin " + " ".join(parts)
+
+
 class ContrastOutput(nn.Module):
     """Learnable output-stage contrast map, as part of the network.
 
@@ -213,7 +274,8 @@ class ContrastOutput(nn.Module):
     MODES = ("off", "global", "head", "xhi")
 
     def __init__(self, mode: str = "global", schedule: dict | None = None,
-                 freeze: bool = False):
+                 freeze: bool = False, schedule_kind: str = "sigmoid",
+                 n_bins: int = 14):
         super().__init__()
         mode = str(mode).lower()
         if mode not in self.MODES:
@@ -230,7 +292,14 @@ class ContrastOutput(nn.Module):
         elif mode == "head":
             self.head = ContrastHead()
         elif mode == "xhi":
-            self.schedule = ThetaSchedule()
+            # "stepped" is a per-bin lookup table; "sigmoid" is the 4-parameter
+            # curve, which cannot express a band (see SteppedThetaSchedule).
+            kind = str(schedule_kind).lower()
+            if kind not in ("sigmoid", "stepped"):
+                raise ValueError(f"schedule kind must be sigmoid|stepped, got {kind!r}")
+            self.schedule_kind = kind
+            self.schedule = (SteppedThetaSchedule(n_bins=n_bins)
+                             if kind == "stepped" else ThetaSchedule())
             if schedule:
                 self.schedule.load_floats(schedule)
             if self.freeze:
@@ -281,10 +350,12 @@ class ContrastComposed(nn.Module):
     """``base`` network followed by a learnable :class:`ContrastOutput`."""
 
     def __init__(self, base: nn.Module, mode: str = "global",
-                 schedule: dict | None = None, freeze: bool = False):
+                 schedule: dict | None = None, freeze: bool = False,
+                 schedule_kind: str = "sigmoid", n_bins: int = 14):
         super().__init__()
         self.base = base
-        self.contrast = ContrastOutput(mode, schedule=schedule, freeze=freeze)
+        self.contrast = ContrastOutput(mode, schedule=schedule, freeze=freeze,
+                                       schedule_kind=schedule_kind, n_bins=n_bins)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.contrast(self.base(x, **kwargs))
