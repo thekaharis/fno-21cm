@@ -474,9 +474,12 @@ def main() -> None:
     if args.page_size <= 0:
         parser.error("--page-size must be positive")
 
+    # load_run already rejects unsupported kinds and incomplete runs; the old
+    # equality check here was left over from the LocalWNO sweep and excluded
+    # every localop run, even though model construction is metadata-driven.
     wno = load_run(args.wno_run.name, args.wno_run)
-    if wno is None or wno.kind != "localwno":
-        raise SystemExit(f"completed LocalWNO run not found in {args.wno_run}")
+    if wno is None:
+        raise SystemExit(f"no completed 2-D run in {args.wno_run}")
     ufno_metadata = load_3d_metadata(args.ufno_checkpoint)
     localfno_metadata = load_3d_metadata(args.localfno_checkpoint)
     if ufno_metadata["model_config"]["kind"] != "ufno":
