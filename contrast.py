@@ -337,12 +337,25 @@ class ContrastOutput(nn.Module):
             tau = TAU_MIN + (TAU_MAX - TAU_MIN) * gate[1]
             return apply_contrast(x, theta, tau)
         if self.mode == "xhi":
-            # Mean over the field is the ionisation-state proxy. Detached: the
+            # Mean of the field is the ionisation-state proxy. Detached: the
             # schedule should react to the prediction, not give the network a
             # gradient path for gaming its own mean to pick a softer theta.
-            mean_value = x.detach().flatten(1).mean(1)
-            theta = self.schedule(mean_value)
-            return apply_contrast(x, theta.view((-1,) + (1,) * (x.dim() - 1)), 0.5)
+            if x.dim() == 5:
+                # A lightcone cube spans the whole reionisation history along
+                # its trailing line-of-sight axis, so a single mean per cube
+                # would average x_HI ~ 0 and x_HI ~ 1 together and describe
+                # neither. theta is therefore per LOS slice, which is also
+                # exactly the quantity the 2-D schedule was fitted on.
+                m = x.detach().mean(dim=(-3, -2))          # (N, C, W)
+                if m.dim() == 3:
+                    m = m[:, 0]                            # (N, W)
+                theta = self.schedule(m.reshape(-1)).view(m.shape)
+                theta = theta[:, None, None, None, :]      # (N,1,1,1,W)
+            else:
+                mean_value = x.detach().flatten(1).mean(1)
+                theta = self.schedule(mean_value).view(
+                    (-1,) + (1,) * (x.dim() - 1))
+            return apply_contrast(x, theta, 0.5)
         return self.head.apply(x)
 
 

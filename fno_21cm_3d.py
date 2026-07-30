@@ -58,6 +58,7 @@ from losses import (
     WeightedLoss,
     los_volume_weights,
 )
+from contrast import ContrastComposed
 from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
 from util.run_metadata import write_run_metadata
 from util.spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
@@ -157,6 +158,20 @@ LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
 # 85.8 once the prediction is merely blurred. A fixed weight therefore either
 # swamps L2 early or vanishes late; the ramp lets L2 establish structure first.
 EXPWALL_WARMUP_EPOCHS = int(os.environ.get("EXPWALL_WARMUP_EPOCHS", "0"))
+# Output contrast map (contrast.py), same machinery as the 2-D trainer. In 3-D
+# theta is indexed per line-of-sight slice, not per cube: a cube spans the whole
+# reionisation history, so one mean per cube averages x_HI ~ 0 and x_HI ~ 1
+# together and describes neither.
+CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
+CONTRAST_REFIT = os.environ.get("CONTRAST_REFIT", "0") not in ("0", "", "false")
+CONTRAST_SCHEDULE_KIND = os.environ.get("CONTRAST_SCHEDULE_KIND", "stepped").lower()
+CONTRAST_BINS = int(os.environ.get("CONTRAST_BINS", "14"))
+# Counted in LOS slices, not cubes: 8 cubes of 256 slices already gives 2048,
+# matching the 2-D refit, and holding whole cubes for the fit would not fit.
+CONTRAST_REFIT_SAMPLES = int(os.environ.get("CONTRAST_REFIT_SAMPLES", "2048"))
+CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "300"))
+CONTRAST_REFIT_BATCH = int(os.environ.get("CONTRAST_REFIT_BATCH", "64"))
+CONTRAST_THETA_FLOOR = float(os.environ.get("CONTRAST_THETA_FLOOR", "0.25"))
 EXPWALL_SCALE = float(os.environ.get("EXPWALL_SCALE", "16.0"))
 WALL_CAP = int(os.environ.get("WALL_CAP", "32"))
 IONIZED_WALL_THRESHOLD = float(
@@ -412,6 +427,10 @@ class LoggingTrainer(Trainer):
             else:
                 self.spectral_history.record(-1)
 
+    # set by main() when the contrast refit is active
+    _refit_objective = None
+    _schedule_stats = None
+
     def train_one_epoch(self, epoch, train_loader, training_loss):
         # DistributedSampler must be told the epoch so it reshuffles
         # consistently across ranks each epoch.
@@ -420,6 +439,27 @@ class LoggingTrainer(Trainer):
             sampler.set_epoch(int(epoch))
         if hasattr(training_loss, "set_epoch"):
             training_loss.set_epoch(int(epoch))
+        if CONTRAST_REFIT and CONTRAST_MODE != "off":
+            from util import contrast_refit as _refit
+            if int(epoch) == 0:
+                _refit.disable(self.model)          # nothing to fit against yet
+                self._schedule_stats = None
+                if self._is_rank_0:
+                    print("[contrast] epoch 0: map disabled", flush=True)
+            else:
+                # Every rank refits independently on its own shard rather than
+                # broadcasting: the schedule is a handful of scalars and the fit
+                # is deterministic given the data, so the ranks stay close, and
+                # this avoids a collective inside the epoch loop.
+                st = _refit.refit_and_install(
+                    self.model, train_loader, self.device,
+                    CONTRAST_REFIT_SAMPLES, CONTRAST_REFIT_STEPS,
+                    objective=self._refit_objective,
+                    theta_floor=CONTRAST_THETA_FLOOR)
+                self._schedule_stats = st
+                if self._is_rank_0:
+                    print(f"[contrast] epoch {int(epoch)}: "
+                          f"{_refit.summary_line(st)}", flush=True)
         trainer_device = torch.device(self.device)
         if trainer_device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(trainer_device)
@@ -743,6 +783,14 @@ def main():
            + ", ".join(dataset.input_features.channel_names))
 
     fno = build_3d_model(MODEL_CONFIG, in_channels)
+    if CONTRAST_MODE != "off":
+        fno = ContrastComposed(fno, CONTRAST_MODE,
+                               schedule_kind=CONTRAST_SCHEDULE_KIND,
+                               n_bins=CONTRAST_BINS)
+        rprint(f"Contrast map: {CONTRAST_MODE}/{CONTRAST_SCHEDULE_KIND} "
+               f"({CONTRAST_BINS} bins), theta per LOS slice"
+               + (f"; refit each epoch on {CONTRAST_REFIT_SAMPLES} slices"
+                  if CONTRAST_REFIT else " (fixed)"))
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
     # would confuse count_model_params).
     n_params = count_model_params(fno)
@@ -881,6 +929,14 @@ def main():
     }
 
     # -------------------------------------------- 7. trainer
+    if CONTRAST_REFIT and CONTRAST_MODE != "off":
+        # Fit the map under the loss the run trains on, not a hardcoded MSE.
+        _active = [(w, term) for w, term in loss_terms if w > 0]
+
+        def _refit_objective(out, y):
+            return sum(w * term(out, y) for w, term in _active)
+        LoggingTrainer._refit_objective = staticmethod(_refit_objective)
+
     trainer = LoggingTrainer(
         model=model,
         n_epochs=N_EPOCHS,

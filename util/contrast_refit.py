@@ -37,7 +37,8 @@ def collect_base_outputs(model, loader, device, max_samples: int = 2048):
     Deliberately the *base* output: the schedule maps that to the target, so
     fitting against an already-mapped prediction would compound two maps.
     """
-    base = model.fno.base if hasattr(model.fno, "base") else model.fno
+    inner = model.fno.module if hasattr(model.fno, "module") else model.fno
+    base = inner.base if hasattr(inner, "base") else inner
     was_training = model.training
     model.eval()
     preds, truths = [], []
@@ -47,14 +48,24 @@ def collect_base_outputs(model, loader, device, max_samples: int = 2048):
         y = sample["y"].to(device, non_blocking=True)
         # Keep the channel axis: the refit objective is the run's own training
         # loss, and it must see the shapes it sees during training.
-        preds.append(base(x).float())
-        truths.append(y.float())
-        seen += len(x)
+        p, q = base(x).float(), y.float()
+        if p.dim() == 5:
+            # Fit on LOS slices, not on whole cubes. A cube's mean averages the
+            # entire reionisation history into one number; its slices are the
+            # units the schedule actually indexes, and flattening them into the
+            # batch makes the rest of this path identical to the 2-D case.
+            p = p.permute(0, 4, 1, 2, 3).reshape(-1, *p.shape[1:4])
+            q = q.permute(0, 4, 1, 2, 3).reshape(-1, *q.shape[1:4])
+        preds.append(p)
+        truths.append(q)
+        seen += len(p)
         if seen >= max_samples:
             break
     if was_training:
         model.train()
-    return torch.cat(preds), torch.cat(truths)
+    pred = torch.cat(preds)[:max_samples]
+    truth = torch.cat(truths)[:max_samples]
+    return pred, truth
 
 
 def _mse(out, y):

@@ -6,8 +6,19 @@
 #
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=hybrid slurm/train_3d_matrix.sbatch
 #
-# A 50-epoch 3-D run took 2.7-3.2 days on one H200 in past sweeps (~5100 s per
-# epoch), so the whole 4x4 matrix is roughly 48 GPU-days.
+# Runs on A100s: the measured peak is 22.3 GiB per rank, so an 80 GB A100 sits at
+# ~28% while a 141 GB H200 is heavily over-provisioned, and the A100 pool is
+# twice the size. An A30 is not an option -- 24 GB peaks at 94% on the first step
+# and OOMs on the second when Adam allocates its moment buffers.
+#
+# Default is 20 epochs for a first pass. To continue a finished run:
+#   sbatch --export=ALL,ARCH=fno_whno,LOSS=plain,N_EPOCHS=30,\
+#     CONTINUE_FROM=checkpoints/checkpoints_3d_fno_whno_plain/final_model_state_dict.pt,\
+#     CHECKPOINT_DIR=checkpoints/checkpoints_3d_fno_whno_plain_cont \
+#     slurm/train_3d_matrix.sbatch
+# That warm-starts the weights via INIT_CHECKPOINT. Note it restarts the epoch
+# counter and the cosine LR schedule, so it is a fresh anneal from the loaded
+# weights rather than a seamless resume.
 #
 # The hybrid weight is measured, not guessed. On real cubes L2/expwall is 3.0 for
 # a constant-0.5 prediction and 85.8 once the prediction is merely blurred -- the
@@ -20,9 +31,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:h200:1
-#SBATCH --mem=256G
+#SBATCH --cpus-per-task=24
+#SBATCH --gres=gpu:a100:1
+#SBATCH --mem=200G
 #SBATCH --time=96:00:00
 #SBATCH --output=logs/3dmatrix-%j.out
 #SBATCH --error=logs/3dmatrix-%j.err
@@ -70,7 +81,7 @@ export UFNO_WIDTH="${UFNO_WIDTH:-32}"
 export LOCALWNO_LEVELS="${LOCALWNO_LEVELS:-2}"
 
 # ---- training ----------------------------------------------------------
-export N_EPOCHS="${N_EPOCHS:-50}"
+export N_EPOCHS="${N_EPOCHS:-20}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1}"
 export LOCALFNO_LEARNING_RATE="${LOCALFNO_LEARNING_RATE:-1e-4}"
 export LOCALFNO_GRAD_CLIP_NORM="${LOCALFNO_GRAD_CLIP_NORM:-1.0}"
@@ -103,6 +114,13 @@ case "$LOSS" in
 esac
 
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_3d_${ARCH}_${LOSS}}"
+# Continuation: warm-start from a previous run's weights.
+if [ -n "${CONTINUE_FROM:-}" ]; then
+    if [ ! -f "$CONTINUE_FROM" ]; then
+        echo "CONTINUE_FROM=$CONTINUE_FROM does not exist" >&2; exit 2
+    fi
+    export INIT_CHECKPOINT="$CONTINUE_FROM"
+fi
 
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
 PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
@@ -127,6 +145,7 @@ echo "LOSS:         L2=$LOSS_L2_WEIGHT expwall=$LOSS_EXPWALL_WEIGHT"
 echo "              scale=$EXPWALL_SCALE cap=$WALL_CAP warmup=$EXPWALL_WARMUP_EPOCHS"
 echo "CONTRAST:     ${CONTRAST_MODE:-off} ${CONTRAST_SCHEDULE_KIND:+/$CONTRAST_SCHEDULE_KIND}"
 echo "EPOCHS:       $N_EPOCHS"
+echo "CONTINUE:     ${INIT_CHECKPOINT:-fresh initialization}"
 echo "CHECKPOINT:   $CHECKPOINT_DIR"
 echo "============================================================"
 
