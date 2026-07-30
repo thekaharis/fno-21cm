@@ -152,6 +152,11 @@ IONIZED_WALL_KERNEL_SIZE = int(
 # RMSE. scale=4 diverged. Distances are in voxels, so the penalty is mildly
 # anisotropic here -- the LOS axis is not on the transverse physical scale.
 LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
+# Ramp expwall in, because its magnitude relative to L2 *inverts* over training.
+# Measured on real cubes: L2/expwall is 3.0 for a constant-0.5 prediction but
+# 85.8 once the prediction is merely blurred. A fixed weight therefore either
+# swamps L2 early or vanishes late; the ramp lets L2 establish structure first.
+EXPWALL_WARMUP_EPOCHS = int(os.environ.get("EXPWALL_WARMUP_EPOCHS", "0"))
 EXPWALL_SCALE = float(os.environ.get("EXPWALL_SCALE", "16.0"))
 WALL_CAP = int(os.environ.get("WALL_CAP", "32"))
 IONIZED_WALL_THRESHOLD = float(
@@ -842,13 +847,22 @@ def main():
         "ufno": UFNO_H1_WARMUP_EPOCHS,
         "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
     }.get(MODEL_KIND, LOCALFNO_H1_WARMUP_EPOCHS)
+    # index into loss_terms: 0 l2, 1 h1, 2 bce, 3 ionized_wall, 4 expwall
+    warmup_terms, warmup_epochs = (), 0
     if h1_warmup_epochs > 0:
+        warmup_terms, warmup_epochs = (1,), h1_warmup_epochs
+    if LOSS_EXPWALL_WEIGHT > 0 and EXPWALL_WARMUP_EPOCHS > 0:
+        warmup_terms = tuple(sorted(set(warmup_terms) | {4}))
+        warmup_epochs = max(warmup_epochs, EXPWALL_WARMUP_EPOCHS)
+    if warmup_terms:
         train_loss_fn = ScheduledWeightedLoss(
             *loss_terms,
-            warmup_terms=(1,),
-            warmup_epochs=h1_warmup_epochs,
+            warmup_terms=warmup_terms,
+            warmup_epochs=warmup_epochs,
             term_names=loss_term_names,
         )
+        print(f"[loss] warmup over {warmup_epochs} epochs for terms "
+              f"{[loss_term_names[i] for i in warmup_terms]}")
     else:
         train_loss_fn = WeightedLoss(*loss_terms, term_names=loss_term_names)
     # Eval losses are tracked separately in metrics.jsonl so we can see how
@@ -979,6 +993,7 @@ def main():
                 "bce": LOSS_BCE_WEIGHT,
                 "ionized_wall": LOSS_IONIZED_WALL_WEIGHT,
                 "expwall": LOSS_EXPWALL_WEIGHT,
+                "expwall_warmup_epochs": EXPWALL_WARMUP_EPOCHS,
             },
             "loss_modes": {
                 "l2": LOSS_L2_MODE,
