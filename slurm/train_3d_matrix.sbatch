@@ -33,12 +33,14 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --gres=gpu:a100:1
-# gpu2-07 and gpu3-03 advertise idle GPUs and kill every job placed on them in
-# 1-3 seconds with ExitCode 0:53, before the script writes a single byte. Not
-# specific to this job: hd_kd235, st_ac137577 and fr_af508 have all been hit.
-# Because a node that instantly kills its jobs is always the emptiest node, the
-# scheduler preferentially fills it -- 12 of 12 matrix jobs landed there at once.
-#SBATCH --exclude=gpu2-07,gpu3-03
+# No node exclusion. gpu2-07 and gpu3-03 both went through a spell of killing
+# every job in 1-3 seconds with ExitCode 0:53 (which caught 12 of 12 matrix jobs
+# at once, because a node that instantly kills its jobs is permanently the
+# emptiest node and the scheduler preferentially fills it). Both have since been
+# patched and are healthy. Excluding them costs 1 of 4 usable A100 nodes and 1 of
+# 2 usable H200 nodes, which pushed the estimated start out by eight days -- so
+# check `sacct -a -N <node>` for a run of 0:53 failures before excluding again
+# rather than leaving a stale exclusion in place.
 #SBATCH --mem=200G
 #SBATCH --time=96:00:00
 #SBATCH --output=logs/3dmatrix-%j.out
