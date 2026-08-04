@@ -419,13 +419,16 @@ class LoggingTrainer(Trainer):
                     self.model,
                     reset=True,
                 )
+                # The constructor stores the model without inspecting it, so an
+                # architecture with no Fourier layer only raises here, on the
+                # first extraction. Both calls must sit inside the try.
+                self.spectral_history.record(-1)
             except ValueError as error:
                 # Architectures with no Fourier layer at all (say wavelet or
                 # Walsh-Hadamard in both operator slots) have no mode-weight
                 # profile to track. That is not a reason to refuse to train.
                 print(f"[spectral-weights] disabled: {error}")
-            else:
-                self.spectral_history.record(-1)
+                self.spectral_history = None
 
     # set by main() when the contrast refit is active
     _refit_objective = None
