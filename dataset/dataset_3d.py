@@ -445,9 +445,9 @@ def make_file_split(
 ) -> tuple[list[int], list[int], list[int]]:
     """Seeded shuffled split of file indices into train / val / test.
 
-    Mirrors ``dataset.make_file_split`` so the two pipelines pick the same
-    held-out cones under identical seeds.  Val and test each get at least one
-    file even on small datasets.
+    Canonical definition for both pipelines: ``legacy.xhi2d.dataset``
+    re-exports it, so the 2-D and 3-D runs hold out the same cones under
+    identical seeds.  Val and test each get at least one file.
     """
     import random
 

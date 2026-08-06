@@ -60,6 +60,7 @@ from losses import (
 )
 from contrast import ContrastComposed
 from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
+from util import seed_everything
 from util.run_metadata import write_run_metadata
 from util.spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
 
@@ -259,20 +260,6 @@ LR_SCALE_RULE = "sqrt"   # "linear" or "sqrt"
 
 
 # ------------------------------------------------------------------ reproducibility
-def _seed_everything(seed: int, deterministic: bool = False) -> None:
-    """Seed model initialization and training-time random number generators."""
-    seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    torch.backends.cudnn.benchmark = not deterministic
-    torch.backends.cudnn.deterministic = deterministic
-    torch.use_deterministic_algorithms(deterministic)
-
-
 def _seed_worker(_worker_id: int) -> None:
     """Give each DataLoader worker a reproducible Python/NumPy RNG state."""
     worker_seed = torch.initial_seed() % (2**32)
@@ -675,7 +662,7 @@ def main():
     is_distributed = (world_size > 1)
     # All ranks use the same initialization seed so DDP starts from identical
     # parameters. DistributedSampler applies rank-specific partitioning.
-    _seed_everything(RUN_SEED, deterministic=DETERMINISTIC_RUN)
+    seed_everything(RUN_SEED, deterministic=DETERMINISTIC_RUN)
 
     # Per-rank device.  Under DDP each rank pins to its own GPU; in single-GPU
     # mode this is just the module-level DEVICE.

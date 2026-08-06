@@ -51,10 +51,10 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import sys
 from pathlib import Path
 
+from util import seed_everything
 from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
@@ -352,14 +352,6 @@ class MaskedMSE:
         return (((out - y) ** 2) * mask).sum() / weight
 
 
-def _seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
 def build_losses():
     """Construct train/eval losses from the LOSS_* env configuration.
 
@@ -503,7 +495,7 @@ def main() -> None:
             f"got {MODEL_KIND!r}"
         )
 
-    _seed_everything(RUN_SEED)
+    seed_everything(RUN_SEED)
 
     files = sorted(DATA_DIR.glob(FILE_GLOB))
     if len(files) < 3:

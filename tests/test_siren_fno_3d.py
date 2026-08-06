@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from modeling import ModelConfig, build_3d_model
-from siren_fno_3d import SirenFNO3d, SpectralConv3dSiren
+from legacy.arch.siren_fno_3d import SirenFNO3d, SpectralConv3dSiren
 from util.spectral_weights import extract_spectral_weight_profiles
 
 

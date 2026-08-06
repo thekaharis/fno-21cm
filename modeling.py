@@ -11,11 +11,6 @@ import torch
 import torch.nn as nn
 
 from operators import resolve_operator_name, resolve_slot_operators, validate_operator
-from util.neuralop_setup import prefer_local_neuralop
-
-prefer_local_neuralop()
-
-from neuralop.models import FNO  # noqa: E402
 
 
 #: Model kinds built from the pluggable local/global U-Net skeleton, and the
@@ -414,7 +409,9 @@ class ModelConfig:
     def from_env(cls) -> "ModelConfig":
         """Read the experiment switches used by the SLURM scripts."""
         return cls(
-            kind=os.environ.get("MODEL_KIND", "fno").lower(),
+            # "fno" and "sirenfno" remain valid (legacy.arch builds them for
+            # old checkpoints) but are no longer the default for a new run.
+            kind=os.environ.get("MODEL_KIND", "localfno").lower(),
             modes=(
                 int(os.environ.get("N_MODES_X", "16")),
                 int(os.environ.get("N_MODES_Y", "16")),
@@ -660,7 +657,18 @@ class TrainerModel(nn.Module):
 
 
 def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
-    """Construct the configured 3-D architecture."""
+    """Construct the configured 3-D architecture.
+
+    Kinds no longer trained ("fno", "sirenfno") are still accepted and built
+    from ``legacy.arch``, so a checkpoint written before the cleanup rebuilds
+    from its own ``run_metadata.json`` with no edits.
+    """
+    from legacy.arch import KINDS as LEGACY_KINDS
+
+    if config.kind in LEGACY_KINDS:
+        from legacy import arch
+
+        return arch.build(config, in_channels)
     if config.kind == "ufno":
         from models_ufno import UFNOWrapped
 
@@ -675,27 +683,6 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             norm=config.ufno_norm,
             unet_variant=config.ufno_unet_variant,
             global_residual=config.ufno_global_residual,
-        )
-    if config.kind == "sirenfno":
-        from siren_fno_3d import SirenFNO3d
-
-        return SirenFNO3d(
-            n_modes=config.modes,
-            hidden_channels=config.hidden_channels,
-            in_channels=in_channels,
-            out_channels=1,
-            n_layers=config.n_layers,
-            padding=config.siren_padding,
-            add_grid=True,
-            siren_hidden_dim=config.siren_hidden_dim,
-            siren_omega=config.siren_omega,
-            siren_n_hidden=config.siren_n_hidden,
-            siren_feature_dim=config.siren_feature_dim,
-            siren_ff_sigma=config.siren_ff_sigma,
-            siren_learnable_ff=config.siren_learnable_ff,
-            mlp_dropout=config.siren_mlp_dropout,
-            output_sigmoid=config.siren_output_sigmoid,
-            sigmoid_temperature=config.siren_sigmoid_temperature,
         )
     if config.is_local_global:
         from local_fno_3d import LocalFNO3d
@@ -720,15 +707,7 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             local_windowed=config.local_windowed,
             wavelet_levels=config.localwno_levels,
         )
-    return FNO(
-        n_modes=config.modes,
-        hidden_channels=config.hidden_channels,
-        in_channels=in_channels,
-        out_channels=1,
-        n_layers=config.n_layers,
-        projection_channel_ratio=2,
-        positional_embedding="grid",
-    )
+    raise ValueError(f"no builder for kind {config.kind!r}")
 
 
 @dataclass(frozen=True)

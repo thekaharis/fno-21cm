@@ -7,12 +7,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from fno_21cm_3d import (
-    LoggingTrainer,
-    _build_h1_loss,
-    _loss_mode,
-    _seed_everything,
-)
+from fno_21cm_3d import LoggingTrainer, _build_h1_loss, _loss_mode
+from util import seed_everything
 from losses import IonizedWallRMSE, ScheduledWeightedLoss, WeightedLoss
 
 
@@ -210,13 +206,13 @@ def test_ionized_wall_mask_wraps_periodic_xy_but_not_z() -> None:
 
 
 def test_seed_everything_repeats_python_numpy_and_torch() -> None:
-    _seed_everything(123)
+    seed_everything(123)
     first = (
         random.random(),
         np.random.random(),
         torch.rand(3),
     )
-    _seed_everything(123)
+    seed_everything(123)
     second = (
         random.random(),
         np.random.random(),

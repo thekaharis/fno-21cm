@@ -20,28 +20,29 @@ Two pipelines live side by side:
 
 ```
 .
-├── fno_21cm.py, fno_21cm_3d.py    # training entry points (v2, v3)
-├── modeling.py, losses.py         # shared model factory and Trainer adapters
-├── siren_fno_3d.py                # 3-D SirenFNO architecture
-├── models_ufno.py, ufno.py        # U-FNO network architecture
-├── dataset/                       # readers, PyTorch datasets, cache builders
-│   ├── dataset.py, dataset_3d.py
-│   ├── loader.py, lightcone_params.py
-│   └── build_trainset.py, build_cubes.py
-├── viz/                           # prediction and spectral-weight plots
-│   ├── visualize.py, visualize_3d.py
-│   ├── visualize_3d_detailed.py
-│   └── visualize_spectral_weights.py, visualize_spectral_weights_z.py
-├── util/                          # metadata, diagnostics, setup helpers
-│   ├── neuralop_setup.py, run_metadata.py
-│   └── metrics_21cm.py, spectral_weights.py
-├── slurm/                         # all sbatch scripts (cluster)
-├── tests/                         # unit and integration tests
-├── figures/                       # all generated plots
-├── data/                          # raw lightcone .h5 files (gitignored)
-├── checkpoints/  # trained models (gitignored)
+├── fno_21cm_3d.py                 # 3-D training entry point (x_HI cubes)
+├── fno_zre.py                     # 2-D training entry point (z_re maps)
+├── modeling.py                    # ModelConfig, model factory, checkpoint I/O
+├── operators.py                   # local/global operator registry
+├── local_fno_3d.py                # the local/global U-Net skeleton (3-D)
+├── models_zre_2d.py               # its 2-D twins, for the z_re task
+├── models_ufno.py, ufno.py        # U-FNO baseline
+├── siren.py, wavelet_operator.py  # operator building blocks
+├── losses.py, contrast.py         # objectives and the output contrast map
+├── dataset/                       # readers, datasets, cube cache builder
+├── viz/                           # prediction plots and metric evaluation
+├── util/                          # metadata, metrics, spectral-weight history
+├── slurm/                         # sbatch scripts for the above
+├── tests/                         # pytest suite
+├── legacy/                        # retired code, kept runnable (see its README)
+├── figures/, checkpoints/, data/  # outputs and inputs (gitignored)
 └── neuraloperator/                # vendored third-party lib (gitignored)
 ```
+
+Everything under `legacy/` is out of the active path but still importable, so
+checkpoints trained before the cleanup remain loadable. `modeling.build_3d_model`
+dispatches retired architecture kinds there lazily — see `legacy/README.md`.
+
 
 ## Where the data lives
 
@@ -63,20 +64,20 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 
 | File | Purpose |
 |------|---------|
-| `util/field_metrics.py` | Sharpness/blur statistics (`width_px`, `peak_grad`, `lowpass`, ...). Mean \|grad\| is **not** a sharpness measure -- see the module docstring. |
-| `util/slice_eval.py` | Rebuild a trained 2-D run and gather predictions; cone-grouped splits. |
-| `util/contrast_sweep.py` | (theta, tau) grid sweeps, held-out scoring, cone-level bootstrap CIs. |
+| `legacy/xhi2d/field_metrics.py` | Sharpness/blur statistics (`width_px`, `peak_grad`, `lowpass`, ...). Mean \|grad\| is **not** a sharpness measure -- see the module docstring. |
+| `legacy/xhi2d/slice_eval.py` | Rebuild a trained 2-D run and gather predictions; cone-grouped splits. |
+| `legacy/xhi2d/contrast_sweep.py` | (theta, tau) grid sweeps, held-out scoring, cone-level bootstrap CIs. |
 | `contrast.py` | The contrast map itself, and its learnable output stage. |
 
-### 2-D pipeline (v2)
+### 2-D x_HI pipeline (legacy -- see `legacy/README.md`)
 | File | Purpose |
 |------|---------|
-| `fno_21cm.py` | 2-D training entry point. |
-| `dataset/dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
-| `dataset/build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
-| `dataset/build_xhi_band.py` | Slice cache saturating a chosen x_HI band, for regime-specific analysis. |
+| `legacy/xhi2d/fno_21cm.py` | 2-D training entry point. |
+| `legacy/xhi2d/dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
+| `legacy/xhi2d/build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
+| `legacy/xhi2d/build_xhi_band.py` | Slice cache saturating a chosen x_HI band, for regime-specific analysis. |
 | `dataset/paths.py` | Canonical dataset locations. Import from here; never hard-code a path. |
-| `viz/visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
+| `legacy/xhi2d/visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
 | `figures/comparison_*.png`, `figures/scatter_*.png` | Example outputs from the v2 run. |
 
 ### 3-D pipeline (v3)
@@ -93,25 +94,25 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 ### SLURM scripts (`slurm/`)
 | File | Purpose |
 |------|---------|
-| `slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
-| `slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
-| `slurm/train_localfno_a100_4gpu.sbatch` | 4-GPU A100 DDP training for the windowed Local-FNO U-Net; defaults to smaller patch chunks for A100 HBM headroom while keeping the same checkpoint directory as the H200 LocalFNO run. |
-| `slurm/train_sirenfno_h200_4gpu.sbatch` | Stability-tuned 4-GPU H200 SirenFNO training at `(64,64,64)`, writing to `checkpoints/checkpoints_3d_sirenfno_m64_stable/` by default. |
+| `legacy/slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
+| `legacy/slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
+| `legacy/slurm/train_localfno_a100_4gpu.sbatch` | 4-GPU A100 DDP training for the windowed Local-FNO U-Net; defaults to smaller patch chunks for A100 HBM headroom while keeping the same checkpoint directory as the H200 LocalFNO run. |
+| `legacy/slurm/train_sirenfno_h200_4gpu.sbatch` | Stability-tuned 4-GPU H200 SirenFNO training at `(64,64,64)`, writing to `checkpoints/checkpoints_3d_sirenfno_m64_stable/` by default. |
 | `slurm/train_ufno_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v1** (3 FNO + 3 U-Fourier blocks; BatchNorm + SyncBN; modes (16,16,16); 0.5/0.5 L²/H¹). |
-| `slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints/checkpoints_3d_ufno_v2/`. |
-| `slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints/checkpoints_3d_ufno_v3_anisoz/`. |
-| `slurm/train_ufno_v3_globalres_h200_4gpu.sbatch` | **U-FNO v3 / option E** — global-pooling residual added to each U-Net path (gives cone-level context to the local-feature path). Composable with v3-anisoz or v3-los1d via env-var. Writes to `./checkpoints/checkpoints_3d_ufno_v3_globalres/`. |
-| `slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints/checkpoints_3d_ufno_v3_los1d/`. |
-| `slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints/checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
-| `slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints/checkpoints_3d_ufno/`. |
+| `legacy/slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints/checkpoints_3d_ufno_v2/`. |
+| `legacy/slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints/checkpoints_3d_ufno_v3_anisoz/`. |
+| `legacy/slurm/train_ufno_v3_globalres_h200_4gpu.sbatch` | **U-FNO v3 / option E** — global-pooling residual added to each U-Net path (gives cone-level context to the local-feature path). Composable with v3-anisoz or v3-los1d via env-var. Writes to `./checkpoints/checkpoints_3d_ufno_v3_globalres/`. |
+| `legacy/slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints/checkpoints_3d_ufno_v3_los1d/`. |
+| `legacy/slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints/checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
+| `legacy/slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints/checkpoints_3d_ufno/`. |
 | `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
-| `slurm/viz_sirenfno.sbatch` | Standard SirenFNO prediction visualization using the best checkpoint by default. |
-| `slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
-| `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
+| `legacy/slurm/viz_sirenfno.sbatch` | Standard SirenFNO prediction visualization using the best checkpoint by default. |
+| `legacy/slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
+| `legacy/slurm/viz_ufno_detailed.sbatch` | Same as `slurm/viz_detailed.sbatch` but for the U-FNO checkpoint. |
 | `slurm/viz_localop.sbatch` | Prediction visualization for any `localop` operator pairing. Takes a required `CHECKPOINT_DIR` and nothing else — the architecture comes from that run's `run_metadata.json`, and `VIZ_TAG` defaults to the directory's basename. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
-| `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
+| `legacy/slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
 | `slurm/power_spectrum_eval.sbatch` | Paired power-spectrum evaluation (Local-FNO vs U-FNO by default): P(k) ratio and r(k) curves, cylindrical `(k⊥, k∥)` maps, per-stage CSV, and a reduced-results NPZ. Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `CHUNK_Z`, `OUT_DIR` via `--export`. |
 | `slurm/bubble_size_eval.sbatch` | Paired transverse mean-free-path bubble-size evaluation (3-D LocalSirenFNO L2+H1 vs L2-only by default): stage-resolved BSD plots, capped/restricted Wasserstein distance, size bias, CSV, and reduced NPZ. Override model names/checkpoints, `N_CONES`, `RAYS_PER_SLICE`, `SLICES_PER_STAGE`, or `OUT_DIR`. |
 
@@ -122,11 +123,11 @@ the job id — e.g. `figures/ufno_20260606-143022_job3965704/`. A
 `run_info.txt` is dropped in each folder summarising the config so old
 renders are self-explanatory. Successive viz runs never overwrite each
 other.
-| `slurm/build.sbatch`, `slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
+| `legacy/slurm/build.sbatch`, `legacy/slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
 | `slurm/build_cubes.sbatch`, `slurm/build_cubes_merge.sbatch` | v3 cube cache build + merge. |
 
 All sbatch scripts auto-resolve the project root from their own location, so
-they can be submitted from anywhere (`sbatch slurm/train.sbatch` from the
+they can be submitted from anywhere (`sbatch legacy/slurm/train.sbatch` from the
 project root is the conventional usage).
 
 ### Shared
@@ -393,7 +394,7 @@ the operator preserves the window shape. Set the decomposition depth with
 `LOCALWNO_LEVELS` (default `2`); each local-window dimension must be divisible
 by `2**LOCALWNO_LEVELS`. The 2-D z_re pipeline supports the same model kind.
 
-Both 2-D pipelines (`fno_21cm.py` for x_HI slices, `fno_zre.py` for z_re maps)
+Both 2-D pipelines (`legacy/xhi2d/fno_21cm.py` for x_HI slices, `fno_zre.py` for z_re maps)
 read the same `MODEL_KIND` values and the same `LOCAL_OPERATOR`/
 `GLOBAL_OPERATOR` slots as the 3-D one.
 
@@ -415,11 +416,11 @@ training behavior.
 Run the production and smoke jobs with:
 
 ```bash
-sbatch slurm/smoke_localfno_h200_4gpu.sbatch
-sbatch slurm/train_localfno_h200_4gpu.sbatch
-sbatch slurm/train_localfno_a100_4gpu.sbatch
-sbatch slurm/viz_localfno.sbatch
-sbatch slurm/viz_localfno_detailed.sbatch
+sbatch legacy/slurm/smoke_localfno_h200_4gpu.sbatch
+sbatch legacy/slurm/train_localfno_h200_4gpu.sbatch
+sbatch legacy/slurm/train_localfno_a100_4gpu.sbatch
+sbatch legacy/slurm/viz_localfno.sbatch
+sbatch legacy/slurm/viz_localfno_detailed.sbatch
 ```
 
 After training, compare bubble-wall fidelity on paired test cones:
@@ -434,7 +435,7 @@ python -m viz.boundary_band_diagnostic --checkpoints \
 The equivalent cluster job is:
 
 ```bash
-sbatch slurm/boundary_localfno_vs_ufno.sbatch
+sbatch legacy/slurm/boundary_localfno_vs_ufno.sbatch
 ```
 
 Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `OUT_DIR`, or
@@ -488,9 +489,9 @@ scores; the restricted Wasserstein metric includes both categories.
 On the four-GPU H200 job:
 
 ```bash
-sbatch slurm/train_sirenfno_h200_4gpu.sbatch
-sbatch slurm/viz_sirenfno.sbatch
-sbatch slurm/viz_sirenfno_detailed.sbatch
+sbatch legacy/slurm/train_sirenfno_h200_4gpu.sbatch
+sbatch legacy/slurm/viz_sirenfno.sbatch
+sbatch legacy/slurm/viz_sirenfno_detailed.sbatch
 ```
 
 The SirenFNO model defaults to retained modes `(16,16,16)`, four residual
@@ -594,16 +595,16 @@ is visible after the first epoch.
 
 ```bash
 # 1. Build the compact slice cache (once) -> data/compressed/trainset.h5
-python -m dataset.build_trainset
+python -m legacy.xhi2d.build_trainset
 
 # 2. Train (resolves the cache via dataset/paths.py; override with CACHE_FILE)
-python fno_21cm.py
+python -m legacy.xhi2d.fno_21cm
 
 # 3. Visualize predictions from the latest 2-D checkpoint
-python -m viz.visualize
+python -m legacy.xhi2d.visualize
 ```
 
-Key hyperparameters are constants at the top of `fno_21cm.py`
+Key hyperparameters are constants at the top of `legacy/xhi2d/fno_21cm.py`
 (`N_MODES`, `HIDDEN_CHANNELS`, `N_LAYERS`, `BATCH_SIZE`, `LEARNING_RATE`, ...).
 
 ## Status
