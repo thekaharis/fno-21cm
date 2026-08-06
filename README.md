@@ -108,7 +108,7 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `slurm/viz_sirenfno.sbatch` | Standard SirenFNO prediction visualization using the best checkpoint by default. |
 | `slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
-| `slurm/viz_localop.sbatch` | Prediction visualization for any `localop` operator pairing. Pass `LOCAL_OPERATOR`/`GLOBAL_OPERATOR` and the checkpoint directory and `VIZ_TAG` are derived from the pair; the architecture itself comes from the run's `run_metadata.json`. |
+| `slurm/viz_localop.sbatch` | Prediction visualization for any `localop` operator pairing. Takes a required `CHECKPOINT_DIR` and nothing else — the architecture comes from that run's `run_metadata.json`, and `VIZ_TAG` defaults to the directory's basename. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
 | `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
@@ -267,18 +267,17 @@ CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
     VIZ_TAG=local-whno-cnn python -m viz.visualize_3d
 ```
 
-`slurm/viz_localop.sbatch` derives both from `LOCAL_OPERATOR`/`GLOBAL_OPERATOR`
-using the same tags the trainer names its checkpoint directory with, so they
-cannot drift apart:
+`slurm/viz_localop.sbatch` is the cluster version — same single input:
 
 ```bash
-sbatch --export=ALL,LOCAL_OPERATOR=hadamard,GLOBAL_OPERATOR=cnn \
+sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
     slurm/viz_localop.sbatch
 ```
 
-Set `VIZ_TAG` explicitly for a run that overrode `CHECKPOINT_DIR` at training
-time — otherwise every render of that pairing lands in an identically-named
-`figures/` folder. The same metadata-driven reconstruction backs
+It defaults `VIZ_TAG` to the directory's basename minus the `checkpoints_3d_`
+prefix. Some tag is needed because the fallback is the model kind, which is
+just `localop` for every pairing — without one, every render would land in an
+identically-named `figures/` folder. The same metadata-driven reconstruction backs
 `viz.visualize_3d_detailed` and the multi-checkpoint diagnostics
 (`power_spectrum_evaluation`, `bubble_size_evaluation`,
 `boundary_band_diagnostic`, `parity_diagnostic`). `viz.localfno_mode_weights`

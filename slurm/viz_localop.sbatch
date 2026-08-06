@@ -1,23 +1,19 @@
 #!/bin/bash
 # Visualization for any modular local/global operator pairing (MODEL_KIND=localop).
 #
-# The architecture itself is *not* configured here: viz.visualize_3d rebuilds
-# the model from the run_metadata.json written next to the checkpoint, so both
-# operator slots and their hyperparameters come from the training run. What
-# LOCAL_OPERATOR/GLOBAL_OPERATOR do here is pick the default checkpoint
-# directory and the figures/ tag, derived from the same OPERATOR_TAGS mapping
-# the trainer names its directory with -- so the two cannot drift apart, and a
-# typo'd operator name fails before the job reaches a GPU.
+# Pass the checkpoint directory, nothing else. viz.visualize_3d rebuilds the
+# model from the run_metadata.json written next to the checkpoint, so both
+# operator slots and all their hyperparameters come from the training run --
+# there is nothing about the architecture to configure here.
 #
-#   sbatch --export=ALL,LOCAL_OPERATOR=hadamard,GLOBAL_OPERATOR=cnn \
+#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
 #       slurm/viz_localop.sbatch
 #
-# Aliases are accepted (fno, wno, whno/walsh, siren, unet). Runs that overrode
-# CHECKPOINT_DIR at training time need it overridden here too, e.g.
-#
-#   sbatch --export=ALL,GLOBAL_OPERATOR=hadamard,\
-# CHECKPOINT_DIR=./checkpoints/checkpoints_3d_localop_whno_expwall16,\
-# VIZ_TAG=localop-whno-expwall16 slurm/viz_localop.sbatch
+# VIZ_TAG defaults to the directory's basename minus the "checkpoints_3d_"
+# prefix (-> figures/local_whno_cnn_<timestamp>_job.../). Set it explicitly to
+# name the folder something else; without it every localop pairing would land
+# in an identically-named folder, since the tag otherwise falls back to the
+# model kind, which is just "localop" for all of them.
 
 #SBATCH --job-name=viz-localop
 #SBATCH --partition=gpu
@@ -38,42 +34,40 @@ else
 fi
 cd "$PROJECT_ROOT"
 mkdir -p logs figures
+
+if [ -z "${CHECKPOINT_DIR:-}" ]; then
+    echo "CHECKPOINT_DIR is required, e.g. --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn" >&2
+    exit 1
+fi
+if [ ! -d "$CHECKPOINT_DIR" ]; then
+    echo "CHECKPOINT_DIR does not exist: $CHECKPOINT_DIR" >&2
+    exit 1
+fi
+if [ ! -f "$CHECKPOINT_DIR/run_metadata.json" ]; then
+    echo "warning: no run_metadata.json in $CHECKPOINT_DIR -- the architecture" >&2
+    echo "         will fall back to the MODEL_KIND/*_OPERATOR environment" >&2
+    echo "         variables, which must then match the training run." >&2
+fi
+
 module load devel/miniforge
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-export MODEL_KIND=localop
-export LOCAL_OPERATOR="${LOCAL_OPERATOR:-fourier}"
-export GLOBAL_OPERATOR="${GLOBAL_OPERATOR:-hadamard}"
-
-# Resolve the aliases and derive "<checkpoint dir> <figures tag>" from the
-# resolved pair.  Plain assignment (not `export FOO=$(...)`) so that a bad
-# operator name propagates its non-zero exit through set -e.
-DERIVED="$(python - <<'PY'
-from modeling import OPERATOR_TAGS, ModelConfig
-
-config = ModelConfig.from_env()
-local = OPERATOR_TAGS[config.local_operator]
-global_ = OPERATOR_TAGS[config.global_operator]
-print(config.default_checkpoint_dir, f"local-{local}-{global_}")
-PY
-)"
-read -r DERIVED_CHECKPOINT_DIR DERIVED_TAG <<< "$DERIVED"
-
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./$DERIVED_CHECKPOINT_DIR}"
+export CHECKPOINT_DIR
 export CHECKPOINT_KIND="${CHECKPOINT_KIND:-best}"
-export VIZ_TAG="${VIZ_TAG:-$DERIVED_TAG}"
+CHECKPOINT_NAME="$(basename "${CHECKPOINT_DIR%/}")"
+export VIZ_TAG="${VIZ_TAG:-${CHECKPOINT_NAME#checkpoints_3d_}}"
 # Inference-only knob: chunk size changes execution memory, not parameters,
 # so it overrides whatever the training run recorded (64 fits an A30).
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-64}"
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
 export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 
-echo "======== localop viz: $LOCAL_OPERATOR local / $GLOBAL_OPERATOR global ========"
+echo "======== localop viz ========"
 echo "CHECKPOINT_DIR: $CHECKPOINT_DIR ($CHECKPOINT_KIND)"
 echo "VIZ_TAG:        $VIZ_TAG"
 echo "CUBES_CACHE:    $CUBES_CACHE"
-echo "=============================================================================="
+echo "============================="
 
 python -m viz.visualize_3d
