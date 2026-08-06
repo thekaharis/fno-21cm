@@ -166,11 +166,26 @@ CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
 CONTRAST_REFIT = os.environ.get("CONTRAST_REFIT", "0") not in ("0", "", "false")
 CONTRAST_SCHEDULE_KIND = os.environ.get("CONTRAST_SCHEDULE_KIND", "stepped").lower()
 CONTRAST_BINS = int(os.environ.get("CONTRAST_BINS", "14"))
-# Counted in LOS slices, not cubes: 8 cubes of 256 slices already gives 2048,
-# matching the 2-D refit, and holding whole cubes for the fit would not fit.
+# mean|monotone. The per-slice mean prediction estimates x_HI with MAE ~0.055,
+# against a responsive band (x_HI 0.005-0.05) only 0.045 wide -- the key is
+# noisier than what it has to resolve, which is why the 2-D gain pooled to
+# -0.16%. "monotone" isotonically smooths the per-slice means along the LOS
+# axis, using the one structure a cone has and a 2-D slice does not: its x_HI
+# curve is monotone in redshift. Set "mean" for the unsmoothed 2-D behaviour.
+CONTRAST_KEY = os.environ.get("CONTRAST_KEY", "monotone").lower()
+# Counted in LOS slices, not cubes, in both refit modes -- and *per rank*, so
+# under DDP the collective fit pools world_size times this many.
 CONTRAST_REFIT_SAMPLES = int(os.environ.get("CONTRAST_REFIT_SAMPLES", "2048"))
 CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "300"))
-CONTRAST_REFIT_BATCH = int(os.environ.get("CONTRAST_REFIT_BATCH", "64"))
+# In cube mode this is a number of *cubes*, and it has to stay small: the fit
+# holds the objective's intermediates for a whole batch of 5-D tensors.
+CONTRAST_REFIT_BATCH = int(os.environ.get("CONTRAST_REFIT_BATCH", "2"))
+# Split cubes into transverse LOS slices before fitting. Off by default: theta
+# is constant within a slice so splitting buys nothing, and it changes the
+# objective, since expwall's signed distance inside one transverse plane is not
+# the 3-D distance the training loss computes.
+CONTRAST_REFIT_FLATTEN = os.environ.get(
+    "CONTRAST_REFIT_FLATTEN", "0") not in ("0", "", "false")
 CONTRAST_THETA_FLOOR = float(os.environ.get("CONTRAST_THETA_FLOOR", "0.25"))
 EXPWALL_SCALE = float(os.environ.get("EXPWALL_SCALE", "16.0"))
 WALL_CAP = int(os.environ.get("WALL_CAP", "32"))
@@ -450,15 +465,20 @@ class LoggingTrainer(Trainer):
                 if self._is_rank_0:
                     print("[contrast] epoch 0: map disabled", flush=True)
             else:
-                # Every rank refits independently on its own shard rather than
-                # broadcasting: the schedule is a handful of scalars and the fit
-                # is deterministic given the data, so the ranks stay close, and
-                # this avoids a collective inside the epoch loop.
+                # The fit is collective across ranks. It used to run per-rank
+                # on each shard, to avoid a collective in the epoch loop -- but
+                # the ranks then trained the next epoch under *different* maps,
+                # and each fitted from 1/world_size of the data, which the thin
+                # responsive band cannot afford. The collectives here carry ~14
+                # floats against the model's own gradient reduction every step.
                 st = _refit.refit_and_install(
                     self.model, train_loader, self.device,
                     CONTRAST_REFIT_SAMPLES, CONTRAST_REFIT_STEPS,
                     objective=self._refit_objective,
-                    theta_floor=CONTRAST_THETA_FLOOR)
+                    theta_floor=CONTRAST_THETA_FLOOR,
+                    batch=CONTRAST_REFIT_BATCH,
+                    flatten=CONTRAST_REFIT_FLATTEN,
+                    sync=(self._world_size > 1))
                 self._schedule_stats = st
                 if self._is_rank_0:
                     print(f"[contrast] epoch {int(epoch)}: "
@@ -789,10 +809,12 @@ def main():
     if CONTRAST_MODE != "off":
         fno = ContrastComposed(fno, CONTRAST_MODE,
                                schedule_kind=CONTRAST_SCHEDULE_KIND,
-                               n_bins=CONTRAST_BINS)
+                               n_bins=CONTRAST_BINS, key_mode=CONTRAST_KEY)
         rprint(f"Contrast map: {CONTRAST_MODE}/{CONTRAST_SCHEDULE_KIND} "
-               f"({CONTRAST_BINS} bins), theta per LOS slice"
+               f"({CONTRAST_BINS} bins), theta per LOS slice, key={CONTRAST_KEY}"
                + (f"; refit each epoch on {CONTRAST_REFIT_SAMPLES} slices"
+                  f" ({'flattened' if CONTRAST_REFIT_FLATTEN else 'whole cubes'},"
+                  f" batch {CONTRAST_REFIT_BATCH})"
                   if CONTRAST_REFIT else " (fixed)"))
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
     # would confuse count_model_params).

@@ -62,6 +62,83 @@ def apply_contrast(
     return (torch.tanh((x - tau) / theta) - lo) / (hi - lo).clamp_min(1e-12)
 
 
+def _pav(y: np.ndarray) -> np.ndarray:
+    """Pool-adjacent-violators: least-squares non-decreasing fit to a 1-D ``y``."""
+    n = len(y)
+    val = np.empty(n, dtype=np.float64)
+    wt = np.empty(n, dtype=np.float64)
+    val[0], wt[0] = y[0], 1.0
+    top = 0
+    for i in range(1, n):
+        top += 1
+        val[top], wt[top] = y[i], 1.0
+        while top > 0 and val[top - 1] > val[top]:
+            w = wt[top - 1] + wt[top]
+            val[top - 1] = (wt[top - 1] * val[top - 1] + wt[top] * val[top]) / w
+            wt[top - 1] = w
+            top -= 1
+    out = np.empty(n, dtype=np.float64)
+    pos = 0
+    for j in range(top + 1):
+        end = pos + int(wt[j])
+        out[pos:end] = val[j]
+        pos = end
+    return out
+
+
+def isotonic(curves: np.ndarray) -> tuple[np.ndarray, float]:
+    """Monotone least-squares fit of each row, in whichever direction fits better.
+
+    Returns the fitted curves and the residual sum of squares of the chosen
+    direction, so a caller can see how hard the constraint had to work.
+
+    The direction is decided once for the whole batch rather than per row.
+    Near-flat rows -- an early cube that is neutral end to end, say -- carry no
+    information about the direction and would otherwise flip on noise alone,
+    which is exactly where a per-row choice would do damage.
+    """
+    up = np.stack([_pav(row) for row in curves])
+    down = np.stack([_pav(row[::-1])[::-1] for row in curves])
+    sse_up = float(((up - curves) ** 2).sum())
+    sse_down = float(((down - curves) ** 2).sum())
+    return (up, sse_up) if sse_up <= sse_down else (down, sse_down)
+
+
+def los_mean(x: torch.Tensor) -> torch.Tensor:
+    """Per-LOS-slice mean of a cube batch ``(N, C, D, H, W)`` -> ``(N, W)``.
+
+    A lightcone spans the whole reionisation history along ``W``, so one mean
+    per cube would average x_HI ~ 0 and x_HI ~ 1 together and describe neither.
+    The per-slice means *are* the cone's own x_HI(z) curve.
+    """
+    m = x.mean(dim=(-3, -2))
+    return m[:, 0] if m.dim() == 3 else m
+
+
+def los_key(x: torch.Tensor, mode: str = "monotone") -> torch.Tensor:
+    """x_HI estimate per LOS slice, used to index the theta schedule.
+
+    ``mode="mean"`` is the raw per-slice mean prediction.  That is the quantity
+    the 2-D schedule was keyed on, and it is also the reason the 2-D gain came
+    out at -0.16%: the responsive regime is x_HI ~ 0.005-0.05, about 0.045
+    wide, and the mean prediction locates it with MAE 0.055.  The key is
+    noisier than the band it has to resolve.
+
+    ``mode="monotone"`` uses the structure a lightcone has and a 2-D slice does
+    not.  The cone's neutral fraction is monotone in redshift, so the 256
+    per-slice means are noisy samples of one monotone curve; an isotonic fit
+    along the LOS axis pools each slice with its neighbours and returns a much
+    less noisy estimate of the same quantity.  No extra information and no
+    reference to the truth -- only the physical prior that reionisation does
+    not run backwards.
+    """
+    m = los_mean(x)
+    if str(mode).lower() != "monotone" or m.dim() != 2 or m.shape[1] < 3:
+        return m
+    fitted, _ = isotonic(m.detach().float().cpu().numpy().astype(np.float64))
+    return torch.as_tensor(fitted, dtype=m.dtype, device=m.device)
+
+
 def prediction_statistics(x: torch.Tensor) -> torch.Tensor:
     """Pooled per-sample descriptors of a raw prediction, as head inputs.
 
@@ -236,7 +313,7 @@ class SteppedThetaSchedule(nn.Module):
     def state_dict_floats(self) -> dict:
         return {"kind": "stepped",
                 "edges": [0.0] + [float(e) for e in self.edges],
-                "thetas": [float(v) for v in self.thetas()]}
+                "thetas": [float(v) for v in self.thetas().detach()]}
 
     def load_floats(self, d: dict) -> "SteppedThetaSchedule":
         th = [float(v) for v in d["thetas"]]
@@ -272,16 +349,22 @@ class ContrastOutput(nn.Module):
     """
 
     MODES = ("off", "global", "head", "xhi")
+    KEY_MODES = ("mean", "monotone")
 
     def __init__(self, mode: str = "global", schedule: dict | None = None,
                  freeze: bool = False, schedule_kind: str = "sigmoid",
-                 n_bins: int = 14):
+                 n_bins: int = 14, key_mode: str = "monotone"):
         super().__init__()
         mode = str(mode).lower()
         if mode not in self.MODES:
             raise ValueError(
                 f"contrast mode must be one of {'|'.join(self.MODES)}, got {mode!r}")
+        key_mode = str(key_mode).lower()
+        if key_mode not in self.KEY_MODES:
+            raise ValueError(
+                f"key mode must be one of {'|'.join(self.KEY_MODES)}, got {key_mode!r}")
         self.mode = mode
+        self.key_mode = key_mode
         self.freeze = bool(freeze)
         # Runtime gate for the alternating refit scheme: epoch 0 trains with no
         # map because no prediction exists yet to fit a schedule against.
@@ -341,15 +424,12 @@ class ContrastOutput(nn.Module):
             # schedule should react to the prediction, not give the network a
             # gradient path for gaming its own mean to pick a softer theta.
             if x.dim() == 5:
-                # A lightcone cube spans the whole reionisation history along
-                # its trailing line-of-sight axis, so a single mean per cube
-                # would average x_HI ~ 0 and x_HI ~ 1 together and describe
-                # neither. theta is therefore per LOS slice, which is also
-                # exactly the quantity the 2-D schedule was fitted on.
-                m = x.detach().mean(dim=(-3, -2))          # (N, C, W)
-                if m.dim() == 3:
-                    m = m[:, 0]                            # (N, W)
-                theta = self.schedule(m.reshape(-1)).view(m.shape)
+                # theta is per LOS slice, not per cube -- see los_mean. The key
+                # is smoothed along the LOS axis by default (los_key), because
+                # the raw per-slice mean is a noisier estimate of x_HI than the
+                # width of the band where sharpening actually pays.
+                key = los_key(x.detach(), self.key_mode)   # (N, W)
+                theta = self.schedule(key)                 # (N, W)
                 theta = theta[:, None, None, None, :]      # (N,1,1,1,W)
             else:
                 mean_value = x.detach().flatten(1).mean(1)
@@ -364,11 +444,13 @@ class ContrastComposed(nn.Module):
 
     def __init__(self, base: nn.Module, mode: str = "global",
                  schedule: dict | None = None, freeze: bool = False,
-                 schedule_kind: str = "sigmoid", n_bins: int = 14):
+                 schedule_kind: str = "sigmoid", n_bins: int = 14,
+                 key_mode: str = "monotone"):
         super().__init__()
         self.base = base
         self.contrast = ContrastOutput(mode, schedule=schedule, freeze=freeze,
-                                       schedule_kind=schedule_kind, n_bins=n_bins)
+                                       schedule_kind=schedule_kind, n_bins=n_bins,
+                                       key_mode=key_mode)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.contrast(self.base(x, **kwargs))

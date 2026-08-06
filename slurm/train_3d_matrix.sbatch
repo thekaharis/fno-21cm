@@ -117,7 +117,11 @@ case "$LOSS" in
     export LOSS_L2_WEIGHT=0.0 LOSS_EXPWALL_WEIGHT=1.0
     export EXPWALL_WARMUP_EPOCHS=0
     export CONTRAST_MODE=xhi CONTRAST_REFIT=1 CONTRAST_SCHEDULE_KIND=stepped
-    export CONTRAST_BINS="${CONTRAST_BINS:-14}" ;;
+    export CONTRAST_BINS="${CONTRAST_BINS:-14}"
+    # monotone: smooth the per-slice x_HI key along the LOS axis before it
+    # picks a bin. Set CONTRAST_KEY=mean for the unsmoothed 2-D behaviour.
+    export CONTRAST_KEY="${CONTRAST_KEY:-monotone}"
+    export CONTRAST_REFIT_BATCH="${CONTRAST_REFIT_BATCH:-2}" ;;
   *) echo "unknown LOSS=$LOSS" >&2; exit 2 ;;
 esac
 
@@ -151,7 +155,7 @@ echo "============ 3-D matrix: ARCH=$ARCH  LOSS=$LOSS ============"
 echo "MODEL_KIND:   $MODEL_KIND ${LOCAL_OPERATOR:+($LOCAL_OPERATOR local / $GLOBAL_OPERATOR global)}"
 echo "LOSS:         L2=$LOSS_L2_WEIGHT expwall=$LOSS_EXPWALL_WEIGHT"
 echo "              scale=$EXPWALL_SCALE cap=$WALL_CAP warmup=$EXPWALL_WARMUP_EPOCHS"
-echo "CONTRAST:     ${CONTRAST_MODE:-off} ${CONTRAST_SCHEDULE_KIND:+/$CONTRAST_SCHEDULE_KIND}"
+echo "CONTRAST:     ${CONTRAST_MODE:-off} ${CONTRAST_SCHEDULE_KIND:+/$CONTRAST_SCHEDULE_KIND}${CONTRAST_KEY:+ key=$CONTRAST_KEY}"
 echo "EPOCHS:       $N_EPOCHS"
 echo "CONTINUE:     ${INIT_CHECKPOINT:-fresh initialization}"
 echo "CHECKPOINT:   $CHECKPOINT_DIR"

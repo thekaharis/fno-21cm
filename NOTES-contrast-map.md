@@ -447,10 +447,99 @@ Open:
   so an L2 anchor is not optional. All edge variants cost L2, so their case
   rests entirely on sharpness, which is not yet measured at the final epoch.
 * Whether any of this transfers to 3-D, where the front-width defect is worse
-  (~3.5x vs ~2-4x here).
+  (~3.5x vs ~2-4x here). Section 8 sets that up; it is not yet measured.
 * If sharpness is still wanted, section 6 says where to spend the effort: the
   loss must penalise *misplaced* edges, not reward *steep* ones. Sharpening is
   measurably the wrong tool -- it fixes blur, and ~86% of the error is not blur
   (5.2). The transport direction (SWD) is the only edge term here that cost
   under 1.2% L2, and it is the only one that can move an edge rather than
   steepen it in place.
+
+## 8. The 3-D setup (pre-registered, not yet measured)
+
+3-D does not need a new scheme. `theta` is a function of x_HI, not of redshift,
+so one global table already covers cones whose reionisation happens at
+different times: a slice at x_HI = 0.02 gets the same `theta` whether that
+happens at z = 7 or z = 9. Per-cone *fitting* would need the truth and is the
+oracle of 3.3 all over again. What 3-D changes is the **key**, and two
+corrections were made to the machinery.
+
+### 8.1 The key: isotonic smoothing along the LOS axis
+
+Section 6.1's gain lives at x_HI 0.005-0.05, a band 0.045 wide, and the key
+that has to find it -- the mean prediction -- locates x_HI with MAE 0.055. The
+key is noisier than the band. That is the whole reason 6.1's 2-9% pools to
+-0.16%.
+
+A lightcone has structure a 2-D slice does not: its 256 per-slice means are
+noisy samples of *one monotone curve*, because reionisation does not run
+backwards. An isotonic (PAV) fit along the LOS axis pools each slice with its
+neighbours, using no truth and no extra information -- only that prior.
+`contrast.los_key`, `CONTRAST_KEY=monotone|mean`, default monotone.
+
+**This works only against the jitter component of the key error, and is exactly
+powerless against bias.** Measured on synthetic curves at the real error scale:
+
+| key error model | raw MAE | isotonic MAE | change |
+| --- | --- | --- | --- |
+| pure jitter, sigma 0.05 | 0.0399 | 0.0131 | **-67%** |
+| pure jitter, sigma 0.02 | 0.0159 | 0.0065 | **-59%** |
+| constant bias +0.05 | 0.0500 | 0.0500 | +0% |
+| bias in x_HI, 0.3*(0.5 - x_HI) | 0.1204 | 0.1204 | +0% |
+| half jitter, half bias | 0.0636 | 0.0612 | -4% |
+
+So the prediction to record now: if the 0.055 is mostly jitter, the smoothed
+key lands at ~0.02 -- inside the 0.045 band -- and 6.1's per-bin gains become
+reachable in 3-D. If it is mostly bias, this buys nothing and the reason the
+band is missed is not something smoothing can reach.
+
+The refit logs which case holds, per epoch, so this does not need a separate
+experiment. `key_jitter` is the RMS distance from the raw per-slice means to
+their monotone fit (the jitter, measured without any truth); `frac_band` is the
+share of LOS slices inside 0.005-0.05, which caps the pooled gain because every
+slice outside gets the identity. Read them together: `frac_band` is the size of
+the prize and `key_jitter` is whether the key can find it. A `key_jitter` near
+zero at epoch 1 means stop.
+
+### 8.2 The refit was optimising the wrong objective
+
+`collect_base_outputs` split cubes into transverse LOS slices before fitting,
+which made the 3-D path identical to the 2-D one -- and silently changed the
+objective. The fit uses the run's own training loss, and `expwall`'s signed
+distance computed inside a single transverse plane is not the 3-D distance the
+trainer computes: a wall sitting just off-slice along the LOS is invisible to
+it. So `theta` was fitted under one loss and judged under another.
+
+Since `theta` is constant within a slice, splitting bought nothing in the first
+place. The fit now runs on whole cubes and the objective sees 5-D tensors
+(`CONTRAST_REFIT_FLATTEN=1` restores the old behaviour). `CONTRAST_REFIT_BATCH`
+is now a number of cubes, and is now actually passed -- it was previously read
+from the environment and never used, so every fit ran at the hardcoded default.
+
+Verified end to end on a blurred synthetic cone under the real
+`ExponentialWallDistance`: held-out **-21.6%**, i.e. the positive control of
+section 6 reproduces in 3-D on cubes. That measures the plumbing, not the
+model.
+
+### 8.3 The refit is now collective
+
+Each DDP rank used to refit independently on its own shard and install its own
+table -- a deliberate choice, to keep a collective out of the epoch loop, but
+wrong twice over. The ranks trained the next epoch under *different* maps
+(invisibly, since only rank 0 prints), and each fitted from 1/world_size of the
+data, which the thin responsive band cannot afford: at a few percent occupancy
+the bins carrying the gain can fall below a fittable count per rank.
+
+The fit now averages its gradients across ranks every step, so the table is
+fitted on the union of the shards, and the result is broadcast from rank 0
+before installation so identical tables are a property of the code rather than
+an assumption about cross-rank floating-point determinism. Reported
+`bin_counts`, `n_slices`, `frac_band` and the train gain are global.
+
+Cost is ~14 floats per collective against the model's own gradient reduction
+every step. The health checks had to become collective too: a rank that hits a
+non-finite loss stops issuing collectives, so deciding to break locally would
+hang every other rank. Both flags travel with the gradients in the same
+all_reduce, and all ranks break, skip, or step together --
+`tests/test_contrast_refit_ddp.py` covers that case explicitly, with a process
+group timeout so a regression fails rather than hangs.
