@@ -108,6 +108,7 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `slurm/viz_sirenfno.sbatch` | Standard SirenFNO prediction visualization using the best checkpoint by default. |
 | `slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
 | `slurm/viz_ufno_detailed.sbatch` | Same as `viz_detailed.sbatch` but for the U-FNO checkpoint. |
+| `slurm/viz_localop.sbatch` | Prediction visualization for any `localop` operator pairing. Pass `LOCAL_OPERATOR`/`GLOBAL_OPERATOR` and the checkpoint directory and `VIZ_TAG` are derived from the pair; the architecture itself comes from the run's `run_metadata.json`. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
 | `slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
@@ -255,6 +256,34 @@ MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=cnn python fno_21cm_3d.py
 Operator aliases are accepted (`fno`, `wno`, `whno`/`walsh`, `siren`, `unet`).
 A named kind rejects a contradicting `LOCAL_OPERATOR`/`GLOBAL_OPERATOR` rather
 than silently ignoring it.
+
+Rendering a pairing needs no per-pair script. `viz.visualize_3d` rebuilds the
+model from the `run_metadata.json` beside the checkpoint, so both slots and
+their hyperparameters come from the training run; only the checkpoint
+directory and the figures tag have to be pointed at the right place:
+
+```bash
+CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
+    VIZ_TAG=local-whno-cnn python -m viz.visualize_3d
+```
+
+`slurm/viz_localop.sbatch` derives both from `LOCAL_OPERATOR`/`GLOBAL_OPERATOR`
+using the same tags the trainer names its checkpoint directory with, so they
+cannot drift apart:
+
+```bash
+sbatch --export=ALL,LOCAL_OPERATOR=hadamard,GLOBAL_OPERATOR=cnn \
+    slurm/viz_localop.sbatch
+```
+
+Set `VIZ_TAG` explicitly for a run that overrode `CHECKPOINT_DIR` at training
+time — otherwise every render of that pairing lands in an identically-named
+`figures/` folder. The same metadata-driven reconstruction backs
+`viz.visualize_3d_detailed` and the multi-checkpoint diagnostics
+(`power_spectrum_evaluation`, `bubble_size_evaluation`,
+`boundary_band_diagnostic`, `parity_diagnostic`). `viz.localfno_mode_weights`
+is the exception: it profiles per-mode Fourier weights and refuses a wavelet,
+Walsh-Hadamard, or convolutional local slot.
 
 Each operator declares what it needs, and the skeleton adapts:
 
