@@ -14,6 +14,32 @@
 # name the folder something else; without it every localop pairing would land
 # in an identically-named folder, since the tag otherwise falls back to the
 # model kind, which is just "localop" for all of them.
+#
+# Everything viz.visualize_3d renders is selectable, and passes straight
+# through --export (see that module's docstring for the full list):
+#
+#   VIZ_FIGURES        slices, physical, lightcone, scatter, grid; or
+#                      "all"/"none", with "-name" to drop one   (default: all)
+#                      Separate names with "+", not "," -- SLURM's --export
+#                      splits its own argument on commas.
+#   VIZ_SPLITS         validation and/or test                  (default: both)
+#   N_CONES_PER_SPLIT  cones per split                            (default: 4)
+#   N_SLICES_PER_CONE  z-slices per comparison panel              (default: 4)
+#   STRATIFY_Z         redshift the cone ranking is taken at    (default: 7.0)
+#   VIZ_METRICS        write physical_metrics.json                (default: 1)
+#   VIZ_XY_TRANSPOSE   xy-transpose parity; costs a 2nd forward pass per cone
+#
+# e.g. eight cones, test split only, strips and physical diagnostics, no
+# per-cone slice panels or hexbins:
+#
+#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn,\
+# N_CONES_PER_SPLIT=8,VIZ_SPLITS=test,VIZ_FIGURES=lightcone+physical+grid \
+#       slurm/viz_localop.sbatch
+#
+# Exporting from the submitting shell avoids the comma question entirely:
+#
+#   VIZ_FIGURES="grid,physical" CHECKPOINT_DIR=... sbatch --export=ALL \
+#       slurm/viz_localop.sbatch
 
 #SBATCH --job-name=viz-localop
 #SBATCH --partition=gpu
@@ -67,6 +93,8 @@ export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compr
 echo "======== localop viz ========"
 echo "CHECKPOINT_DIR: $CHECKPOINT_DIR ($CHECKPOINT_KIND)"
 echo "VIZ_TAG:        $VIZ_TAG"
+echo "FIGURES:        ${VIZ_FIGURES:-all} on ${VIZ_SPLITS:-validation,test}"
+echo "CONES/SLICES:   ${N_CONES_PER_SPLIT:-4} per split, ${N_SLICES_PER_CONE:-4} per cone"
 echo "CUBES_CACHE:    $CUBES_CACHE"
 echo "============================="
 

@@ -3,13 +3,35 @@
 
 For each held-out cone:
   1. Comparison panel of N evenly-spaced z-slices through the predicted cube.
-  2. Edge-on xz lightcone strip at y = Ny // 2 (full LOS extent).
-  3. Hexbin scatter of true vs predicted x_HI across all voxels.
+  2. Global-history / P(k) / Fourier cross-correlation diagnostics.
+  3. Edge-on xz lightcone strip at y = Ny // 2 (full LOS extent).
+  4. Hexbin scatter of true vs predicted x_HI across all voxels.
+Plus one lightcone-strip summary grid per split, and physical_metrics.json.
+
+What gets rendered is selectable; everything defaults to the historical
+behavior, so an unset environment reproduces the old output exactly.
+
+  VIZ_FIGURES        which figures: any of slices, physical, lightcone,
+                     scatter, grid -- or "all" / "none", each optionally
+                     prefixed with "-" to drop it. Applied left to right,
+                     so "all,-scatter" is everything but the hexbin.
+                     Separate with commas, "+", or spaces -- "+" is the one
+                     that survives SLURM's --export, which eats commas.
+                     (default: all)
+  VIZ_SPLITS         "validation" (or "val") and/or "test"  (default: both)
+  N_CONES_PER_SPLIT  cones rendered per split                (default: 4)
+  N_SLICES_PER_CONE  z-slices in the comparison panel        (default: 4)
+  STRATIFY_Z         redshift the cone ranking is taken at   (default: 7.0)
+  VIZ_METRICS        write physical_metrics.json -- edge/interior RMSE,
+                     radial P(k), bubble summaries           (default: 1)
+  VIZ_XY_TRANSPOSE   also measure xy-transpose parity, which costs a second
+                     forward pass per cone                   (default: 1)
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
 from dataclasses import replace
@@ -44,6 +66,116 @@ from modeling import (
 )
 from util.metrics_21cm import compute_physical_metrics
 from util.run_metadata import load_run_metadata, resolve_checkpoint
+
+
+# ------------------------------------------------------- env-var switches
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from None
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {raw!r}")
+
+
+#: Every figure this script can render, in the order main() produces them.
+#: ``slices`` z-slice comparison panels, ``physical`` global-history / P(k) /
+#: cross-correlation diagnostics, ``lightcone`` the edge-on xz strip,
+#: ``scatter`` the voxel hexbin, ``grid`` the one-row-per-cone strip summary.
+FIGURE_KINDS = ("slices", "physical", "lightcone", "scatter", "grid")
+
+SPLIT_ALIASES = {
+    "val": "validation",
+    "validation": "validation",
+    "test": "test",
+}
+
+
+#: Tokens may be separated by commas, semicolons, plus signs, or whitespace.
+#: Commas read best, but SLURM's ``--export`` splits its own argument on them,
+#: so ``VIZ_FIGURES=grid+physical`` is what survives being passed inline.
+_SEPARATORS = re.compile(r"[,;+\s]+")
+
+
+def resolve_figures(spec: str, available=FIGURE_KINDS) -> tuple[str, ...]:
+    """Parse a ``VIZ_FIGURES`` selection into an ordered tuple of kinds.
+
+    Tokens are applied left to right: ``all`` selects every kind, ``none``
+    clears the selection, a bare name adds one kind, and a ``-name`` prefix
+    drops one -- so ``all,-scatter`` renders everything but the hexbin, and
+    ``grid,physical`` renders only those two. Returned in ``available`` order
+    regardless of the order they were named in.
+    """
+    selected: set[str] = set()
+    for raw in _SEPARATORS.split(spec):
+        token = raw.strip().lower()
+        if not token:
+            continue
+        drop = token.startswith("-")
+        name = token[1:].strip() if drop else token
+        if name == "none":
+            if drop:
+                raise ValueError("'-none' is not a valid VIZ_FIGURES token")
+            selected.clear()
+            continue
+        if name == "all":
+            group = set(available)
+        elif name in available:
+            group = {name}
+        else:
+            raise ValueError(
+                f"unknown figure {name!r} in VIZ_FIGURES; expected any of "
+                f"{', '.join(available)} -- or 'all' / 'none', each "
+                f"optionally prefixed with '-' to drop it"
+            )
+        selected -= group if drop else set()
+        selected |= set() if drop else group
+    return tuple(kind for kind in available if kind in selected)
+
+
+def resolve_splits(spec: str) -> tuple[str, ...]:
+    """Parse a ``VIZ_SPLITS`` selection ('val'/'validation', 'test')."""
+    selected = []
+    for raw in _SEPARATORS.split(spec):
+        token = raw.strip().lower()
+        if not token:
+            continue
+        if token not in SPLIT_ALIASES:
+            raise ValueError(
+                f"unknown split {token!r} in VIZ_SPLITS; expected "
+                f"'validation' (or 'val') and/or 'test'"
+            )
+        name = SPLIT_ALIASES[token]
+        if name not in selected:
+            selected.append(name)
+    return tuple(selected)
+
 
 # ------------------------------------------------------------------ config
 _ENV_MODEL_CONFIG = ModelConfig.from_env()
@@ -115,7 +247,8 @@ FILE_GLOB = "21cmfast_11d_sample*.h5"
 
 N_Z = 256
 Z_MIN, Z_MAX = 5.0, 25.0
-N_SLICES_PER_CONE = 4              # z-slices to render in the comparison panel
+# z-slices to render in the comparison panel
+N_SLICES_PER_CONE = env_int("N_SLICES_PER_CONE", 4)
 
 # Number of cones to visualize per held-out split (val + test).  Cones are
 # picked to span the range of reionization behaviors -- from "barely reionized
@@ -125,8 +258,22 @@ N_SLICES_PER_CONE = 4              # z-slices to render in the comparison panel
 # LHS parameter draws produce wildly different reionization histories; the
 # multi-cone view is what makes architectural / loss interventions actually
 # comparable.
-N_CONES_PER_SPLIT = 4
-STRATIFY_Z = 7.0                   # mid-reionization redshift used for ranking
+N_CONES_PER_SPLIT = env_int("N_CONES_PER_SPLIT", 4)
+# mid-reionization redshift used for ranking
+STRATIFY_Z = env_float("STRATIFY_Z", 7.0)
+
+# Which figures to render, which splits to render them for, and whether to
+# compute the physical metrics.  Rendering is the cheap part -- the expensive
+# ones are the per-cone forward pass (unavoidable) and, when enabled, the
+# second forward pass on transposed input that measures xy parity.  The
+# metrics themselves (edge/interior RMSE, radial P(k), bubble summaries) are
+# what physical_metrics.json carries and what the "physical" figure plots, so
+# selecting that figure computes them regardless of VIZ_METRICS.
+VIZ_FIGURES = resolve_figures(os.environ.get("VIZ_FIGURES", "all"))
+VIZ_SPLITS = resolve_splits(os.environ.get("VIZ_SPLITS", "validation,test"))
+VIZ_METRICS = env_bool("VIZ_METRICS", True)
+VIZ_XY_TRANSPOSE = env_bool("VIZ_XY_TRANSPOSE", True)
+COMPUTE_METRICS = VIZ_METRICS or "physical" in VIZ_FIGURES
 
 # Must match fno_21cm_3d.py.
 SPLIT_SEED = 42
@@ -185,6 +332,14 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
         f"UFNO_UNET:    {UFNO_UNET_VARIANT}"
         + ("+global_residual" if UFNO_GLOBAL_RESIDUAL else ""),
         f"N_LAYERS:     {N_LAYERS}",
+        f"FIGURES:      {', '.join(VIZ_FIGURES) or '(none)'}",
+        f"SPLITS:       {', '.join(VIZ_SPLITS) or '(none)'}",
+        f"N_CONES:      {N_CONES_PER_SPLIT} per split",
+        f"N_SLICES:     {N_SLICES_PER_CONE} per cone",
+        f"STRATIFY_Z:   {STRATIFY_Z}",
+        f"METRICS:      {'on' if COMPUTE_METRICS else 'off'}"
+        + (" (xy-transpose parity)" if COMPUTE_METRICS and VIZ_XY_TRANSPOSE
+           else ""),
     ]
     (folder / "run_info.txt").write_text("\n".join(info_lines) + "\n")
     return folder
@@ -554,6 +709,19 @@ def plot_lightcone_summary_grid(
 def main():
     print(f"Device: {DEVICE}")
     print(
+        f"Figures: {', '.join(VIZ_FIGURES) or '(none)'}; "
+        f"splits: {', '.join(VIZ_SPLITS) or '(none)'}; "
+        f"{N_CONES_PER_SPLIT} cones/split, {N_SLICES_PER_CONE} slices/cone; "
+        f"metrics {'on' if COMPUTE_METRICS else 'off'}"
+    )
+    if not VIZ_FIGURES and not COMPUTE_METRICS:
+        print("Nothing to do: VIZ_FIGURES and VIZ_METRICS are both empty/off",
+              file=sys.stderr)
+        sys.exit(1)
+    if not VIZ_SPLITS:
+        print("Nothing to do: VIZ_SPLITS selected no splits", file=sys.stderr)
+        sys.exit(1)
+    print(
         f"Checkpoint: {CHECKPOINT} "
         f"(type={CHECKPOINT_TYPE}, epoch={CHECKPOINT_EPOCH})"
     )
@@ -622,6 +790,9 @@ def main():
         (val_ds, val_idx, "validation"),
         (test_ds, test_idx, "test"),
     ]:
+        if split_name not in VIZ_SPLITS:
+            print(f"Split {split_name} not selected by VIZ_SPLITS; skipping")
+            continue
         if len(split_ds) == 0:
             print(f"No cones in {split_name} split; skipping")
             continue
@@ -645,60 +816,77 @@ def main():
             print(f"--- {split_name} cone {cone_id} (idx_in_split={idx_in_split}) ---")
             sample = split_ds[idx_in_split]
             dens, truth, pred = predict_cube(model, sample)
-            per_cone_for_grid.append((cone_id, summ, dens, truth, pred))
-            physical = compute_physical_metrics(truth, pred, target_z)
-            physical["xy_transpose_rmse"] = xy_transpose_error(
-                model, sample, pred
-            )
-            physical_records.append({
-                "split": split_name,
-                "cone_id": cone_id,
-                **physical,
-            })
-            print(
-                f"  XY transpose RMSE: {physical['xy_transpose_rmse']:.5f}; "
-                f"edge/interior RMSE: "
-                f"{physical['transverse_edge_rmse']:.5f}/"
-                f"{physical['transverse_interior_rmse']:.5f}"
-            )
+            if "grid" in VIZ_FIGURES:
+                # Only the summary grid needs every cone held in memory at
+                # once; without it each cube is freed after its own figures.
+                per_cone_for_grid.append((cone_id, summ, dens, truth, pred))
+            physical = None
+            if COMPUTE_METRICS:
+                physical = compute_physical_metrics(truth, pred, target_z)
+                parity = ""
+                if VIZ_XY_TRANSPOSE:
+                    # Second forward pass on transposed input -- skippable
+                    # via VIZ_XY_TRANSPOSE=0 when inference is the bottleneck.
+                    physical["xy_transpose_rmse"] = xy_transpose_error(
+                        model, sample, pred
+                    )
+                    parity = (
+                        f"XY transpose RMSE: "
+                        f"{physical['xy_transpose_rmse']:.5f}; "
+                    )
+                physical_records.append({
+                    "split": split_name,
+                    "cone_id": cone_id,
+                    **physical,
+                })
+                print(
+                    f"  {parity}edge/interior RMSE: "
+                    f"{physical['transverse_edge_rmse']:.5f}/"
+                    f"{physical['transverse_interior_rmse']:.5f}"
+                )
 
             # z-slice grid (one PNG per cone)
-            idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE,
-                               dtype=int).tolist()
-            fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
-                                split_name)
-            out = figures_dir / f"comparison_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+            if "slices" in VIZ_FIGURES:
+                idxs = np.linspace(0, N_Z - 1, N_SLICES_PER_CONE,
+                                   dtype=int).tolist()
+                fig = plot_z_slices(dens, truth, pred, target_z, idxs, cone_id,
+                                    split_name)
+                out = (figures_dir /
+                       f"comparison_3d_{split_name}_cone{cone_id}.png")
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
-            fig = plot_physical_diagnostics(
-                physical, cone_id=cone_id, split=split_name
-            )
-            out = figures_dir / f"physical_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+            if "physical" in VIZ_FIGURES:
+                fig = plot_physical_diagnostics(
+                    physical, cone_id=cone_id, split=split_name
+                )
+                out = figures_dir / f"physical_3d_{split_name}_cone{cone_id}.png"
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
             # xz lightcone strip (one PNG per cone)
-            fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
-                                       split_name)
-            out = figures_dir / f"lightcone_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+            if "lightcone" in VIZ_FIGURES:
+                fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
+                                           split_name)
+                out = figures_dir / f"lightcone_3d_{split_name}_cone{cone_id}.png"
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
             # voxel scatter (one PNG per cone)
-            fig = plot_scatter(truth, pred, cone_id, split_name)
-            out = figures_dir / f"scatter_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+            if "scatter" in VIZ_FIGURES:
+                fig = plot_scatter(truth, pred, cone_id, split_name)
+                out = figures_dir / f"scatter_3d_{split_name}_cone{cone_id}.png"
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
         # Single summary-grid figure with all N cones' lightcone strips
         # stacked vertically -- the canonical "compare across reionization
         # regimes" plot for the thesis.
-        if per_cone_for_grid:
+        if per_cone_for_grid and "grid" in VIZ_FIGURES:
             fig = plot_lightcone_summary_grid(per_cone_for_grid, target_z,
                                               split_name)
             out = figures_dir / f"lightcone_grid_3d_{split_name}.png"
@@ -706,9 +894,12 @@ def main():
             plt.close(fig)
             print(f"Saved {out}")
 
-    metrics_path = figures_dir / "physical_metrics.json"
-    metrics_path.write_text(json.dumps(physical_records, indent=2) + "\n")
-    print(f"Saved {metrics_path}")
+    # COMPUTE_METRICS may be on purely to feed the "physical" figure; the JSON
+    # is written only when it was actually asked for.
+    if VIZ_METRICS:
+        metrics_path = figures_dir / "physical_metrics.json"
+        metrics_path.write_text(json.dumps(physical_records, indent=2) + "\n")
+        print(f"Saved {metrics_path}")
     print("Done.")
 
 

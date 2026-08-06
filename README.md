@@ -205,6 +205,45 @@ python -m viz.visualize_spectral_weights
 python -m viz.visualize_spectral_weights_z
 ```
 
+### Selecting which figures get rendered
+
+`viz.visualize_3d` renders five figure kinds — `slices` (z-slice comparison
+panels), `physical` (global history, P(k), Fourier cross-correlation),
+`lightcone` (edge-on xz strip), `scatter` (voxel hexbin), and `grid` (the
+one-row-per-cone strip summary) — plus `physical_metrics.json`. Each is
+selectable, and every switch defaults to the historical behavior, so an unset
+environment reproduces the old output exactly.
+
+| variable | effect | default |
+| --- | --- | --- |
+| `VIZ_FIGURES` | which figures; `all` / `none`, or names with `-name` to drop one | `all` |
+| `VIZ_SPLITS` | `validation` (or `val`) and/or `test` | both |
+| `N_CONES_PER_SPLIT` | cones rendered per split | `4` (16 in the detailed viz) |
+| `N_SLICES_PER_CONE` | z-slices per comparison panel | `4` (6 in the detailed viz) |
+| `STRATIFY_Z` | redshift the cone ranking is taken at | `7.0` |
+| `VIZ_METRICS` | write `physical_metrics.json` | `1` |
+| `VIZ_XY_TRANSPOSE` | measure xy-transpose parity — a second forward pass per cone | `1` |
+
+`VIZ_FIGURES` tokens apply left to right, so subtraction works:
+
+```bash
+# Just the summary grid, across 8 test cones.
+VIZ_FIGURES=grid VIZ_SPLITS=test N_CONES_PER_SPLIT=8 python -m viz.visualize_3d
+
+# Everything except the per-voxel hexbins, and skip the parity forward pass.
+VIZ_FIGURES=all,-scatter VIZ_XY_TRANSPOSE=0 python -m viz.visualize_3d
+```
+
+Names may be separated by commas, `+`, or spaces. Prefer `+` when passing
+them inline to `sbatch --export`, which splits its own argument on commas —
+or export from the submitting shell and use `--export=ALL`.
+
+The same switches drive `viz.visualize_3d_detailed`, minus `physical` (it has
+no such figure) and the metrics options, and with its own heavier defaults.
+The edge-versus-interior RMSE lives in `physical_metrics.json` and the job
+log rather than in a figure; `viz.boundary_band_diagnostic` is the dedicated
+plot for boundary behavior.
+
 Select the 3-D architecture with `MODEL_KIND`:
 
 ```bash
