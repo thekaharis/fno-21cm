@@ -160,6 +160,13 @@ IONIZED_WALL_KERNEL_SIZE = int(
 # 1.47, blur 0.108 vs 0.111) and halved the wall-placement error, at ~20% more
 # RMSE. scale=4 diverged. Distances are in voxels, so the penalty is mildly
 # anisotropic here -- the LOS axis is not on the transverse physical scale.
+# EXPWALL_AXES="transverse" runs the distance transform per XY slice instead.
+# Measured on this cache: transverse cell 1.43 Mpc vs LOS cell 9.7 Mpc median
+# (41.7 Mpc at z=5), and the 3.6 Mpc truth front is 2.5 transverse cells but
+# only 0.37 of a LOS cell -- unrepresentable along the LOS. The 3-D transform
+# also almost never reaches `cap` (phi in [-6,+7], weight spread 1.5x, against
+# [-32,+32] and 7x per-slice), so the exponential weighting barely engages.
+EXPWALL_AXES = os.environ.get("EXPWALL_AXES", "3d").strip().lower()
 LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
 # Ramp expwall in, because its magnitude relative to L2 *inverts* over training.
 # Measured on real cubes: L2/expwall is 3.0 for a constant-0.5 prediction but
@@ -518,7 +525,8 @@ def main():
         print(f"[loss] LOS volume weights ON: w in "
               f"[{float(los_w.min()):.2f}, {float(los_w.max()):.2f}] "
               f"(mean 1.0, {len(los_w)} slices)")
-    expwall_loss = ExponentialWallDistance(scale=EXPWALL_SCALE, cap=WALL_CAP)
+    expwall_loss = ExponentialWallDistance(scale=EXPWALL_SCALE, cap=WALL_CAP,
+                                           axes=EXPWALL_AXES)
     loss_terms = (
         (LOSS_L2_WEIGHT, l2_term),
         (LOSS_H1_WEIGHT, h1_term),

@@ -16,6 +16,17 @@
 # UFNO_CHECKPOINT=checkpoints/checkpoints_3d_ufno_v3_anisoz/best_model_state_dict.pt \
 #     slurm/power_spectrum_eval.sbatch
 #
+# The two slots take any architecture, so set MODEL_A_NAME / MODEL_B_NAME to
+# label the plots and ps_metrics.csv with what actually ran -- otherwise the
+# rows are filed under "ufno" / "localfno" regardless of the checkpoints:
+#
+#   sbatch --export=ALL,\
+# UFNO_CHECKPOINT=./checkpoints/checkpoints_3d_ufno_plain_gnorm/best_model_state_dict.pt,\
+# MODEL_A_NAME=ufno-gnorm,\
+# LOCALFNO_CHECKPOINT=./checkpoints/checkpoints_3d_fno_whno_plain/best_model_state_dict.pt,\
+# MODEL_B_NAME=fno_whno-plain \
+#     slurm/power_spectrum_eval.sbatch
+#
 # Short feasibility run:
 #
 #   sbatch --export=ALL,N_CONES=20 slurm/power_spectrum_eval.sbatch
@@ -55,6 +66,14 @@ export PYTHONUNBUFFERED=1
 # diagnostic safely reconstruct different model architectures in one process.
 UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt}"
 LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt}"
+# Plot/CSV labels. The two slots are no longer necessarily a U-FNO and a
+# Local-FNO -- any two architectures can be compared here -- so the label must
+# be settable, otherwise every figure and every ps_metrics.csv row is filed
+# under a model name that is not the one that produced it.
+# Defaults reproduce the historical labels, so existing invocations are
+# unchanged.
+MODEL_A_NAME="${MODEL_A_NAME:-ufno}"
+MODEL_B_NAME="${MODEL_B_NAME:-localfno}"
 
 for checkpoint in "$UFNO_CHECKPOINT" "$LOCALFNO_CHECKPOINT"; do
     if [ ! -f "$checkpoint" ]; then
@@ -111,8 +130,8 @@ fi
 echo "================ power-spectrum evaluation ================"
 echo "Host:                 $(hostname)"
 echo "Job ID:               ${SLURM_JOB_ID:-N/A}"
-echo "U-FNO checkpoint:     $UFNO_CHECKPOINT"
-echo "Local-FNO checkpoint: $LOCALFNO_CHECKPOINT"
+echo "Model A ($MODEL_A_NAME): $UFNO_CHECKPOINT"
+echo "Model B ($MODEL_B_NAME): $LOCALFNO_CHECKPOINT"
 echo "Split / cones:        $SPLIT / $N_CONES"
 echo "k bins:               $N_BINS"
 echo "Cyl. chunks (z):      $CHUNK_Z  ($CHUNK_CELLS cells each)"
@@ -126,8 +145,8 @@ echo "==========================================================="
 args=(
     -m viz.power_spectrum_evaluation
     --checkpoints
-    "ufno=$UFNO_CHECKPOINT"
-    "localfno=$LOCALFNO_CHECKPOINT"
+    "${MODEL_A_NAME}=$UFNO_CHECKPOINT"
+    "${MODEL_B_NAME}=$LOCALFNO_CHECKPOINT"
     --split "$SPLIT"
     --n-cones "$N_CONES"
     --n-bins "$N_BINS"

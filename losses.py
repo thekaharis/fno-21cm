@@ -792,6 +792,45 @@ def signed_distance(target: torch.Tensor, cap: int = 32,
             - _chamfer_distance(~inside, cap))      # inside: negative
 
 
+def transverse_signed_distance(target: torch.Tensor, cap: int = 32,
+                               threshold: float = 0.5
+                               ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-XY-slice signed distance for a cube, plus a has-wall slice mask.
+
+    Why this exists.  On the production lightcone cache a transverse cell is
+    ~1.43 Mpc while a LOS cell is ~9.7 Mpc (41.7 Mpc at the z=5 end), so a
+    voxel-space distance transform treats one transverse step as equal to a
+    step ~7x longer in Mpc.  Worse, the measured truth front is 3.6 Mpc: 2.5
+    transverse cells, but 0.37 of a LOS cell -- along the LOS the correct
+    answer is not representable on this grid at all, so the 3-D transform
+    spends most of its weight on a direction where nothing can be learned.
+
+    There is a second effect, independent of units.  In 3-D a wall in an
+    adjacent LOS slice is always a voxel or two away, so the transform rarely
+    approaches ``cap``: measured phi range [-6, +7] and weight spread 1.5x,
+    against [-32, +32] and 7x per-slice.  The exponential weighting that makes
+    this loss work is effectively switched off in 3-D.
+
+    Returns ``(phi, has_wall)`` where ``has_wall`` is True for slices that
+    contain a front.  Single-phase slices carry no edge information, and every
+    voxel in them sits at ``cap`` -- so they would otherwise receive the
+    *largest* weight in the batch.  The caller must mask them out.
+    """
+    if target.dim() != 4:
+        raise ValueError(
+            f"expected a channel-less cube (N,X,Y,Z), got {tuple(target.shape)}"
+        )
+    n, x, y, z = target.shape
+    flat = target.permute(0, 3, 1, 2).reshape(n * z, x, y)
+    phi = signed_distance(flat, cap, threshold)
+    inside = flat > threshold
+    # A slice has a wall only if it contains both phases.
+    has_wall = inside.any(dim=(-2, -1)) & (~inside).any(dim=(-2, -1))
+    phi = phi.reshape(n, z, x, y).permute(0, 2, 3, 1)
+    has_wall = has_wall.reshape(n, 1, 1, z)        # broadcasts over X, Y
+    return phi, has_wall
+
+
 class WallPlacementLoss:
     """Penalise every pixel by its distance from the true bubble wall.
 
@@ -892,24 +931,50 @@ class ExponentialWallDistance:
     optimiser sails through.
 
     ``cap`` bounds the distance, hence ``w``, hence the gradient.
+
+    ``axes`` selects the geometry of the distance transform.  ``"3d"`` is the
+    historical behaviour.  ``"transverse"`` runs the transform independently in
+    each XY slice and drops slices with no front -- see
+    :func:`transverse_signed_distance` for why the LOS axis is not merely a
+    different scale but an unrepresentable one on this grid.
     """
 
     def __init__(self, scale: float = 8.0, cap: int = 32,
-                 threshold: float = 0.5, power: float = 1.0):
+                 threshold: float = 0.5, power: float = 1.0,
+                 axes: str = "3d"):
         self.scale = float(scale)
         self.cap = int(cap)
         self.threshold = float(threshold)
         self.power = float(power)
+        if str(axes).lower() not in {"3d", "transverse"}:
+            raise ValueError(
+                f"axes must be '3d' or 'transverse', got {axes!r}"
+            )
+        self.axes = str(axes).lower()
 
     def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
         if out.shape != y.shape:
             raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
+        field = _drop_channel(y.detach())
+        keep = None
         with torch.no_grad():
-            phi = signed_distance(_drop_channel(y.detach()), self.cap,
-                                  self.threshold)
+            if self.axes == "transverse" and field.dim() == 4:
+                phi, has_wall = transverse_signed_distance(
+                    field, self.cap, self.threshold)
+                keep = _match_rank(has_wall.to(phi.dtype), out)
+            else:
+                # A 2-D field is already transverse, so both modes agree there.
+                phi = signed_distance(field, self.cap, self.threshold)
             w = _match_rank(torch.exp(phi.abs() / self.scale), out)
-            w = w / w.mean()                      # keep the loss scale stable
+            if keep is not None:
+                w = w * keep
+            # Normalise over the voxels that actually contribute, so dropping
+            # single-phase slices rescales the loss rather than shrinking it.
+            denom = w.mean() if keep is None else w.sum() / keep.expand_as(w).sum()
+            w = w / denom.clamp_min(1e-12)
         err = (out - y).abs()
         if self.power != 1.0:
             err = err.clamp_min(1e-12) ** self.power
-        return (w * err).mean()
+        if keep is None:
+            return (w * err).mean()
+        return (w * err).sum() / keep.expand_as(err).sum().clamp_min(1.0)
