@@ -7,14 +7,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-from fno_21cm_3d import LoggingTrainer, _build_h1_loss, _loss_mode
+from fno_21cm_3d import _build_h1_loss, _loss_mode
+from training import MetricsTrainer
 from util import seed_everything
 from losses import IonizedWallRMSE, ScheduledWeightedLoss, WeightedLoss
 
 
-def test_logging_trainer_rejects_trainer_owned_ddp() -> None:
+def test_metrics_trainer_rejects_trainer_owned_ddp() -> None:
     with pytest.raises(ValueError, match="single DDP wrapper"):
-        LoggingTrainer(
+        MetricsTrainer(
             model=nn.Identity(),
             n_epochs=1,
             device="cpu",

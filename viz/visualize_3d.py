@@ -61,7 +61,7 @@ from dataset.dataset_3d import (
 from modeling import (
     ModelConfig,
     TrainerModel,
-    build_3d_model,
+    build_model,
     load_checkpoint,
 )
 from util.metrics_21cm import compute_physical_metrics
@@ -384,7 +384,7 @@ def load_model(
             ),
         )
     target_device = device or DEVICE
-    model = TrainerModel(build_3d_model(config, in_channels))
+    model = TrainerModel(build_model(config, in_channels))
     report = load_checkpoint(model, checkpoint_path)
     print(f"[load_model] transform: {report.transform!r}; "
           f"matched {report.matched}/{report.total} model params "

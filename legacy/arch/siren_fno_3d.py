@@ -1,7 +1,7 @@
 """Standalone 3-D SirenFNO (retired architecture).
 
 Kept importable so ``checkpoints_3d_sirenfno*`` runs can still be rebuilt for
-inference; ``modeling.build_3d_model`` dispatches ``kind="sirenfno"`` here.
+inference; ``modeling.build_model`` dispatches ``kind="sirenfno"`` here.
 New training uses the local/global operator registry instead.
 """
 

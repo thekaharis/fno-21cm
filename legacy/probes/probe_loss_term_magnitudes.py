@@ -6,11 +6,11 @@ from util.neuralop_setup import prefer_local_neuralop
 prefer_local_neuralop()
 import numpy as np
 from neuralop import H1Loss, LpLoss
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
 from losses import (AbsoluteLoss, BinaryCrossEntropyTerm, HighKPowerRatio,
                     SlicedWassersteinEdges)
-from legacy.xhi2d.compare_xhi2d_models import build_model
+from viz.compare_xhi2d_models import build_model
 from modeling import load_checkpoint
 
 run = "checkpoints/xhi2d_whno_glob_lr3e4"

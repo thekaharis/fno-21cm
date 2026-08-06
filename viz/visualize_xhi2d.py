@@ -25,7 +25,7 @@ from neuralop.models import FNO
 import neuralop as _neuralop
 print(f"[visualize] using neuralop from {_neuralop.__file__}")
 
-from legacy.xhi2d.dataset import SliceCache, split_by_cone
+from dataset.slices import SliceCache, split_by_cone
 from dataset import paths
 from modeling import TrainerModel, load_checkpoint
 
@@ -163,7 +163,7 @@ def main():
 
     # Gather data from the same slice cache + cone split used for training.
     if not CACHE_FILE.exists():
-        print(f"Slice cache {CACHE_FILE} not found. Run python -m legacy.xhi2d.build_trainset first.",
+        print(f"Slice cache {CACHE_FILE} not found. Run python -m dataset.build_slices first.",
               file=sys.stderr)
         sys.exit(1)
     cache = SliceCache(CACHE_FILE)

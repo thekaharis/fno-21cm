@@ -10,7 +10,7 @@ import torch
 
 import operators
 from local_fno_3d import LocalFNO3d, QuadrantSpectralConv3d
-from modeling import ModelConfig, OperatorSlots, build_3d_model
+from modeling import ModelConfig, build_model
 from models_zre_2d import LocalFNO2d, QuadrantSpectralConv2d
 from operators import (
     ConvUNetOperator,
@@ -436,7 +436,7 @@ def _env(**overrides) -> dict:
 def test_localwhno_kind_builds_trains_and_round_trips() -> None:
     with patch.dict(os.environ, _env(MODEL_KIND="localwhno"), clear=True):
         config = ModelConfig.from_env()
-    model = build_3d_model(config, in_channels=2)
+    model = build_model(config, in_channels=2)
     x = torch.randn(1, 2, 8, 8, 8, requires_grad=True)
 
     output = model(x)
@@ -466,7 +466,7 @@ def test_localop_kind_pairs_operators_freely() -> None:
     )
     with patch.dict(os.environ, env, clear=True):
         config = ModelConfig.from_env()
-    model = build_3d_model(config, in_channels=2)
+    model = build_model(config, in_channels=2)
 
     assert config.local_operator == "hadamard"
     assert config.global_operator == "cnn"
@@ -485,24 +485,28 @@ def test_shorthand_kinds_refuse_a_contradicting_operator_pair() -> None:
         os.environ, _env(MODEL_KIND="localwno", LOCAL_OPERATOR="hadamard"),
         clear=True,
     ):
-        with pytest.raises(ValueError, match="MODEL_KIND=localop"):
-            OperatorSlots.from_env("localwno")
+        with pytest.raises(ValueError, match="use kind='localop'"):
+            ModelConfig.from_env()
 
 
-def test_operator_slots_from_env_matches_the_model_config_path() -> None:
+def test_2d_and_3d_read_the_same_switches_into_the_same_slots() -> None:
+    """One config system for both dimensionalities, not two that must agree."""
     env = _env(MODEL_KIND="localwhno", WHNO_ORDERING="sequency")
     with patch.dict(os.environ, env, clear=True):
-        slots = OperatorSlots.from_env("localwhno")
-        config = ModelConfig.from_env()
+        two_d = ModelConfig.from_env(ndim=2)
+        three_d = ModelConfig.from_env(ndim=3)
 
-    assert (slots.local, slots.global_) == (
-        config.local_operator, config.global_operator
-    )
-    assert slots.model_kwargs()["local_operator_kwargs"] == {
-        "ordering": "sequency"
-    }
-    assert slots.checkpoint_tag == "localwhno"
-    assert slots.metadata()["local_windowed"] is True
+    for config, ndim in ((two_d, 2), (three_d, 3)):
+        assert config.ndim == ndim
+        assert len(config.modes) == ndim
+        assert len(config.localfno_window) == ndim
+        assert (config.local_operator, config.global_operator) == (
+            "hadamard", "fourier"
+        )
+        (local, local_kwargs), _ = config.operator_slots()
+        assert local_kwargs == {"ordering": "sequency"}
+        assert config.checkpoint_tag == "localwhno"
+        assert config.local_slot_is_windowed is True
 
 
 def test_config_rejects_a_local_window_the_operator_cannot_process() -> None:

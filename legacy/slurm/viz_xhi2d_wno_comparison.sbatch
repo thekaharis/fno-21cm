@@ -28,7 +28,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-python -m legacy.xhi2d.compare_xhi2d_models \
+python -m viz.compare_xhi2d_models \
     --output figures/xhi2d_wno_sweep_comparison \
     --run default-wno=checkpoints/checkpoints_2d_xhi_localwno \
     --run wno-lr2e4=checkpoints/xhi2d_localwno_lr2e4_e30 \

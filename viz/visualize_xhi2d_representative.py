@@ -14,9 +14,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
-from legacy.xhi2d.compare_xhi2d_models import load_run, predict, representative_indices
+from viz.compare_xhi2d_models import load_run, predict, representative_indices
 
 
 DEFAULT_QUANTILES = [0.05, 0.2, 0.4, 0.6, 0.8, 0.95]

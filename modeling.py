@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Mapping
 
@@ -96,135 +96,19 @@ def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
 
 
 @dataclass(frozen=True)
-class OperatorSlots:
-    """Resolved local/global operator pair for a local-global U-Net run.
+class ModelConfig:
+    """Architecture settings shared by every training entry point and its plots.
 
-    ``ModelConfig`` covers the 3-D pipeline; this is the equivalent for the
-    two 2-D entry points, which read their remaining settings from the
-    environment directly. Both share :data:`LOCAL_GLOBAL_KINDS`, the same
-    environment variables, and the same registry.
+    ``ndim`` selects the 2-D or 3-D twin of an architecture; the axis tuples
+    (``modes``, ``localfno_window``, ``localfno_modes``, ``siren_padding``) must
+    match it. All three tasks -- 3-D x_HI cubes, 2-D x_HI slices, 2-D z_re maps
+    -- read the same environment variables and record the same metadata, so a
+    run is described the same way whatever its dimensionality.
     """
 
-    kind: str
-    local: str
-    global_: str
-    local_kwargs: Mapping
-    global_kwargs: Mapping
-    local_windowed: bool | None = None
-
-    @classmethod
-    def from_env(cls, kind: str) -> "OperatorSlots":
-        settings = operator_env_settings()
-        if kind in LOCAL_GLOBAL_KINDS:
-            local, global_ = LOCAL_GLOBAL_KINDS[kind]
-            explicit = (
-                resolve_operator_name(settings["local_operator"]),
-                resolve_operator_name(settings["global_operator"]),
-            )
-            if explicit not in ((local, global_), ("fourier", "fourier")):
-                raise ValueError(
-                    f"MODEL_KIND={kind!r} implies operators "
-                    f"{(local, global_)}, but LOCAL_OPERATOR/GLOBAL_OPERATOR "
-                    f"select {explicit}; use MODEL_KIND=localop to pair "
-                    "operators freely"
-                )
-        else:
-            local = settings["local_operator"]
-            global_ = settings["global_operator"]
-        (local, local_kwargs), (global_, global_kwargs) = resolve_slot_operators(
-            local,
-            global_,
-            slot_hyperparameters(resolve_operator_name(local), settings),
-            slot_hyperparameters(resolve_operator_name(global_), settings),
-        )
-        return cls(
-            kind=kind,
-            local=local,
-            global_=global_,
-            local_kwargs=local_kwargs,
-            global_kwargs=global_kwargs,
-            local_windowed=settings["local_windowed"],
-        )
-
-    def model_kwargs(self) -> dict:
-        """Keyword arguments selecting these slots on ``LocalFNO2d/3d``."""
-        return {
-            "local_operator": self.local,
-            "global_operator": self.global_,
-            "local_operator_kwargs": dict(self.local_kwargs),
-            "global_operator_kwargs": dict(self.global_kwargs),
-            "local_windowed": self.local_windowed,
-        }
-
-    @property
-    def is_windowed(self) -> bool:
-        from operators import operator_spec
-
-        if self.local_windowed is not None:
-            return bool(self.local_windowed)
-        return operator_spec(self.local).windowed
-
-    @property
-    def checkpoint_tag(self) -> str:
-        if self.kind == "localop":
-            return (
-                f"local_{OPERATOR_TAGS[self.local]}"
-                f"_{OPERATOR_TAGS[self.global_]}"
-            )
-        return self.kind
-
-    @property
-    def model_name(self) -> str:
-        return {
-            "localfno": "LocalFNO",
-            "localsirenfno": "LocalSirenFNO",
-            "localwno": "LocalWNO",
-            "localwhno": "LocalWHNO",
-        }.get(
-            self.kind,
-            f"Local[{OPERATOR_TAGS[self.local]}/{OPERATOR_TAGS[self.global_]}]",
-        )
-
-    def uses_local_modes(self) -> bool:
-        from operators import operator_spec
-
-        return operator_spec(self.local).uses_modes
-
-    def describe(self) -> str:
-        """Operator fragment for the run banner."""
-        parts = [f"local={self.local}", f"global={self.global_}"]
-        for name, values in (
-            (self.local, self.local_kwargs),
-            (self.global_, self.global_kwargs),
-        ):
-            rendered = " ".join(
-                f"{key}={value}" for key, value in sorted(values.items())
-            )
-            fragment = f"{name}[{rendered}]"
-            # Both slots often carry identical settings; report them once.
-            if rendered and fragment not in parts:
-                parts.append(fragment)
-        if not self.is_windowed:
-            parts.append("unwindowed-local")
-        return " ".join(parts)
-
-    def metadata(self) -> dict:
-        """Slot record for ``run_metadata.json``."""
-        return {
-            "local_operator": self.local,
-            "global_operator": self.global_,
-            "local_operator_kwargs": dict(self.local_kwargs),
-            "global_operator_kwargs": dict(self.global_kwargs),
-            "local_windowed": self.is_windowed,
-        }
-
-
-@dataclass(frozen=True)
-class ModelConfig:
-    """Architecture settings shared by 3-D training and visualization."""
-
     kind: str = "fno"
-    modes: tuple[int, int, int] = (16, 16, 16)
+    ndim: int = 3
+    modes: tuple[int, ...] | None = None
     hidden_channels: int = 32
     n_layers: int = 4
     ufno_width: int = 32
@@ -237,14 +121,14 @@ class ModelConfig:
     siren_feature_dim: int = 16
     siren_ff_sigma: float = 128.0
     siren_learnable_ff: bool = True
-    siren_padding: tuple[int, int, int] = (0, 0, 8)
+    siren_padding: tuple[int, ...] | None = None
     siren_mlp_dropout: float = 0.0
     # False preserves the behavior of legacy metadata that predates this
     # option. Fresh environment-driven SirenFNO runs default to True below.
     siren_output_sigmoid: bool = False
     siren_sigmoid_temperature: float = 2.0
-    localfno_window: tuple[int, int, int] = (16, 16, 32)
-    localfno_modes: tuple[int, int, int] = (6, 6, 12)
+    localfno_window: tuple[int, ...] | None = None
+    localfno_modes: tuple[int, ...] | None = None
     localfno_base_width: int = 16
     localfno_spectral_rank: int = 16
     localfno_patch_chunk_size: int = 128
@@ -287,8 +171,29 @@ class ModelConfig:
                 )
             object.__setattr__(self, "local_operator", slots[0])
             object.__setattr__(self, "global_operator", slots[1])
-        if len(self.modes) != 3 or any(int(value) <= 0 for value in self.modes):
-            raise ValueError("modes must contain three positive values")
+        if self.ndim not in (2, 3):
+            raise ValueError(f"ndim must be 2 or 3, got {self.ndim!r}")
+        # 3-D defaults truncated to ndim: the dropped entry is always the LOS
+        # axis, which a 2-D sky-plane map does not have.
+        for name, default in (("modes", (16, 16, 16)),
+                              ("siren_padding", (0, 0, 8)),
+                              ("localfno_window", (16, 16, 32)),
+                              ("localfno_modes", (6, 6, 12))):
+            value = getattr(self, name)
+            object.__setattr__(
+                self, name,
+                tuple(default[:self.ndim]) if value is None
+                else tuple(int(v) for v in value),
+            )
+        for name in ("modes", "localfno_window", "localfno_modes"):
+            value = getattr(self, name)
+            if len(value) != self.ndim or any(int(v) <= 0 for v in value):
+                raise ValueError(
+                    f"{name} must contain {self.ndim} positive values for "
+                    f"ndim={self.ndim}, got {tuple(value)}"
+                )
+        if any(int(value) % 4 for value in self.localfno_window):
+            raise ValueError("localfno_window values must be divisible by four")
         if self.ufno_norm not in {"batchnorm", "groupnorm"}:
             raise ValueError(
                 "ufno_norm must be 'batchnorm' or 'groupnorm', "
@@ -299,26 +204,18 @@ class ModelConfig:
                 "ufno_unet_variant must be 'default', 'anisotropic_z', or "
                 f"'los1d', got {self.ufno_unet_variant!r}"
             )
-        if len(self.siren_padding) != 3 or any(
+        if len(self.siren_padding) != self.ndim or any(
             int(value) < 0 for value in self.siren_padding
         ):
-            raise ValueError("siren_padding must contain three non-negative values")
+            raise ValueError(
+                f"siren_padding must contain {self.ndim} non-negative values"
+            )
         if self.siren_feature_dim <= 0 or self.siren_feature_dim % 2:
             raise ValueError("siren_feature_dim must be a positive even integer")
         if self.siren_n_hidden < 1:
             raise ValueError("siren_n_hidden must be at least 1")
         if self.siren_sigmoid_temperature <= 0:
             raise ValueError("siren_sigmoid_temperature must be positive")
-        if len(self.localfno_window) != 3 or any(
-            int(value) <= 0 for value in self.localfno_window
-        ):
-            raise ValueError("localfno_window must contain three positive values")
-        if any(int(value) % 4 for value in self.localfno_window):
-            raise ValueError("localfno_window values must be divisible by four")
-        if len(self.localfno_modes) != 3 or any(
-            int(value) <= 0 for value in self.localfno_modes
-        ):
-            raise ValueError("localfno_modes must contain three positive values")
         if self.localfno_base_width <= 0:
             raise ValueError("localfno_base_width must be positive")
         if self.localfno_spectral_rank <= 0:
@@ -406,17 +303,36 @@ class ModelConfig:
         )
 
     @classmethod
-    def from_env(cls) -> "ModelConfig":
-        """Read the experiment switches used by the SLURM scripts."""
+    def from_env(cls, ndim: int = 3) -> "ModelConfig":
+        """Read the experiment switches used by the SLURM scripts.
+
+        Axis variables are read per axis, so a 2-D run uses ``*_X``/``*_Y`` and
+        ignores ``*_Z``. Every other switch is shared verbatim with 3-D.
+        """
+        def axes(*prefixes: str, defaults: tuple[int, ...]) -> tuple[int, ...]:
+            """First prefix that is set wins, per axis.
+
+            ``LOCALFNO_GLOBAL_MODES_*`` is the 2-D pipeline's name for the
+            bottleneck modes that 3-D calls ``N_MODES_*``; both spell the same
+            field, so both sets of sbatch keep working.
+            """
+            names = ("X", "Y", "Z")[:ndim]
+            out = []
+            for axis, default in zip(names, defaults):
+                for prefix in prefixes:
+                    value = os.environ.get(f"{prefix}_{axis}")
+                    if value is not None:
+                        break
+                out.append(int(value if value is not None else default))
+            return tuple(out)
+
         return cls(
+            ndim=ndim,
             # "fno" and "sirenfno" remain valid (legacy.arch builds them for
             # old checkpoints) but are no longer the default for a new run.
             kind=os.environ.get("MODEL_KIND", "localfno").lower(),
-            modes=(
-                int(os.environ.get("N_MODES_X", "16")),
-                int(os.environ.get("N_MODES_Y", "16")),
-                int(os.environ.get("N_MODES_Z", "16")),
-            ),
+            modes=axes("LOCALFNO_GLOBAL_MODES", "N_MODES",
+                       defaults=(16, 16, 16)),
             ufno_norm=os.environ.get("UFNO_NORM", "batchnorm").lower(),
             ufno_unet_variant=os.environ.get(
                 "UFNO_UNET_VARIANT", "default"
@@ -428,26 +344,14 @@ class ModelConfig:
             siren_feature_dim=int(os.environ.get("SIREN_FEATURE_DIM", "16")),
             siren_ff_sigma=float(os.environ.get("SIREN_FF_SIGMA", "128.0")),
             siren_learnable_ff=_env_bool("SIREN_LEARNABLE_FF", True),
-            siren_padding=(
-                int(os.environ.get("SIREN_PADDING_X", "0")),
-                int(os.environ.get("SIREN_PADDING_Y", "0")),
-                int(os.environ.get("SIREN_PADDING_Z", "8")),
-            ),
+            siren_padding=axes("SIREN_PADDING", defaults=(0, 0, 8)),
             siren_mlp_dropout=float(os.environ.get("SIREN_MLP_DROPOUT", "0.0")),
             siren_output_sigmoid=_env_bool("SIREN_OUTPUT_SIGMOID", True),
             siren_sigmoid_temperature=float(
                 os.environ.get("SIREN_SIGMOID_TEMPERATURE", "2.0")
             ),
-            localfno_window=(
-                int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
-                int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
-                int(os.environ.get("LOCALFNO_WINDOW_Z", "32")),
-            ),
-            localfno_modes=(
-                int(os.environ.get("LOCALFNO_MODES_X", "6")),
-                int(os.environ.get("LOCALFNO_MODES_Y", "6")),
-                int(os.environ.get("LOCALFNO_MODES_Z", "12")),
-            ),
+            localfno_window=axes("LOCALFNO_WINDOW", defaults=(16, 16, 32)),
+            localfno_modes=axes("LOCALFNO_MODES", defaults=(6, 6, 12)),
             localfno_base_width=int(
                 os.environ.get("LOCALFNO_BASE_WIDTH", "16")
             ),
@@ -466,21 +370,41 @@ class ModelConfig:
 
     @classmethod
     def from_dict(cls, values: Mapping) -> "ModelConfig":
+        """Rebuild from recorded metadata, including pre-unification shapes.
+
+        The 2-D entry points used to write their own dict shape: global modes
+        under ``localfno_global_modes`` rather than ``modes``, no ``ndim``, and
+        bookkeeping keys (``in_channels``, ``localwno_wavelet``) that are not
+        configuration. Normalising here is what lets every old checkpoint --
+        2-D, 3-D or z_re -- rebuild through the one factory.
+        """
         values = dict(values)
-        if "modes" in values:
-            values["modes"] = tuple(int(value) for value in values["modes"])
-        if "siren_padding" in values:
-            values["siren_padding"] = tuple(
-                int(value) for value in values["siren_padding"]
-            )
-        for key in ("localfno_window", "localfno_modes"):
+        # 2-D runs recorded the bottleneck modes under their own name, and
+        # `n_modes` meant whatever the architecture's main mode count was.
+        for alias in ("localfno_global_modes", "n_modes"):
+            if alias in values:
+                values.setdefault("modes", values.pop(alias))
+            values.pop(alias, None)
+        for key in ("modes", "siren_padding", "localfno_window", "localfno_modes"):
             if key in values:
                 values[key] = tuple(int(value) for value in values[key])
+        # Dimensionality was implicit in the tuple length before `ndim` existed.
+        if "ndim" not in values and "modes" in values:
+            values["ndim"] = len(values["modes"])
+        # Recorded for the reader, not accepted by the constructor.
+        for noise in ("in_channels", "out_channels", "localwno_wavelet",
+                      "local_operator_kwargs", "global_operator_kwargs"):
+            values.pop(noise, None)
+        known = {f.name for f in fields(cls)}
+        unknown = set(values) - known
+        if unknown:
+            raise ValueError(f"unknown model_config keys: {sorted(unknown)}")
         return cls(**values)
 
     def to_dict(self) -> dict:
         return {
             "kind": self.kind,
+            "ndim": self.ndim,
             "modes": list(self.modes),
             "hidden_channels": self.hidden_channels,
             "n_layers": self.n_layers,
@@ -515,22 +439,40 @@ class ModelConfig:
         }
 
     @property
-    def default_checkpoint_dir(self) -> Path:
+    def checkpoint_tag(self) -> str:
+        """Short architecture name used in checkpoint directory names."""
         if self.kind == "localop":
-            suffix = (
-                f"_local_{OPERATOR_TAGS[self.local_operator]}"
+            return (
+                f"local_{OPERATOR_TAGS[self.local_operator]}"
                 f"_{OPERATOR_TAGS[self.global_operator]}"
             )
-        else:
-            suffix = {
-                "fno": "",
-                "ufno": "_ufno",
-                "sirenfno": "_sirenfno",
-                "localfno": "_localfno",
-                "localsirenfno": "_localsirenfno",
-                "localwno": "_localwno",
-                "localwhno": "_localwhno",
-            }[self.kind]
+        return self.kind
+
+    @property
+    def model_name(self) -> str:
+        """Human-readable architecture name for the run banner."""
+        if not self.is_local_global:
+            return self.kind.upper() if self.kind == "fno" else self.kind
+        return {
+            "localfno": "LocalFNO",
+            "localsirenfno": "LocalSirenFNO",
+            "localwno": "LocalWNO",
+            "localwhno": "LocalWHNO",
+        }.get(
+            self.kind,
+            f"Local[{OPERATOR_TAGS[self.local_operator]}"
+            f"/{OPERATOR_TAGS[self.global_operator]}]",
+        )
+
+    @property
+    def uses_local_modes(self) -> bool:
+        from operators import operator_spec
+
+        return operator_spec(self.local_operator).uses_modes
+
+    @property
+    def default_checkpoint_dir(self) -> Path:
+        suffix = "" if self.kind == "fno" else f"_{self.checkpoint_tag}"
         return Path("checkpoints") / f"checkpoints_3d{suffix}"
 
     def describe(self) -> str:
@@ -656,20 +598,33 @@ class TrainerModel(nn.Module):
             return getattr(self._modules["fno"], name)
 
 
-def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
-    """Construct the configured 3-D architecture.
+def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
+    """Construct the configured architecture at ``config.ndim`` dimensions.
 
-    Kinds no longer trained ("fno", "sirenfno") are still accepted and built
-    from ``legacy.arch``, so a checkpoint written before the cleanup rebuilds
-    from its own ``run_metadata.json`` with no edits.
+    One factory for all three tasks. Each architecture family has a 2-D and a
+    3-D twin that take the same arguments, so the only thing that varies is
+    which class is imported.
+
+    Kinds no longer trained ("fno", "sirenfno" in 3-D) are still accepted and
+    built from ``legacy.arch``, so a checkpoint written before the cleanup
+    rebuilds from its own ``run_metadata.json`` with no edits.
     """
     from legacy.arch import KINDS as LEGACY_KINDS
 
-    if config.kind in LEGACY_KINDS:
+    two_d = config.ndim == 2
+    if config.kind in LEGACY_KINDS and not two_d:
         from legacy import arch
 
         return arch.build(config, in_channels)
     if config.kind == "ufno":
+        if two_d:
+            from models_zre_2d import UFNO2d
+
+            return UFNO2d(
+                modes1=config.modes[0], modes2=config.modes[1],
+                width=config.ufno_width, in_channels=in_channels,
+                out_channels=1, sigmoid=True, norm=config.ufno_norm,
+            )
         from models_ufno import UFNOWrapped
 
         return UFNOWrapped(
@@ -684,13 +639,34 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             unet_variant=config.ufno_unet_variant,
             global_residual=config.ufno_global_residual,
         )
-    if config.is_local_global:
-        from local_fno_3d import LocalFNO3d
+    if config.kind == "sirenfno" and two_d:
+        from models_zre_2d import SirenFNO2d
 
+        return SirenFNO2d(
+            n_modes=config.modes,
+            hidden_channels=config.hidden_channels,
+            in_channels=in_channels,
+            out_channels=1,
+            n_layers=config.n_layers,
+            siren_hidden_dim=config.siren_hidden_dim,
+            siren_omega=config.siren_omega,
+            siren_n_hidden=config.siren_n_hidden,
+            siren_feature_dim=config.siren_feature_dim,
+            siren_ff_sigma=config.siren_ff_sigma,
+            siren_learnable_ff=config.siren_learnable_ff,
+            mlp_dropout=config.siren_mlp_dropout,
+            output_sigmoid=config.siren_output_sigmoid,
+            sigmoid_temperature=config.siren_sigmoid_temperature,
+        )
+    if config.is_local_global:
         (local_name, local_kwargs), (global_name, global_kwargs) = (
             config.operator_slots()
         )
-        return LocalFNO3d(
+        if two_d:
+            from models_zre_2d import LocalFNO2d as LocalFNO
+        else:
+            from local_fno_3d import LocalFNO3d as LocalFNO
+        return LocalFNO(
             in_channels=in_channels,
             out_channels=1,
             base_width=config.localfno_base_width,
@@ -707,7 +683,22 @@ def build_3d_model(config: ModelConfig, in_channels: int) -> nn.Module:
             local_windowed=config.local_windowed,
             wavelet_levels=config.localwno_levels,
         )
-    raise ValueError(f"no builder for kind {config.kind!r}")
+    if config.kind == "fno" and two_d:
+        from util.neuralop_setup import prefer_local_neuralop
+
+        prefer_local_neuralop()
+        from neuralop.models import FNO
+
+        return FNO(
+            n_modes=config.modes,
+            hidden_channels=config.hidden_channels,
+            in_channels=in_channels,
+            out_channels=1,
+            n_layers=config.n_layers,
+            projection_channel_ratio=2,
+            positional_embedding="grid",
+        )
+    raise ValueError(f"no {config.ndim}-D builder for kind {config.kind!r}")
 
 
 @dataclass(frozen=True)

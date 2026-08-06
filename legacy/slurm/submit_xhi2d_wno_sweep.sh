@@ -30,7 +30,7 @@ for run_dir in "${run_dirs[@]}"; do
     fi
 done
 
-# Pin every environment variable parsed by legacy/xhi2d/fno_21cm.py. --export=ALL is kept
+# Pin every environment variable parsed by fno_xhi2d.py. --export=ALL is kept
 # only so the cluster's module/Conda environment reaches the batch shell.
 COMMON="CACHE_FILE=$DATA_DIR/trainset.h5,INPUT_FEATURES=density_z_params,N_EPOCHS=30,EVAL_INTERVAL=5,BATCH_SIZE=32,LEARNING_RATE=3e-4,WEIGHT_DECAY=1e-5,RUN_SEED=0,SPLIT_SEED=42,VAL_FRACTION=0.1,TEST_FRACTION=0.1,LOSS_L2_WEIGHT=1.0,LOSS_H1_WEIGHT=0.0,DEVICE=cuda,RESUME_DIR=,N_MODES_X=32,N_MODES_Y=32,HIDDEN_CHANNELS=64,N_LAYERS=4,UFNO_WIDTH=32,UFNO_NORM=batchnorm,LOCALFNO_BASE_WIDTH=32,LOCALFNO_WINDOW_X=16,LOCALFNO_WINDOW_Y=16,LOCALFNO_MODES_X=6,LOCALFNO_MODES_Y=6,LOCALFNO_GLOBAL_MODES_X=16,LOCALFNO_GLOBAL_MODES_Y=16,LOCALFNO_SPECTRAL_RANK=16,LOCALFNO_PATCH_CHUNK_SIZE=32,LOCALWNO_LEVELS=2"
 

@@ -10,9 +10,9 @@ prefer_local_neuralop()
 import numpy as np, torch, matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
-from legacy.xhi2d.compare_xhi2d_models import build_model, representative_indices
+from viz.compare_xhi2d_models import build_model, representative_indices
 from modeling import load_checkpoint
 
 RUN = "checkpoints/xhi2d_whno_glob_lr3e4"

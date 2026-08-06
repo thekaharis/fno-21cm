@@ -59,7 +59,14 @@ from losses import (
     los_volume_weights,
 )
 from contrast import ContrastComposed
-from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
+from modeling import ModelConfig, TrainerModel, build_model, load_checkpoint
+from training import (
+    ContrastRefit,
+    MetricsTrainer,
+    ProgressLoader,
+    all_reduce_mean,
+    setup_distributed,
+)
 from util import seed_everything
 from util.run_metadata import write_run_metadata
 from util.spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
@@ -268,396 +275,14 @@ def _seed_worker(_worker_id: int) -> None:
 
 
 # ------------------------------------------------------------------ distributed
-def _setup_distributed() -> tuple[int, int, int]:
-    """Initialize torch.distributed if launched under multi-task SLURM.
-
-    Returns ``(rank, local_rank, world_size)``.  Single-process runs return
-    ``(0, 0, 1)`` and do not call ``init_process_group``.
-
-    Conventions:
-      * Multi-GPU is detected via ``SLURM_NTASKS`` > 1.  Launch with
-        ``srun --ntasks=4 python fno_21cm_3d.py`` from inside the sbatch script.
-      * The master address is taken from the first hostname in
-        ``SLURM_NODELIST``; single-node multi-GPU is the only configuration
-        tested.  Multi-node would need a more careful parse of the nodelist
-        (Slurm range notation like ``gpu[01-04]``).
-      * NCCL backend is used unconditionally -- it's the only backend that
-        actually works for multi-GPU on NVIDIA hardware.
-    """
-    world_size = int(os.environ.get("SLURM_NTASKS", "1"))
-    if world_size <= 1:
-        return 0, 0, 1
-
-    rank = int(os.environ["SLURM_PROCID"])
-    local_rank = int(os.environ["SLURM_LOCALID"])
-
-    nodelist = os.environ.get("SLURM_NODELIST", "localhost")
-    # Single-node case: nodelist is just one hostname.  If we ever go
-    # multi-node, this will need slurm range-expansion handling.
-    master_addr = nodelist.split(",")[0]
-    if "[" in master_addr:
-        # Range notation like gpu[01-04] -- bail rather than guess
-        master_addr = "localhost"
-    os.environ.setdefault("MASTER_ADDR", master_addr)
-    os.environ.setdefault("MASTER_PORT", "29500")
-
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        rank=rank,
-        world_size=world_size,
-    )
-    return rank, local_rank, world_size
-
-
-def _all_reduce_mean(value: float, world_size: int) -> float:
-    """Average a scalar across all DDP ranks (returns the input if not DDP)."""
-    if world_size <= 1 or not dist.is_initialized():
-        return float(value)
-    t = torch.tensor([float(value)], device=f"cuda:{torch.cuda.current_device()}")
-    dist.all_reduce(t, op=dist.ReduceOp.SUM)
-    return float(t.item() / world_size)
-
-
-def _all_reduce_weighted_metrics(
-    metrics: dict[str, float | torch.Tensor],
-    local_sample_count: int,
-    world_size: int,
-    device: str | torch.device,
-) -> dict[str, float]:
-    """Combine per-rank metric means using their local sample counts.
-
-    ``neuralop.Trainer.evaluate`` returns a mean over the samples handled by
-    the current rank. Reconstruct each local sum, reduce sums and counts across
-    ranks, then divide once so uneven rank-local shard sizes remain correct.
-    """
-    if local_sample_count < 0:
-        raise ValueError(
-            f"local_sample_count must be non-negative, got {local_sample_count}"
-        )
-
-    keys = list(metrics)
-    if world_size <= 1 or not dist.is_initialized():
-        return {key: float(metrics[key]) for key in keys}
-
-    local_count = float(local_sample_count)
-    packed = [float(metrics[key]) * local_count for key in keys]
-    packed.append(local_count)
-    reduced = torch.tensor(packed, dtype=torch.float64, device=device)
-    dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
-
-    global_count = float(reduced[-1].item())
-    if global_count <= 0:
-        raise RuntimeError("distributed evaluation processed zero samples")
-
-    return {
-        key: float(reduced[i].item() / global_count)
-        for i, key in enumerate(keys)
-    }
-
-
-# How often the Trainer runs val/test evaluation AND prints the per-epoch
-# metrics line.  Set to 1 to see train+val+test losses every epoch (adds the
-# eval pass to each epoch's wall clock).  Bump to 5 once training has settled
-# if you want to reduce the eval-loop overhead.
-EVAL_INTERVAL = 1
-
-
 def _build_h1_loss() -> LightconeH1Loss:
     """H1 objective with periodic X/Y and centered interior LOS differences."""
     return LightconeH1Loss(measure=(1.0, 1.0, 1.0))
 
 
-class LoggingTrainer(Trainer):
-    """``neuralop.Trainer`` + per-epoch metrics written to a JSONL file.
-
-    The base ``Trainer`` prints metrics to stdout and returns the final
-    ``epoch_metrics`` dict, but never writes intermediate metrics to disk.
-    On a long run that's risky -- SLURM rotates logs, and there's nothing
-    to plot from afterward.  This subclass intercepts ``train_one_epoch``
-    and ``evaluate_all`` to append one JSON object per epoch to
-    ``metrics_path``.  Each line has at minimum ``epoch``, ``train_err``,
-    ``avg_loss``, ``epoch_train_time``, plus any eval-loop metrics from
-    that epoch (e.g. ``val_l2``, ``test_h1``).
-
-    Read it back with ``pandas.read_json(path, lines=True)``.
-    """
-
-    def __init__(
-        self,
-        *args,
-        metrics_path: str | Path | None = None,
-        spectral_history_path: str | Path | None = None,
-        rank: int = 0,
-        world_size: int = 1,
-        **kwargs,
-    ):
-        if kwargs.get("use_distributed", False):
-            raise ValueError(
-                "LoggingTrainer must not wrap DDP itself; fno_21cm_3d.py "
-                "constructs the single DDP wrapper before the optimizer."
-            )
-        super().__init__(*args, **kwargs)
-        self.metrics_path = Path(metrics_path) if metrics_path else None
-        # File and directory side effects happen on rank 0 only -- otherwise
-        # all four ranks race to create / append to the same file.
-        self._rank = int(rank)
-        self._world_size = int(world_size)
-        self._is_rank_0 = (self._rank == 0)
-        if self.metrics_path is not None and self._is_rank_0:
-            self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
-            # This entry point does not resume runs. Avoid mixing a fresh
-            # trajectory with stale rows from an older checkpoint directory.
-            self.metrics_path.unlink(missing_ok=True)
-        self._last_train: dict | None = None
-        self.best_epoch: int | None = None
-        self.best_metric: float | None = None
-        self.spectral_history = None
-        if spectral_history_path is not None and self._is_rank_0:
-            try:
-                self.spectral_history = SpectralWeightHistory(
-                    spectral_history_path,
-                    self.model,
-                    reset=True,
-                )
-                # The constructor stores the model without inspecting it, so an
-                # architecture with no Fourier layer only raises here, on the
-                # first extraction. Both calls must sit inside the try.
-                self.spectral_history.record(-1)
-            except ValueError as error:
-                # Architectures with no Fourier layer at all (say wavelet or
-                # Walsh-Hadamard in both operator slots) have no mode-weight
-                # profile to track. That is not a reason to refuse to train.
-                print(f"[spectral-weights] disabled: {error}")
-                self.spectral_history = None
-
-    # set by main() when the contrast refit is active
-    _refit_objective = None
-    _schedule_stats = None
-
-    def train_one_epoch(self, epoch, train_loader, training_loss):
-        # DistributedSampler must be told the epoch so it reshuffles
-        # consistently across ranks each epoch.
-        sampler = getattr(train_loader, "sampler", None)
-        if isinstance(sampler, DistributedSampler):
-            sampler.set_epoch(int(epoch))
-        if hasattr(training_loss, "set_epoch"):
-            training_loss.set_epoch(int(epoch))
-        if CONTRAST_REFIT and CONTRAST_MODE != "off":
-            from util import contrast_refit as _refit
-            if int(epoch) == 0:
-                _refit.disable(self.model)          # nothing to fit against yet
-                self._schedule_stats = None
-                if self._is_rank_0:
-                    print("[contrast] epoch 0: map disabled", flush=True)
-            else:
-                # The fit is collective across ranks. It used to run per-rank
-                # on each shard, to avoid a collective in the epoch loop -- but
-                # the ranks then trained the next epoch under *different* maps,
-                # and each fitted from 1/world_size of the data, which the thin
-                # responsive band cannot afford. The collectives here carry ~14
-                # floats against the model's own gradient reduction every step.
-                st = _refit.refit_and_install(
-                    self.model, train_loader, self.device,
-                    CONTRAST_REFIT_SAMPLES, CONTRAST_REFIT_STEPS,
-                    objective=self._refit_objective,
-                    theta_floor=CONTRAST_THETA_FLOOR,
-                    batch=CONTRAST_REFIT_BATCH,
-                    flatten=CONTRAST_REFIT_FLATTEN,
-                    sync=(self._world_size > 1))
-                self._schedule_stats = st
-                if self._is_rank_0:
-                    print(f"[contrast] epoch {int(epoch)}: "
-                          f"{_refit.summary_line(st)}", flush=True)
-        trainer_device = torch.device(self.device)
-        if trainer_device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(trainer_device)
-
-        out = super().train_one_epoch(epoch, train_loader, training_loss)
-        train_err, avg_loss, avg_lasso, t = out
-
-        # Under DDP each rank sees only its shard of the train set, so the
-        # per-rank train_err / avg_loss are partial.  Average across ranks
-        # to get a globally meaningful number for the JSONL log.
-        train_err_global = _all_reduce_mean(train_err, self._world_size)
-        avg_loss_global = _all_reduce_mean(avg_loss, self._world_size)
-        avg_lasso_global = (_all_reduce_mean(avg_lasso, self._world_size)
-                            if avg_lasso is not None else 0.0)
-
-        self._last_train = dict(
-            epoch=int(epoch),
-            train_err=float(train_err_global),
-            avg_loss=float(avg_loss_global),
-            avg_lasso_loss=float(avg_lasso_global),
-            epoch_train_time=float(t),
-            train_samples_per_second=float(
-                len(train_loader)
-                * int(getattr(train_loader, "batch_size", 1))
-                * self._world_size
-                / max(float(t), 1e-12)
-            ),
-        )
-        if hasattr(training_loss, "active_weights"):
-            active = training_loss.active_weights
-            self._last_train.update(
-                active_l2_weight=float(active[0]),
-                active_h1_weight=float(active[1]),
-                active_bce_weight=float(active[2]),
-                active_ionized_wall_weight=float(active[3]),
-            )
-        if hasattr(training_loss, "pop_term_means"):
-            # Raw (unweighted) per-term training losses, epoch-averaged.
-            # Weights are logged above, so the weighted contribution of each
-            # term is reconstructable. Terms skipped by a zero weight (e.g.
-            # H1 during warmup epoch 0) have no key in that row.
-            for name, value in training_loss.pop_term_means().items():
-                self._last_train[f"train_{name}_term"] = _all_reduce_mean(
-                    value, self._world_size
-                )
-        grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
-        if grad_norm is not None:
-            self._last_train["last_grad_norm"] = float(grad_norm)
-        if trainer_device.type == "cuda":
-            self._last_train["peak_cuda_memory_gb"] = float(
-                torch.cuda.max_memory_allocated(trainer_device) / (1024 ** 3)
-            )
-        if self.spectral_history is not None:
-            self.spectral_history.record(int(epoch))
-        if self.eval_interval and (epoch % self.eval_interval != 0):
-            self._flush_row({})
-        return out
-
-    def eval_one_batch(self, sample, eval_losses, return_output=False):
-        losses, output = super().eval_one_batch(
-            sample, eval_losses, return_output=True
-        )
-        # A regular 8-cell stride samples ~0.2% of the cube, which is ample
-        # for detecting all-zero/all-one collapse without adding several
-        # full-volume float64 reductions to every evaluation batch.
-        sampled = output.detach()[..., ::8, ::8, ::8]
-        self._pred_sum += sampled.sum()
-        self._pred_sq_sum += sampled.square().sum()
-        self._pred_low_count += (sampled <= 1e-4).sum()
-        # The simulated x_HI never reaches 1 (residual ionized floor caps it
-        # at ~0.99983), so a 1-1e-4 cutoff counts only unphysical clipping.
-        # At 0.999 the truth fraction is ~0.74, making this comparable.
-        self._pred_high_count += (sampled >= 0.999).sum()
-        self._pred_count += sampled.numel()
-        return losses, output if return_output else None
-
-    def evaluate(self, *args, **kwargs):
-        log_prefix = str(kwargs.get("log_prefix", "")).strip()
-        metric_prefix = f"{log_prefix}_" if log_prefix else ""
-        self._pred_sum = torch.zeros((), dtype=torch.float32, device=self.device)
-        self._pred_sq_sum = torch.zeros((), dtype=torch.float32, device=self.device)
-        self._pred_low_count = torch.zeros(
-            (), dtype=torch.float64, device=self.device
-        )
-        self._pred_high_count = torch.zeros(
-            (), dtype=torch.float64, device=self.device
-        )
-        self._pred_count = 0
-        local_metrics = super().evaluate(*args, **kwargs)
-        count = max(int(self._pred_count), 1)
-        pred_mean = self._pred_sum / count
-        pred_variance = (self._pred_sq_sum / count - pred_mean.square()).clamp_min(0)
-        local_metrics.update(
-            **{
-                f"{metric_prefix}pred_mean": float(pred_mean.item()),
-                f"{metric_prefix}pred_std": float(pred_variance.sqrt().item()),
-                f"{metric_prefix}pred_sat_low": float(
-                    (self._pred_low_count / count).item()
-                ),
-                f"{metric_prefix}pred_sat_high": float(
-                    (self._pred_high_count / count).item()
-                ),
-            }
-        )
-        return _all_reduce_weighted_metrics(
-            local_metrics,
-            local_sample_count=self.n_samples,
-            world_size=self._world_size,
-            device=self.device,
-        )
-
-    def evaluate_all(self, *args, **kwargs):
-        eval_metrics = super().evaluate_all(*args, **kwargs)
-        # evaluate() has already reduced every loader's metrics across ranks.
-        clean = {k: float(v) for k, v in eval_metrics.items()}
-        monitored = clean.get("val_l2")
-        if monitored is not None and (
-            self.best_metric is None or monitored < self.best_metric
-        ):
-            self.best_metric = monitored
-            self.best_epoch = int(kwargs.get("epoch", -1))
-        self._flush_row(clean)
-        return eval_metrics
-
-    def _flush_row(self, eval_metrics: dict) -> None:
-        if not self._is_rank_0:
-            return
-        if self.metrics_path is None or self._last_train is None:
-            return
-        import json
-        row = {**self._last_train, **eval_metrics}
-        with open(self.metrics_path, "a") as f:
-            f.write(json.dumps(row) + "\n")
-
-
-class ProgressLoader:
-    """Wrap a DataLoader to print throughput every ``log_every`` steps.
-
-    The neuralop Trainer only logs per-epoch summaries, so on long epochs
-    (5k+ samples) you get no signal at all until the first epoch completes.
-    This wrapper preserves the DataLoader interface (length + iter) and
-    prints ``[step k/N] r samples/s, ETA M:SS`` lines so the SLURM log
-    shows life.
-    """
-
-    def __init__(self, loader, log_every: int = 25, tag: str = "train",
-                 rank: int = 0):
-        self.loader = loader
-        self.log_every = int(log_every)
-        self.tag = tag
-        # Only rank 0 prints; other ranks iterate silently.
-        self._is_rank_0 = (int(rank) == 0)
-
-    def __len__(self):
-        return len(self.loader)
-
-    def __getattr__(self, name):
-        # Delegate anything not on the wrapper (e.g. .dataset, .sampler,
-        # .batch_size) to the underlying DataLoader.  The neuralop Trainer
-        # reads train_loader.dataset for its startup banner.
-        return getattr(self.loader, name)
-
-    def __iter__(self):
-        import time
-        n = len(self.loader)
-        # batch_size is set on the underlying DataLoader; default to 1 if the
-        # wrapped loader is something exotic that doesn't expose it.
-        bs = int(getattr(self.loader, "batch_size", 1) or 1)
-        t0 = time.time()
-        for i, batch in enumerate(self.loader, start=1):
-            yield batch
-            if (self._is_rank_0 and self.log_every
-                    and (i % self.log_every == 0 or i == n)):
-                elapsed = time.time() - t0
-                batches_per_s = i / max(elapsed, 1e-6)
-                samples_per_s = batches_per_s * bs
-                eta = (n - i) / max(batches_per_s, 1e-6)
-                print(f"    [{self.tag} {i}/{n}] "
-                      f"{samples_per_s:.2f} samples/s "
-                      f"({batches_per_s:.2f} batches/s, bs={bs})  "
-                      f"elapsed {elapsed:6.1f}s  ETA {eta/60:5.1f} min",
-                      flush=True)
-
-
-# ------------------------------------------------------------------ main
 def main():
     # -------------------------------------------- 0. distributed setup
-    rank, local_rank, world_size = _setup_distributed()
+    rank, local_rank, world_size = setup_distributed()
     is_rank_0 = (rank == 0)
     is_distributed = (world_size > 1)
     # All ranks use the same initialization seed so DDP starts from identical
@@ -792,7 +417,7 @@ def main():
     rprint(f"Input channels ({in_channels}): "
            + ", ".join(dataset.input_features.channel_names))
 
-    fno = build_3d_model(MODEL_CONFIG, in_channels)
+    fno = build_model(MODEL_CONFIG, in_channels)
     if CONTRAST_MODE != "off":
         fno = ContrastComposed(fno, CONTRAST_MODE,
                                schedule_kind=CONTRAST_SCHEDULE_KIND,
@@ -941,15 +566,35 @@ def main():
     }
 
     # -------------------------------------------- 7. trainer
+    contrast = None
     if CONTRAST_REFIT and CONTRAST_MODE != "off":
         # Fit the map under the loss the run trains on, not a hardcoded MSE.
-        _active = [(w, term) for w, term in loss_terms if w > 0]
+        active = [(w, term) for w, term in loss_terms if w > 0]
+        contrast = ContrastRefit(
+            samples=CONTRAST_REFIT_SAMPLES,
+            steps=CONTRAST_REFIT_STEPS,
+            batch=CONTRAST_REFIT_BATCH,
+            theta_floor=CONTRAST_THETA_FLOOR,
+            flatten=CONTRAST_REFIT_FLATTEN,
+            objective=lambda out, y: sum(w * term(out, y) for w, term in active),
+        )
 
-        def _refit_objective(out, y):
-            return sum(w * term(out, y) for w, term in _active)
-        LoggingTrainer._refit_objective = staticmethod(_refit_objective)
+    spectral_history = None
+    if SPECTRAL_HISTORY_PATH is not None and is_rank_0:
+        try:
+            spectral_history = SpectralWeightHistory(
+                SPECTRAL_HISTORY_PATH, model, reset=True)
+            # The constructor stores the model without inspecting it, so an
+            # architecture with no Fourier layer only raises on the first
+            # extraction. Both calls must sit inside the try.
+            spectral_history.record(-1)
+        except ValueError as error:
+            # Wavelet or Walsh-Hadamard in both slots has no mode-weight
+            # profile to track. Not a reason to refuse to train.
+            rprint(f"[spectral-weights] disabled: {error}")
+            spectral_history = None
 
-    trainer = LoggingTrainer(
+    trainer = MetricsTrainer(
         model=model,
         n_epochs=N_EPOCHS,
         device=device,
@@ -961,7 +606,9 @@ def main():
         use_distributed=False,
         verbose=is_rank_0,                 # silence non-rank-0 Trainer prints
         metrics_path=METRICS_PATH,
-        spectral_history_path=SPECTRAL_HISTORY_PATH,
+        spectral_history=spectral_history,
+        contrast=contrast,
+        saturation_ndim=3,
         rank=rank,
         world_size=world_size,
     )

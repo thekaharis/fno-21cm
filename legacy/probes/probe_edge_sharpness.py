@@ -10,10 +10,10 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from util.neuralop_setup import prefer_local_neuralop
 prefer_local_neuralop()
 import numpy as np, torch
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
-from legacy.xhi2d.compare_xhi2d_models import build_model, representative_indices
-from legacy.xhi2d.visualize_xhi2d_representative import DEFAULT_QUANTILES
+from viz.compare_xhi2d_models import build_model, representative_indices
+from viz.visualize_xhi2d_representative import DEFAULT_QUANTILES
 from modeling import load_checkpoint
 
 RUNS = [

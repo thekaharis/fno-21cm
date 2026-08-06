@@ -30,7 +30,7 @@ import torch
 
 from dataset import paths
 from losses import ExponentialWallDistance
-from modeling import ModelConfig, TrainerModel, build_3d_model
+from modeling import ModelConfig, TrainerModel, build_model
 
 IN_CHANNELS = 13          # density + 1/(1+z) + 11 parameters, as in the 3-D run
 
@@ -51,7 +51,7 @@ def main() -> None:
         print(f"local scratch {tmp}: unavailable ({exc})")
 
     cfg = ModelConfig.from_env()
-    fno = build_3d_model(cfg, IN_CHANNELS)
+    fno = build_model(cfg, IN_CHANNELS)
     model = TrainerModel(fno).to(dev)
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\nmodel: {cfg.kind} ({os.environ.get('LOCAL_OPERATOR')} local / "

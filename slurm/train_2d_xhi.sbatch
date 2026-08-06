@@ -33,8 +33,17 @@ export PYTHONUNBUFFERED=1
 
 export CACHE_FILE="${CACHE_FILE:-$DATA_DIR/trainset.h5}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_z_params}"
+# Same operator-slot interface as the 3-D matrix: MODEL_KIND=localop pairs the
+# local and global slots freely, and the named kinds are shorthand for a fixed
+# pair. The trainer derives the checkpoint directory from the resolved pair, so
+# a localop run lands in ..._local_<local>_<global> rather than ..._localop.
 export MODEL_KIND="${MODEL_KIND:-localwno}"
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_2d_xhi_${MODEL_KIND}}"
+if [ "$MODEL_KIND" = "localop" ]; then
+    export LOCAL_OPERATOR="${LOCAL_OPERATOR:?set LOCAL_OPERATOR for MODEL_KIND=localop}"
+    export GLOBAL_OPERATOR="${GLOBAL_OPERATOR:?set GLOBAL_OPERATOR for MODEL_KIND=localop}"
+else
+    unset LOCAL_OPERATOR GLOBAL_OPERATOR
+fi
 export LOCALFNO_BASE_WIDTH="${LOCALFNO_BASE_WIDTH:-32}"
 export LOCALFNO_WINDOW_X="${LOCALFNO_WINDOW_X:-16}"
 export LOCALFNO_WINDOW_Y="${LOCALFNO_WINDOW_Y:-16}"
@@ -55,7 +64,7 @@ echo "Host:             $(hostname)"
 echo "Job ID:           ${SLURM_JOB_ID:-N/A}"
 echo "CACHE_FILE:       $CACHE_FILE"
 echo "CHECKPOINT_DIR:   $CHECKPOINT_DIR"
-echo "Model:            $MODEL_KIND"
+echo "Model:            $MODEL_KIND${LOCAL_OPERATOR:+ ($LOCAL_OPERATOR local / $GLOBAL_OPERATOR global)}"
 echo "Input features:   $INPUT_FEATURES"
 echo "Epochs / batch:   $N_EPOCHS / $BATCH_SIZE"
 echo "Loss:             L2=$LOSS_L2_WEIGHT H1=$LOSS_H1_WEIGHT"
@@ -63,4 +72,4 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-none}"
 nvidia-smi || echo "(nvidia-smi unavailable)"
 echo "===================================================="
 
-python legacy/xhi2d/fno_21cm.py
+python fno_xhi2d.py

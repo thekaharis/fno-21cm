@@ -13,7 +13,7 @@ Cone ids match ``build_trainset.py`` exactly (index into the sorted lightcone
 glob), so ``--cones`` can restrict the build to a run's val/test cones and the
 result stays clear of anything the model trained on.
 
-    python -m legacy.xhi2d.build_xhi_band --lo 0.0 --hi 0.36 --k 12 \
+    python -m dataset.build_xhi_band --lo 0.0 --hi 0.36 --k 12 \
         --split-from checkpoints/xhi2d_whno_glob_lr3e4 --splits val,test \
         --out xhi_band_000_036.h5
 """
@@ -29,7 +29,7 @@ import h5py
 import numpy as np
 
 from dataset import paths
-from legacy.xhi2d.build_trainset import xHI_profile
+from dataset.build_slices import xHI_profile
 from dataset.lightcone_params import PARAM_NAMES, read_sampled_params
 
 

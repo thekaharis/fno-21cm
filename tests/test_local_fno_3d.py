@@ -12,7 +12,7 @@ from local_fno_3d import (
     OverlapAddWindow3d,
     SpectralResidualBlock3d,
 )
-from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
+from modeling import ModelConfig, TrainerModel, build_model, load_checkpoint
 from util.spectral_weights import (
     SpectralWeightHistory,
     extract_spectral_weight_profiles,
@@ -134,12 +134,12 @@ def test_local_fno_config_environment_metadata_and_checkpoint_round_trip() -> No
     assert config.default_checkpoint_dir.name == "checkpoints_3d_localfno"
 
     torch.manual_seed(19)
-    source = TrainerModel(build_3d_model(config, in_channels=2))
+    source = TrainerModel(build_model(config, in_channels=2))
     sample = torch.randn(1, 2, 8, 8, 8)
     expected = source(x=sample)
     with tempfile.NamedTemporaryFile(suffix=".pt") as checkpoint:
         torch.save(source.state_dict(), checkpoint.name)
-        target = TrainerModel(build_3d_model(config, in_channels=2))
+        target = TrainerModel(build_model(config, in_channels=2))
         report = load_checkpoint(target, checkpoint.name)
         actual = target(x=sample)
     assert report.matched == report.total
@@ -171,7 +171,7 @@ def test_visualization_loader_uses_explicit_checkpoint_metadata(tmp_path) -> Non
         localfno_spectral_rank=2,
         localfno_patch_chunk_size=3,
     )
-    source = TrainerModel(build_3d_model(config, in_channels=2))
+    source = TrainerModel(build_model(config, in_channels=2))
     checkpoint = tmp_path / "best_model_state_dict.pt"
     torch.save(source.state_dict(), checkpoint)
     write_run_metadata(tmp_path, {"model_config": config.to_dict()})

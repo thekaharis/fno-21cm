@@ -31,8 +31,8 @@ import torch
 
 from legacy.xhi2d import field_metrics as fm
 from legacy.xhi2d.slice_eval import gather, open_run, split_indices
-from legacy.xhi2d.compare_xhi2d_models import representative_indices
-from legacy.xhi2d.visualize_xhi2d_representative import DEFAULT_QUANTILES
+from viz.compare_xhi2d_models import representative_indices
+from viz.visualize_xhi2d_representative import DEFAULT_QUANTILES
 
 # Dropped from the first version: expwall s=4 (collapsed to uniform fields,
 # RMSE 0.511) and the H1 seminorm (strictly dominated by the L2 baseline on

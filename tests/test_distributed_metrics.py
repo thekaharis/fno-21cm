@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from fno_21cm_3d import _all_reduce_weighted_metrics
+from training import all_reduce_weighted_metrics
 
 
 def _loopback_interface() -> str:
@@ -35,7 +35,7 @@ def _reduction_worker(rank: int, world_size: int, init_file: str) -> None:
             {"val_l2": 2.0, "val_h1": 4.0},
             {"val_l2": 8.0, "val_h1": 1.0},
         )
-        reduced = _all_reduce_weighted_metrics(
+        reduced = all_reduce_weighted_metrics(
             local_metrics[rank],
             local_sample_count=local_counts[rank],
             world_size=world_size,
@@ -63,7 +63,7 @@ def test_weighted_metric_reduction_is_noop_without_ddp() -> None:
         "val_l2": torch.tensor(1.25),
         "val_h1": 2.5,
     }
-    reduced = _all_reduce_weighted_metrics(
+    reduced = all_reduce_weighted_metrics(
         metrics,
         local_sample_count=3,
         world_size=1,

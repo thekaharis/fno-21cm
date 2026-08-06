@@ -29,7 +29,7 @@ export PYTHONUNBUFFERED=1
 
 RUN="${RUN:-checkpoints/xhi2d_whno_glob_lr3e4}"
 
-python -m legacy.xhi2d.build_xhi_band \
+python -m dataset.build_xhi_band \
     --lo "${BAND_LO:-0.0}" --hi "${BAND_HI:-0.36}" \
     --k "${K_PER_CONE:-12}" \
     --split-from "$RUN" --splits "${SPLITS:-val,test}" \

@@ -56,7 +56,7 @@ echo "cubes      : $CUBE_CACHE"
 echo "=========================================="
 
 echo "[1/2] representative held-out slices"
-python -m legacy.xhi2d.visualize_xhi2d_representative \
+python -m viz.visualize_xhi2d_representative \
     --run "$RUN_DIR" \
     --output "figures/xhi2d_${TAG}_representative"
 

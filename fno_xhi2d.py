@@ -46,7 +46,7 @@ from neuralop.utils import count_model_params
 
 import neuralop as _neuralop
 
-from legacy.xhi2d.dataset import SliceCache, split_by_cone
+from dataset.slices import SliceCache, split_by_cone
 from dataset import paths
 from losses import (
     AbsoluteLoss,
@@ -59,7 +59,9 @@ from losses import (
     WallPlacementLoss,
 )
 from contrast import ContrastComposed
-from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
+from modeling import ModelConfig, TrainerModel, build_model
+from training import ContrastRefit, MetricsTrainer
+from util import seed_everything
 from util.run_metadata import write_run_metadata
 
 print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
@@ -67,36 +69,11 @@ print(f"[fno_21cm] using neuralop from {_neuralop.__file__}")
 
 CACHE_FILE = Path(os.environ.get("CACHE_FILE", paths.TRAINSET))
 INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_z_params").lower()
-MODEL_KIND = os.environ.get("MODEL_KIND", "localwno").lower()
-
-N_MODES = (
-    int(os.environ.get("N_MODES_X", "32")),
-    int(os.environ.get("N_MODES_Y", "32")),
-)
-HIDDEN_CHANNELS = int(os.environ.get("HIDDEN_CHANNELS", "64"))
-N_LAYERS = int(os.environ.get("N_LAYERS", "4"))
-UFNO_WIDTH = int(os.environ.get("UFNO_WIDTH", "32"))
-UFNO_NORM = os.environ.get("UFNO_NORM", "batchnorm").lower()
-LOCALFNO_BASE_WIDTH = int(os.environ.get("LOCALFNO_BASE_WIDTH", "32"))
-LOCALFNO_WINDOW = (
-    int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
-    int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
-)
-LOCALFNO_MODES = (
-    int(os.environ.get("LOCALFNO_MODES_X", "6")),
-    int(os.environ.get("LOCALFNO_MODES_Y", "6")),
-)
-LOCALFNO_GLOBAL_MODES = (
-    int(os.environ.get("LOCALFNO_GLOBAL_MODES_X", "16")),
-    int(os.environ.get("LOCALFNO_GLOBAL_MODES_Y", "16")),
-)
-LOCALFNO_SPECTRAL_RANK = int(
-    os.environ.get("LOCALFNO_SPECTRAL_RANK", "16")
-)
-LOCALFNO_PATCH_CHUNK_SIZE = int(
-    os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "32")
-)
-LOCALWNO_LEVELS = int(os.environ.get("LOCALWNO_LEVELS", "2"))
+# Same switches, same registry and same metadata as the 3-D and z_re entry
+# points -- only ndim differs. MODEL_KIND=localop pairs the operator slots
+# freely; see modeling.ModelConfig.
+MODEL_CONFIG = ModelConfig.from_env(ndim=2)
+MODEL_KIND = MODEL_CONFIG.kind
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "1e-4"))
@@ -175,22 +152,9 @@ RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
 VAL_FRACTION = float(os.environ.get("VAL_FRACTION", "0.1"))
 TEST_FRACTION = float(os.environ.get("TEST_FRACTION", "0.1"))
 
-_LOCAL_KINDS = tuple(LOCAL_GLOBAL_KINDS) + ("localop",)
-_KIND_SUFFIX = {
-    "fno": "fno",
-    "ufno": "ufno",
-    **{kind: kind for kind in _LOCAL_KINDS},
-}
-OPERATOR_SLOTS = (
-    OperatorSlots.from_env(MODEL_KIND) if MODEL_KIND in _LOCAL_KINDS else None
-)
-_CHECKPOINT_TAG = (
-    OPERATOR_SLOTS.checkpoint_tag if OPERATOR_SLOTS is not None
-    else _KIND_SUFFIX.get(MODEL_KIND, MODEL_KIND)
-)
 CHECKPOINT_DIR = Path(os.environ.get(
     "CHECKPOINT_DIR",
-    f"checkpoints/checkpoints_2d_xhi_{_CHECKPOINT_TAG}",
+    f"checkpoints/checkpoints_2d_xhi_{MODEL_CONFIG.checkpoint_tag}",
 ))
 RESUME_DIR = os.environ.get("RESUME_DIR") or None
 DEVICE = os.environ.get(
@@ -199,196 +163,6 @@ DEVICE = os.environ.get(
     else "mps" if torch.backends.mps.is_available()
     else "cpu",
 )
-
-
-class SliceLoggingTrainer(Trainer):
-    """Single-process trainer with dashboard-compatible JSONL metrics."""
-
-    def __init__(self, *args, metrics_path=None, append=False,
-                 contrast_refit=False, refit_loader=None,
-                 refit_samples=2048, refit_steps=400,
-                 refit_objective=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.contrast_refit = contrast_refit
-        self.refit_loader = refit_loader
-        self.refit_samples = refit_samples
-        self.refit_steps = refit_steps
-        # Fit the map under the loss actually being trained on.
-        self.refit_objective = refit_objective
-        self._schedule_stats: dict | None = None
-        self.metrics_path = Path(metrics_path) if metrics_path else None
-        if self.metrics_path is not None:
-            self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
-            if not append:
-                self.metrics_path.unlink(missing_ok=True)
-        self._last_train: dict | None = None
-
-    def train_one_epoch(self, epoch, train_loader, training_loss):
-        # Drives ScheduledWeightedLoss' warmup ramp (matches the 3-D trainer).
-        if hasattr(training_loss, "set_epoch"):
-            training_loss.set_epoch(int(epoch))
-        if self.contrast_refit:
-            from util import contrast_refit as _refit
-            if int(epoch) == 0:
-                # No prediction exists yet to fit a schedule against.
-                _refit.disable(self.model)
-                self._schedule_stats = None
-                print("[contrast] epoch 0: map disabled", flush=True)
-            else:
-                st = _refit.refit_and_install(
-                    self.model, self.refit_loader or train_loader,
-                    DEVICE, self.refit_samples, self.refit_steps,
-                    objective=self.refit_objective,
-                    theta_floor=CONTRAST_THETA_FLOOR)
-                self._schedule_stats = st
-                print(f"[contrast] epoch {int(epoch)}: "
-                      f"{_refit.summary_line(st)}", flush=True)
-        out = super().train_one_epoch(epoch, train_loader, training_loss)
-        train_err, avg_loss, _avg_lasso, elapsed = out
-        row = {
-            "epoch": int(epoch),
-            "train_err": float(train_err),
-            "avg_loss": float(avg_loss),
-            "epoch_train_time": float(elapsed),
-            "train_samples_per_second": (
-                len(train_loader.dataset) / float(elapsed)
-                if elapsed > 0 else 0.0
-            ),
-        }
-        if self._schedule_stats:
-            row.update({f"contrast_{k}": float(v)
-                        for k, v in self._schedule_stats.items()
-                        if isinstance(v, (int, float))})
-            if "thetas" in self._schedule_stats:
-                row["contrast_thetas"] = list(self._schedule_stats["thetas"])
-                row["contrast_bin_counts"] = list(
-                    self._schedule_stats.get("bin_counts", []))
-        if hasattr(training_loss, "pop_term_means"):
-            row.update({
-                f"train_{name}_term": float(value)
-                for name, value in training_loss.pop_term_means().items()
-            })
-        self._last_train = row
-        if self.eval_interval and epoch % self.eval_interval != 0:
-            self._flush_row({})
-        return out
-
-    def evaluate_all(self, *args, **kwargs):
-        metrics = super().evaluate_all(*args, **kwargs)
-        self._flush_row({key: float(value) for key, value in metrics.items()})
-        return metrics
-
-    def resume_state_from_dir(self, save_dir):
-        super().resume_state_from_dir(save_dir)
-        # neuralop manifests store the epoch that just completed.
-        self.start_epoch += 1
-        if self.verbose:
-            print(f"Continuing with epoch {self.start_epoch}")
-
-    def _flush_row(self, eval_metrics: dict) -> None:
-        if self.metrics_path is None or self._last_train is None:
-            return
-        with open(self.metrics_path, "a") as handle:
-            handle.write(json.dumps({**self._last_train, **eval_metrics}) + "\n")
-
-
-def _seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def build_2d_model(kind: str, in_channels: int):
-    """Build a 2-D x_HI model and its serialized configuration."""
-    if kind not in _KIND_SUFFIX:
-        raise ValueError(f"MODEL_KIND must be one of {sorted(_KIND_SUFFIX)}")
-    if kind == "ufno":
-        from models_zre_2d import UFNO2d
-
-        model = UFNO2d(
-            modes1=N_MODES[0], modes2=N_MODES[1], width=UFNO_WIDTH,
-            in_channels=in_channels, out_channels=1, sigmoid=True,
-            norm=UFNO_NORM,
-        )
-        config = {
-            "kind": kind, "n_modes": list(N_MODES),
-            "in_channels": in_channels, "out_channels": 1,
-            "ufno_width": UFNO_WIDTH, "ufno_norm": UFNO_NORM,
-        }
-        description = (
-            f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} norm={UFNO_NORM}"
-        )
-        return model, config, description
-    if kind in _LOCAL_KINDS:
-        from models_zre_2d import LocalFNO2d
-
-        slots = (
-            OPERATOR_SLOTS if kind == MODEL_KIND
-            else OperatorSlots.from_env(kind)
-        )
-        model = LocalFNO2d(
-            in_channels=in_channels,
-            out_channels=1,
-            base_width=LOCALFNO_BASE_WIDTH,
-            local_window=LOCALFNO_WINDOW,
-            local_modes=LOCALFNO_MODES,
-            global_modes=LOCALFNO_GLOBAL_MODES,
-            spectral_rank=LOCALFNO_SPECTRAL_RANK,
-            patch_chunk_size=LOCALFNO_PATCH_CHUNK_SIZE,
-            output_sigmoid=True,
-            **slots.model_kwargs(),
-        )
-        config = {
-            "kind": kind,
-            "in_channels": in_channels,
-            "out_channels": 1,
-            "localfno_base_width": LOCALFNO_BASE_WIDTH,
-            "localfno_window": list(LOCALFNO_WINDOW),
-            "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
-            "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK,
-            "localfno_patch_chunk_size": LOCALFNO_PATCH_CHUNK_SIZE,
-            **slots.metadata(),
-        }
-        if slots.uses_local_modes():
-            config["localfno_modes"] = list(LOCALFNO_MODES)
-        if "wavelet" in {slots.local, slots.global_}:
-            # Retained for readers of older metadata that predate the registry.
-            config.update(localwno_levels=LOCALWNO_LEVELS,
-                          localwno_wavelet="haar")
-        local_modes = (
-            f"local-modes={LOCALFNO_MODES} " if slots.uses_local_modes() else ""
-        )
-        description = (
-            f"{slots.model_name}2d window={LOCALFNO_WINDOW} {local_modes}"
-            f"{slots.describe()} "
-            f"global-modes={LOCALFNO_GLOBAL_MODES} "
-            f"width={LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK}"
-        )
-        return model, config, description
-
-    model = FNO(
-        n_modes=N_MODES,
-        hidden_channels=HIDDEN_CHANNELS,
-        in_channels=in_channels,
-        out_channels=1,
-        n_layers=N_LAYERS,
-        projection_channel_ratio=2,
-        positional_embedding="grid",
-    )
-    config = {
-        "kind": kind,
-        "in_channels": in_channels,
-        "out_channels": 1,
-        "n_modes": list(N_MODES),
-        "hidden_channels": HIDDEN_CHANNELS,
-        "n_layers": N_LAYERS,
-    }
-    description = (
-        f"FNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} layers={N_LAYERS}"
-    )
-    return model, config, description
 
 
 def build_losses():
@@ -533,14 +307,11 @@ def main() -> None:
     if not CACHE_FILE.is_file():
         print(
             f"Slice cache {CACHE_FILE} not found. Run "
-            "python -m legacy.xhi2d.build_trainset first.",
+            "python -m dataset.build_slices first.",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    if MODEL_KIND not in _KIND_SUFFIX:
-        raise SystemExit(f"MODEL_KIND must be one of {sorted(_KIND_SUFFIX)}")
-
-    _seed_everything(RUN_SEED)
+    seed_everything(RUN_SEED)
     cache = SliceCache(CACHE_FILE, input_features=INPUT_FEATURES)
     train_ds, val_ds, test_ds = split_by_cone(
         cache, val_frac=VAL_FRACTION, test_frac=TEST_FRACTION,
@@ -591,9 +362,9 @@ def main() -> None:
     test_loader = DataLoader(test_ds, shuffle=False, **loader_kwargs)
     test_loaders = {"val": val_loader, "test": test_loader}
 
-    inner, model_config, description = build_2d_model(
-        MODEL_KIND, cache.in_channels
-    )
+    inner = build_model(MODEL_CONFIG, cache.in_channels)
+    model_config = MODEL_CONFIG.to_dict()
+    description = MODEL_CONFIG.describe()
     if CONTRAST_MODE != "off":
         schedule = None
         if CONTRAST_SCHEDULE.startswith("theta="):
@@ -718,7 +489,7 @@ def main() -> None:
     }
     write_run_metadata(CHECKPOINT_DIR, metadata)
 
-    trainer = SliceLoggingTrainer(
+    trainer = MetricsTrainer(
         model=model,
         n_epochs=N_EPOCHS,
         device=DEVICE,
@@ -729,11 +500,13 @@ def main() -> None:
         verbose=True,
         metrics_path=CHECKPOINT_DIR / "metrics.jsonl",
         append=RESUME_DIR is not None,
-        contrast_refit=CONTRAST_REFIT,
-        refit_loader=refit_loader,
-        refit_samples=CONTRAST_REFIT_SAMPLES,
-        refit_steps=CONTRAST_REFIT_STEPS,
-        refit_objective=refit_objective,
+        contrast=ContrastRefit(
+            samples=CONTRAST_REFIT_SAMPLES,
+            steps=CONTRAST_REFIT_STEPS,
+            theta_floor=CONTRAST_THETA_FLOOR,
+            objective=refit_objective,
+            loader=refit_loader,
+        ) if CONTRAST_REFIT else None,
     )
 
     if CONTRAST_REFIT:

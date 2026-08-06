@@ -21,10 +21,10 @@ import numpy as np
 import torch
 
 from dataset import paths
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
 from modeling import load_checkpoint
-from legacy.xhi2d.compare_xhi2d_models import build_model
+from viz.compare_xhi2d_models import build_model
 
 BATCH = 32
 

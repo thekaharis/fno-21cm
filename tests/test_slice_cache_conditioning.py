@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import pytest
 
-from legacy.xhi2d.dataset import SliceCache, split_by_cone
+from dataset.slices import SliceCache, split_by_cone
 from dataset.lightcone_params import PARAM_NAMES
 
 

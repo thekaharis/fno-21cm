@@ -1,6 +1,6 @@
 """Retired 3-D architectures, kept loadable for inference on old checkpoints.
 
-``modeling.build_3d_model`` dispatches here for kinds that are no longer
+``modeling.build_model`` dispatches here for kinds that are no longer
 trained. Nothing in the main tree imports this at module level, so the retired
 code costs nothing until an old ``run_metadata.json`` asks for it.
 """

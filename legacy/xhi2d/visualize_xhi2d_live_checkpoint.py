@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Representative-slice viz for an IN-PROGRESS 2-D x_HI run.
 
-legacy.xhi2d.visualize_xhi2d_representative requires final_model_state_dict.pt and
+viz.visualize_xhi2d_representative requires final_model_state_dict.pt and
 final_report.json, which only exist once training finishes. This is the same
 rendering path pointed at the periodic model_state_dict.pt instead, for a
 qualitative look at a run that is still training. Labeled "(epoch N, live)"
@@ -17,10 +17,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
-from legacy.xhi2d.compare_xhi2d_models import Run, build_model, representative_indices
-from legacy.xhi2d.visualize_xhi2d_representative import DEFAULT_QUANTILES, render_slices
+from viz.compare_xhi2d_models import Run, build_model, representative_indices
+from viz.visualize_xhi2d_representative import DEFAULT_QUANTILES, render_slices
 from modeling import load_checkpoint
 
 

@@ -43,5 +43,5 @@ export PYTHONUNBUFFERED=1
 
 NUM_SHARDS=33                                       # MUST match build.sbatch
 
-python -m legacy.xhi2d.build_trainset --out "$DATA_DIR/trainset.h5" --merge --num-shards "$NUM_SHARDS"
+python -m dataset.build_slices --out "$DATA_DIR/trainset.h5" --merge --num-shards "$NUM_SHARDS"
 echo "merge complete -> $DATA_DIR/trainset.h5"

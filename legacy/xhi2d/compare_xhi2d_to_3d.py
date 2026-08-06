@@ -27,15 +27,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeCache,
     ParameterNormalization,
 )
-from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
+from modeling import ModelConfig, TrainerModel, build_model, load_checkpoint
 from util.run_metadata import load_run_metadata
-from legacy.xhi2d.compare_xhi2d_models import build_model as build_2d_model, load_run
+from viz.compare_xhi2d_models import build_model as build_2d_model, load_run
 
 
 STAGES = (
@@ -197,7 +197,7 @@ def predict_3d_slices(
         config = replace(
             config, localfno_patch_chunk_size=int(patch_chunk_size)
         )
-    model = TrainerModel(build_3d_model(config, cube_cache.in_channels))
+    model = TrainerModel(build_model(config, cube_cache.in_channels))
     strict_load(model, checkpoint)
     model = model.to(device).eval()
     row_by_cone = {

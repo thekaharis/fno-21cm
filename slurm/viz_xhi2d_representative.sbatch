@@ -31,6 +31,6 @@ export PYTHONUNBUFFERED=1
 RUN_DIR="${RUN_DIR:-checkpoints/xhi2d_localwno_lr2e4_e30}"
 VIZ_OUTPUT="${VIZ_OUTPUT:-figures/xhi2d_localwno_lr2e4_e30_representative}"
 
-python -m legacy.xhi2d.visualize_xhi2d_representative \
+python -m viz.visualize_xhi2d_representative \
     --run "$RUN_DIR" \
     --output "$VIZ_OUTPUT"

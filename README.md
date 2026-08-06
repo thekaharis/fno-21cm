@@ -20,29 +20,54 @@ Two pipelines live side by side:
 
 ```
 .
-├── fno_21cm_3d.py                 # 3-D training entry point (x_HI cubes)
-├── fno_zre.py                     # 2-D training entry point (z_re maps)
-├── modeling.py                    # ModelConfig, model factory, checkpoint I/O
+├── fno_21cm_3d.py                 # training: 3-D x_HI cubes
+├── fno_xhi2d.py                   # training: 2-D x_HI slices
+├── fno_zre.py                     # training: 2-D z_re maps
+├── modeling.py                    # ModelConfig + build_model, for all three
+├── training.py                    # MetricsTrainer + DDP setup, for all three
 ├── operators.py                   # local/global operator registry
 ├── local_fno_3d.py                # the local/global U-Net skeleton (3-D)
-├── models_zre_2d.py               # its 2-D twins, for the z_re task
+├── models_zre_2d.py               # its 2-D twins
 ├── models_ufno.py, ufno.py        # U-FNO baseline
 ├── siren.py, wavelet_operator.py  # operator building blocks
 ├── losses.py, contrast.py         # objectives and the output contrast map
-├── dataset/                       # readers, datasets, cube cache builder
+├── dataset/                       # readers, datasets, cache builders
 ├── viz/                           # prediction plots and metric evaluation
 ├── util/                          # metadata, metrics, spectral-weight history
-├── slurm/                         # sbatch scripts for the above
+├── slurm/                         # sbatch scripts
 ├── tests/                         # pytest suite
 ├── legacy/                        # retired code, kept runnable (see its README)
 ├── figures/, checkpoints/, data/  # outputs and inputs (gitignored)
 └── neuraloperator/                # vendored third-party lib (gitignored)
 ```
 
-Everything under `legacy/` is out of the active path but still importable, so
-checkpoints trained before the cleanup remain loadable. `modeling.build_3d_model`
-dispatches retired architecture kinds there lazily — see `legacy/README.md`.
+### Three tasks, one pipeline
 
+The three entry points differ only in their dataset and losses. Architecture
+selection, operator slots, run metadata and per-epoch logging are shared:
+
+| | 3-D x_HI | 2-D x_HI | 2-D z_re |
+|---|---|---|---|
+| entry point | `fno_21cm_3d.py` | `fno_xhi2d.py` | `fno_zre.py` |
+| `ModelConfig.from_env(ndim=)` | 3 | 2 | 2 |
+| architectures | `build_model` | `build_model` | `build_model` |
+| trainer | `MetricsTrainer` | `MetricsTrainer` | `MetricsTrainer` |
+| DDP | yes | no | no |
+
+`MODEL_KIND`, `LOCAL_OPERATOR`/`GLOBAL_OPERATOR` and every `LOCALFNO_*` switch
+mean the same thing in all three. A 2-D run reads `*_X`/`*_Y` and ignores
+`*_Z`; `LOCALFNO_GLOBAL_MODES_*` is accepted as the 2-D spelling of
+`N_MODES_*`. So the same operator pairing can be run at either dimensionality:
+
+```bash
+MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=cnn python fno_21cm_3d.py
+MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=cnn python fno_xhi2d.py
+```
+
+Everything under `legacy/` is out of the active path but still importable, so
+checkpoints trained before the cleanup remain loadable; `build_model`
+dispatches retired kinds there lazily. `ModelConfig.from_dict` also absorbs the
+per-task metadata shapes that predate the unified config.
 
 ## Where the data lives
 
@@ -69,15 +94,15 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `legacy/xhi2d/contrast_sweep.py` | (theta, tau) grid sweeps, held-out scoring, cone-level bootstrap CIs. |
 | `contrast.py` | The contrast map itself, and its learnable output stage. |
 
-### 2-D x_HI pipeline (legacy -- see `legacy/README.md`)
+### 2-D x_HI pipeline
 | File | Purpose |
 |------|---------|
-| `legacy/xhi2d/fno_21cm.py` | 2-D training entry point. |
-| `legacy/xhi2d/dataset.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
-| `legacy/xhi2d/build_trainset.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
-| `legacy/xhi2d/build_xhi_band.py` | Slice cache saturating a chosen x_HI band, for regime-specific analysis. |
+| `fno_xhi2d.py` | 2-D training entry point. |
+| `dataset/slices.py` | `LightconeSliceDataset` / `SliceCache` — per-redshift 2-D slices. |
+| `dataset/build_slices.py` | One-time pass: extract K slices/cone into a compact `trainset.h5`. |
+| `dataset/build_xhi_band.py` | Slice cache saturating a chosen x_HI band, for regime-specific analysis. |
 | `dataset/paths.py` | Canonical dataset locations. Import from here; never hard-code a path. |
-| `legacy/xhi2d/visualize.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
+| `viz/visualize_xhi2d.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
 | `figures/comparison_*.png`, `figures/scatter_*.png` | Example outputs from the v2 run. |
 
 ### 3-D pipeline (v3)
@@ -123,7 +148,7 @@ the job id — e.g. `figures/ufno_20260606-143022_job3965704/`. A
 `run_info.txt` is dropped in each folder summarising the config so old
 renders are self-explanatory. Successive viz runs never overwrite each
 other.
-| `legacy/slurm/build.sbatch`, `legacy/slurm/merge.sbatch` | v2 slice cache build + merge (array job). |
+| `slurm/build_slices.sbatch`, `slurm/build_slices_merge.sbatch` | v2 slice cache build + merge (array job). |
 | `slurm/build_cubes.sbatch`, `slurm/build_cubes_merge.sbatch` | v3 cube cache build + merge. |
 
 All sbatch scripts auto-resolve the project root from their own location, so
@@ -394,7 +419,7 @@ the operator preserves the window shape. Set the decomposition depth with
 `LOCALWNO_LEVELS` (default `2`); each local-window dimension must be divisible
 by `2**LOCALWNO_LEVELS`. The 2-D z_re pipeline supports the same model kind.
 
-Both 2-D pipelines (`legacy/xhi2d/fno_21cm.py` for x_HI slices, `fno_zre.py` for z_re maps)
+Both 2-D pipelines (`fno_xhi2d.py` for x_HI slices, `fno_zre.py` for z_re maps)
 read the same `MODEL_KIND` values and the same `LOCAL_OPERATOR`/
 `GLOBAL_OPERATOR` slots as the 3-D one.
 
@@ -595,16 +620,16 @@ is visible after the first epoch.
 
 ```bash
 # 1. Build the compact slice cache (once) -> data/compressed/trainset.h5
-python -m legacy.xhi2d.build_trainset
+python -m dataset.build_slices
 
 # 2. Train (resolves the cache via dataset/paths.py; override with CACHE_FILE)
-python -m legacy.xhi2d.fno_21cm
+python -m fno_xhi2d
 
 # 3. Visualize predictions from the latest 2-D checkpoint
-python -m legacy.xhi2d.visualize
+python -m viz.visualize_xhi2d
 ```
 
-Key hyperparameters are constants at the top of `legacy/xhi2d/fno_21cm.py`
+Key hyperparameters are constants at the top of `fno_xhi2d.py`
 (`N_MODES`, `HIDDEN_CHANNELS`, `N_LAYERS`, `BATCH_SIZE`, `LEARNING_RATE`, ...).
 
 ## Status

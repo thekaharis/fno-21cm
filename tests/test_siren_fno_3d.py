@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from modeling import ModelConfig, build_3d_model
+from modeling import ModelConfig, build_model
 from legacy.arch.siren_fno_3d import SirenFNO3d, SpectralConv3dSiren
 from util.spectral_weights import extract_spectral_weight_profiles
 
@@ -107,7 +107,7 @@ def test_model_factory_builds_sirenfno_and_profiles_generated_weights() -> None:
         siren_feature_dim=8,
         siren_padding=(0, 0, 0),
     )
-    model = build_3d_model(config, in_channels=2)
+    model = build_model(config, in_channels=2)
     output = model(torch.randn(1, 2, 8, 8, 8))
     profiles = extract_spectral_weight_profiles(model)
 

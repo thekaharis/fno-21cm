@@ -101,14 +101,14 @@ class ModelConfigTests(unittest.TestCase):
         self.assertTrue(config.ufno_global_residual)
 
     def test_ufno_construction_respects_external_seed(self):
-        from modeling import build_3d_model
+        from modeling import build_model
 
         torch.manual_seed(17)
-        first = build_3d_model(ModelConfig(kind="ufno"), in_channels=2)
+        first = build_model(ModelConfig(kind="ufno"), in_channels=2)
         first_weight = first.body.conv0.weights1.detach().clone()
 
         torch.manual_seed(17)
-        second = build_3d_model(ModelConfig(kind="ufno"), in_channels=2)
+        second = build_model(ModelConfig(kind="ufno"), in_channels=2)
         second_weight = second.body.conv0.weights1.detach().clone()
 
         self.assertTrue(torch.equal(first_weight, second_weight))
@@ -176,3 +176,65 @@ class WeightedLossTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------- unified pipeline
+
+def test_one_config_serves_both_dimensionalities() -> None:
+    """The 2-D and 3-D paths differ only by ndim, not by config system."""
+    import torch
+    from modeling import build_model
+
+    for ndim, shape in ((2, (64, 64)), (3, (32, 32, 32))):
+        config = ModelConfig(
+            kind="localwhno", ndim=ndim, modes=(4,) * ndim,
+            localfno_window=(16,) * ndim, localfno_modes=(4,) * ndim,
+            localfno_base_width=8, localfno_spectral_rank=8,
+        )
+        assert config.checkpoint_tag == "localwhno"
+        with torch.no_grad():
+            out = build_model(config, in_channels=1)(torch.rand(1, 1, *shape))
+        assert out.shape == (1, 1, *shape)
+
+
+def test_pre_unification_metadata_still_rebuilds() -> None:
+    """Old 2-D and z_re runs recorded their own dict shape; both must load.
+
+    ``localfno_global_modes`` and ``n_modes`` were that shape's names for what
+    is now ``modes``, and ``ndim`` did not exist.
+    """
+    two_d = ModelConfig.from_dict({
+        "kind": "localwno", "in_channels": 1, "out_channels": 1,
+        "localfno_base_width": 16, "localfno_window": [16, 16],
+        "localfno_modes": [6, 6], "localfno_global_modes": [16, 16],
+        "localfno_spectral_rank": 16, "localfno_patch_chunk_size": 256,
+        "localwno_levels": 2, "localwno_wavelet": "haar",
+    })
+    assert two_d.ndim == 2 and two_d.modes == (16, 16)
+
+    zre = ModelConfig.from_dict({
+        "kind": "ufno", "n_modes": [16, 16], "hidden_channels": 32,
+        "n_layers": 4, "ufno_width": 32, "ufno_norm": "batchnorm",
+        "in_channels": 3, "out_channels": 1,
+    })
+    assert zre.ndim == 2 and zre.modes == (16, 16)
+
+
+def test_checkpoint_directories_are_unchanged_by_the_unification() -> None:
+    """Renaming a checkpoint dir would orphan every run already on disk."""
+    expected = {
+        "fno": "checkpoints/checkpoints_3d",
+        "ufno": "checkpoints/checkpoints_3d_ufno",
+        "localfno": "checkpoints/checkpoints_3d_localfno",
+        "localwno": "checkpoints/checkpoints_3d_localwno",
+        "localwhno": "checkpoints/checkpoints_3d_localwhno",
+        "localsirenfno": "checkpoints/checkpoints_3d_localsirenfno",
+        "sirenfno": "checkpoints/checkpoints_3d_sirenfno",
+    }
+    for kind, path in expected.items():
+        assert str(ModelConfig(kind=kind).default_checkpoint_dir) == path
+    pair = ModelConfig(kind="localop", local_operator="hadamard",
+                       global_operator="cnn")
+    assert str(pair.default_checkpoint_dir) == (
+        "checkpoints/checkpoints_3d_local_whno_cnn"
+    )

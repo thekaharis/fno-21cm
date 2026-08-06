@@ -71,7 +71,7 @@ def build(kind, local_op, global_op):
         os.environ.pop("GLOBAL_OPERATOR", None)
     import fno_21cm
     importlib.reload(fno_21cm)
-    return fno_21cm.build_2d_model(kind, IN_CHANNELS)
+    return build_model(ModelConfig.from_env(ndim=2), IN_CHANNELS)
 
 
 def bench(model, batch, repeats, device):

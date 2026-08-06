@@ -5,10 +5,10 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from util.neuralop_setup import prefer_local_neuralop
 prefer_local_neuralop()
 import numpy as np, torch
-from legacy.xhi2d.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
 from losses import HighKPowerRatio, SlicedWassersteinEdges
-from legacy.xhi2d.compare_xhi2d_models import build_model
+from viz.compare_xhi2d_models import build_model
 
 run = "checkpoints/xhi2d_whno_glob_lr3e4"
 meta = json.load(open(f"{run}/run_metadata.json"))

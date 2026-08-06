@@ -17,12 +17,12 @@ single compact HDF5 cache that fits in RAM for training.
 Run it ONCE.  Parallelize across files with a SLURM array, then merge:
 
     # serial
-    python -m legacy.xhi2d.build_trainset --data /path/to/lightcones --out trainset.h5
+    python -m dataset.build_slices --data /path/to/lightcones --out trainset.h5
 
     # parallel: array of N tasks each writing a shard, then one merge
-    python -m legacy.xhi2d.build_trainset --data /path/to/lightcones --out trainset.h5 \
+    python -m dataset.build_slices --data /path/to/lightcones --out trainset.h5 \
         --shard "$SLURM_ARRAY_TASK_ID" --num-shards 33
-    python -m legacy.xhi2d.build_trainset --out trainset.h5 --merge --num-shards 33
+    python -m dataset.build_slices --out trainset.h5 --merge --num-shards 33
 
 The selection RNG is seeded per-cone, so the output is identical regardless of
 how the work is sharded.
