@@ -3,7 +3,7 @@
 #
 # Submit from the project root:
 #
-#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints_3d_ufno_v2 \
+#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v2 \
 #     slurm/viz_spectral_weights_z.sbatch
 
 #SBATCH --job-name=viz-spectral-z
@@ -32,7 +32,7 @@ ENV_NAME="fno-env"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d}"
 export MPLBACKEND=Agg
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-${SLURM_JOB_ID:-local}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"

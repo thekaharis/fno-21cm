@@ -268,11 +268,18 @@ def plot_profiles(
 
 def high_low_ratio(values: np.ndarray) -> np.ndarray:
     """RMS(last quarter of modes) / RMS(first quarter of modes)."""
-    n_modes = values.shape[-1]
-    band = max(1, n_modes // 4)
-    low = np.sqrt(np.mean(np.square(values[..., :band]), axis=-1))
-    high = np.sqrt(np.mean(np.square(values[..., -band:]), axis=-1))
-    return high / np.maximum(low, 1e-12)
+    values = np.asarray(values)
+    result = np.full(values.shape[:-1], np.nan, dtype=np.float32)
+    for index in np.ndindex(result.shape):
+        profile = values[index]
+        profile = profile[np.isfinite(profile)]
+        if profile.size == 0:
+            continue
+        band = max(1, profile.size // 4)
+        low = np.sqrt(np.mean(np.square(profile[:band])))
+        high = np.sqrt(np.mean(np.square(profile[-band:])))
+        result[index] = high / max(low, 1e-12)
+    return result
 
 
 def plot_cutoff_ratios(

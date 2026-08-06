@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # SLURM batch script -- detailed viz (16 cones, active-z slices) for the
-# U-FNO checkpoint in ./checkpoints_3d_ufno/.
+# U-FNO checkpoint in ./checkpoints/checkpoints_3d_ufno/.
 #
 # Submit from the project root:
 #
@@ -15,7 +15,7 @@
 #   * Walltime bumped to 60 min.
 #
 # Differences vs slurm/viz_detailed.sbatch:
-#   * MODEL_KIND=ufno -> loads checkpoints_3d_ufno/best_model_state_dict.pt and
+#   * MODEL_KIND=ufno -> loads checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt and
 #     reconstructs the U-FNO architecture in load_model().
 #
 # This is one of two viz workflows -- the 4-cone summary is via
@@ -62,7 +62,7 @@ export MODEL_KIND=ufno
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

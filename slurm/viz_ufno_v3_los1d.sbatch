@@ -12,7 +12,7 @@
 #     LOSConv1DPath stack of 1-D Z-only Conv3d layers (kernel=(1,1,7),
 #     n_layers=4).  Must match training time or load_model() fails.
 #   * Inherits v2 baseline overrides (groupnorm + N_MODES_Z=32).
-#   * CHECKPOINT points at ./checkpoints_3d_ufno_v3_los1d/.
+#   * CHECKPOINT points at ./checkpoints/checkpoints_3d_ufno_v3_los1d/.
 #   * VIZ_TAG=ufno-v3-los1d so the figure folder name encodes the variant.
 #
 # Pairs with slurm/viz_ufno_v3_los1d_detailed.sbatch.
@@ -64,13 +64,13 @@ export N_MODES_Z=32
 export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
-export CHECKPOINT_DIR=./checkpoints_3d_ufno_v3_los1d
+export CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v3_los1d
 export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-los1d
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

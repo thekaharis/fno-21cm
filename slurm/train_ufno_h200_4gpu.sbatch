@@ -16,7 +16,7 @@
 #   * Walltime padded to 18 h to absorb the ~2x per-epoch slowdown from the
 #     6-block + U-Net body.  Expected: ~7-10 min/epoch * 30 epochs ~= 3-5 h
 #     train + 1 h cube-cache staging = comfortably inside 18 h.
-#   * Distinct job name, log paths, and CHECKPOINT_DIR (./checkpoints_3d_ufno
+#   * Distinct job name, log paths, and CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno
 #     auto-selected by fno_21cm_3d.py because MODEL_KIND=ufno) so the FNO
 #     baseline is never overwritten.
 #
@@ -61,11 +61,11 @@ export PYTHONUNBUFFERED=1
 # --- Model selection --------------------------------------------------------
 # The single switch that distinguishes this sbatch from the FNO one.
 # fno_21cm_3d.py reads MODEL_KIND at import time and (a) picks the model
-# constructor and (b) selects CHECKPOINT_DIR="./checkpoints_3d_ufno" so
+# constructor and (b) selects CHECKPOINT_DIR="./checkpoints/checkpoints_3d_ufno" so
 # this run never collides with the plain-FNO baseline.
 export MODEL_KIND=ufno
 export RUN_SEED="${RUN_SEED:-0}"
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno}"
 
 # 30 epochs is the first-pass experimental budget for U-FNO.  If the
 # trajectory looks promising at the end, extend by submitting again with
@@ -75,33 +75,21 @@ export N_EPOCHS=30
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe (mirrors the FNO sbatch -- see that file
 # for the rationale).  ~5-10 min one-time copy of 180 GB; reads run at
 # ~3 GB/s after.
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 if [ "$LOCAL_SCRATCH" = "yes" ]; then
-    SCRATCH_BASE=""
-    for candidate in "${TMPDIR:-}" "/scratch/${SLURM_JOB_ID}" "/local/${SLURM_JOB_ID}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ]; then
-            SCRATCH_BASE="$candidate"; break
-        fi
-    done
-    if [ -n "$SCRATCH_BASE" ]; then
-        LOCAL_CUBES="$SCRATCH_BASE/cubes_3d.h5"
-        echo "Staging cube cache to local NVMe: $LOCAL_CUBES"
-        t0=$(date +%s)
-        cp --reflink=auto "$PROJECT_CUBES" "$LOCAL_CUBES" || cp "$PROJECT_CUBES" "$LOCAL_CUBES"
-        echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
-        export CUBES_CACHE="$LOCAL_CUBES"
-    else
-        echo "No local scratch detected (TMPDIR/scratch unset); reading cubes from project FS."
-        export CUBES_CACHE="$PROJECT_CUBES"
-    fi
+    LOCAL_CUBES="$TMPDIR/cubes_3d.h5"
+    echo "Staging cube cache to local scratch: $LOCAL_CUBES"
+    t0=$(date +%s)
+    cp "$PROJECT_CUBES" "$LOCAL_CUBES"
+    echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
+    export CUBES_CACHE="$LOCAL_CUBES"
 else
-    echo "LOCAL_SCRATCH=no: reading cubes from project FS."
-    export CUBES_CACHE="$PROJECT_CUBES"
+    export CUBES_CACHE="${CUBES_CACHE:-$PROJECT_CUBES}"
 fi
 
 # --- Distributed master coordinates -----------------------------------------

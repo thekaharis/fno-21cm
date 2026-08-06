@@ -9,7 +9,7 @@
 # Differences vs slurm/viz.sbatch (the plain-FNO variant):
 #   * Exports MODEL_KIND=ufno so viz/visualize_3d.py constructs the U-FNO
 #     architecture in load_model() and looks for the checkpoint in
-#     ./checkpoints_3d_ufno/ instead of ./checkpoints_3d/.
+#     ./checkpoints/checkpoints_3d_ufno/ instead of ./checkpoints/checkpoints_3d/.
 #   * Distinct job-name and log-output paths so the FNO and U-FNO viz jobs
 #     stay separable in `squeue -u $USER -l` and `ls logs/`.
 #
@@ -59,13 +59,13 @@ export PYTHONUNBUFFERED=1
 # The single switch that distinguishes this viz sbatch from the FNO one.
 # viz/visualize_3d.py reads MODEL_KIND at import time and:
 #   * picks UFNOWrapped in load_model() instead of neuralop.FNO
-#   * auto-selects CHECKPOINT="checkpoints_3d_ufno/best_model_state_dict.pt"
+#   * auto-selects CHECKPOINT="checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt"
 #     (unless CHECKPOINT is overridden in this env block).
 export MODEL_KIND=ufno
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

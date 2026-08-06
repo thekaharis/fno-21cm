@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # SLURM batch script -- detailed viz (16 cones, active-z slices) for the
-# plain-FNO checkpoint in ./checkpoints_3d/.
+# plain-FNO checkpoint in ./checkpoints/checkpoints_3d/.
 #
 # Submit from the project root:
 #
@@ -57,7 +57,7 @@ export PYTHONUNBUFFERED=1
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

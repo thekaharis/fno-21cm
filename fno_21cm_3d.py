@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Train a 3-D Fourier Neural Operator on full 21cm lightcone cubes.
+"""Train a configurable 3-D neural operator on full 21cm lightcone cubes.
 
 Mapping:  matter density cube  ->  neutral fraction (x_HI) cube.
 
 Each lightcone is interpolated along the LOS axis to a fixed n_z grid so the
 whole cube fits in a single forward pass on an A30 (24 GB) at batch=1.  The
 input tensor carries the density (normalized by a fixed constant) and an
-explicit ``1/(1+z)`` channel.  The FNO's ``positional_embedding="grid"`` option
-then appends normalized grid coordinates as additional channels. Because the
-cube cache is sampled uniformly in redshift, the third grid coordinate is
-normalized redshift, not comoving distance.
+explicit ``1/(1+z)`` channel. FNO and SirenFNO append normalized grid
+coordinates as additional channels. Because the cube cache is sampled
+uniformly in redshift, the third grid coordinate is normalized redshift,
+not comoving distance.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from neuralop.utils import count_model_params
 import neuralop as _neuralop
 print(f"[fno_21cm_3d] using neuralop from {_neuralop.__file__}")
 
+from dataset import paths
 from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeDataset,
@@ -48,11 +49,17 @@ from dataset.dataset_3d import (
 from losses import (
     AbsoluteLoss,
     BinaryCrossEntropyTerm,
+    IonizedWallRMSE,
+    ExponentialWallDistance,
     LightconeH1Loss,
+    LOSVolumeWeightedLoss,
+    RelativeLoss,
     ScheduledWeightedLoss,
     WeightedLoss,
+    los_volume_weights,
 )
-from modeling import ModelConfig, TrainerModel, build_3d_model
+from contrast import ContrastComposed
+from modeling import ModelConfig, TrainerModel, build_3d_model, load_checkpoint
 from util.run_metadata import write_run_metadata
 from util.spectral_weights import HISTORY_FILENAME, SpectralWeightHistory
 
@@ -69,7 +76,7 @@ FILE_GLOB = "21cmfast_11d_sample*.h5"
 # exists at startup, the training script uses LightconeCubeCache (fast,
 # pre-interpolated cubes); otherwise it falls back to LightconeCubeDataset
 # (raw streaming, ~10x slower per epoch).
-CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
+CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", paths.CUBES))
 
 N_Z = 256                           # LOS resolution after interpolation
 Z_MIN, Z_MAX = 5.0, 25.0
@@ -92,6 +99,12 @@ LEARNING_RATE = 5e-4
 # Use a more conservative base LR than the plain FNO; still apply the DDP
 # scaling rule below. Both values remain environment-overridable.
 UFNO_LEARNING_RATE = float(os.environ.get("UFNO_LEARNING_RATE", "1e-4"))
+SIRENFNO_LEARNING_RATE = float(
+    os.environ.get("SIRENFNO_LEARNING_RATE", "1e-4")
+)
+LOCALFNO_LEARNING_RATE = float(
+    os.environ.get("LOCALFNO_LEARNING_RATE", "1e-4")
+)
 WEIGHT_DECAY = 1e-5
 # N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
@@ -105,17 +118,93 @@ LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "0.5"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.5"))
 LOSS_BCE_WEIGHT = float(os.environ.get("LOSS_BCE_WEIGHT", "0.0"))
 
+# On non-uniform LOS grids (warped cube caches) voxel count is loss weight,
+# so densely sampled epochs dominate the L2/H1 terms in proportion to their
+# slice count. "1" applies Delta-chi quadrature weights along the LOS so the
+# loss is volume-weighted regardless of grid. No-op-ish for uniform-chi
+# grids; mildly reweights uniform-z ones. Applies to L2/H1 only.
+LOSS_LOS_VOLUME_WEIGHTS = (
+    os.environ.get("LOSS_LOS_VOLUME_WEIGHTS", "0").strip() == "1"
+)
+
+# Norm mode per term. "absolute" (historical default) uses raw H1/L2 norms,
+# under which the H1 term is ~2 orders of magnitude larger than the L2 term
+# and the nominal weights above do not reflect the real balance. "relative"
+# divides by the target norm, making both terms dimensionless and the weights
+# directly interpretable.
+def _loss_mode(name: str) -> str:
+    mode = os.environ.get(name, "absolute").strip().lower()
+    if mode not in {"absolute", "relative"}:
+        raise ValueError(f"{name} must be 'absolute' or 'relative', got {mode!r}")
+    return mode
+
+
+LOSS_L2_MODE = _loss_mode("LOSS_L2_MODE")
+LOSS_H1_MODE = _loss_mode("LOSS_H1_MODE")
+LOSS_IONIZED_WALL_WEIGHT = float(
+    os.environ.get("LOSS_IONIZED_WALL_WEIGHT", "0.0")
+)
+IONIZED_WALL_KERNEL_SIZE = int(
+    os.environ.get("IONIZED_WALL_KERNEL_SIZE", "7")
+)
+# Exponential-in-distance wall placement (losses.ExponentialWallDistance).
+# The 2-D sweep picked scale=16: it matched truth sharpness (width 1.33 vs
+# 1.47, blur 0.108 vs 0.111) and halved the wall-placement error, at ~20% more
+# RMSE. scale=4 diverged. Distances are in voxels, so the penalty is mildly
+# anisotropic here -- the LOS axis is not on the transverse physical scale.
+LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
+# Ramp expwall in, because its magnitude relative to L2 *inverts* over training.
+# Measured on real cubes: L2/expwall is 3.0 for a constant-0.5 prediction but
+# 85.8 once the prediction is merely blurred. A fixed weight therefore either
+# swamps L2 early or vanishes late; the ramp lets L2 establish structure first.
+EXPWALL_WARMUP_EPOCHS = int(os.environ.get("EXPWALL_WARMUP_EPOCHS", "0"))
+# Output contrast map (contrast.py), same machinery as the 2-D trainer. In 3-D
+# theta is indexed per line-of-sight slice, not per cube: a cube spans the whole
+# reionisation history, so one mean per cube averages x_HI ~ 0 and x_HI ~ 1
+# together and describes neither.
+CONTRAST_MODE = os.environ.get("CONTRAST_MODE", "off").lower()
+CONTRAST_REFIT = os.environ.get("CONTRAST_REFIT", "0") not in ("0", "", "false")
+CONTRAST_SCHEDULE_KIND = os.environ.get("CONTRAST_SCHEDULE_KIND", "stepped").lower()
+CONTRAST_BINS = int(os.environ.get("CONTRAST_BINS", "14"))
+# Counted in LOS slices, not cubes: 8 cubes of 256 slices already gives 2048,
+# matching the 2-D refit, and holding whole cubes for the fit would not fit.
+CONTRAST_REFIT_SAMPLES = int(os.environ.get("CONTRAST_REFIT_SAMPLES", "2048"))
+CONTRAST_REFIT_STEPS = int(os.environ.get("CONTRAST_REFIT_STEPS", "300"))
+CONTRAST_REFIT_BATCH = int(os.environ.get("CONTRAST_REFIT_BATCH", "64"))
+CONTRAST_THETA_FLOOR = float(os.environ.get("CONTRAST_THETA_FLOOR", "0.25"))
+EXPWALL_SCALE = float(os.environ.get("EXPWALL_SCALE", "16.0"))
+WALL_CAP = int(os.environ.get("WALL_CAP", "32"))
+IONIZED_WALL_THRESHOLD = float(
+    os.environ.get("IONIZED_WALL_THRESHOLD", "0.5")
+)
+
 # Stability controls for U-FNO. H1 starts at zero and ramps linearly to its
 # configured weight, allowing the L2 value term to establish a non-saturated
 # output before derivative matching begins.
 UFNO_H1_WARMUP_EPOCHS = int(os.environ.get("UFNO_H1_WARMUP_EPOCHS", "5"))
 UFNO_GRAD_CLIP_NORM = float(os.environ.get("UFNO_GRAD_CLIP_NORM", "1.0"))
+SIRENFNO_H1_WARMUP_EPOCHS = int(
+    os.environ.get("SIRENFNO_H1_WARMUP_EPOCHS", "5")
+)
+SIRENFNO_GRAD_CLIP_NORM = float(
+    os.environ.get("SIRENFNO_GRAD_CLIP_NORM", "1.0")
+)
+LOCALFNO_H1_WARMUP_EPOCHS = int(
+    os.environ.get("LOCALFNO_H1_WARMUP_EPOCHS", "5")
+)
+LOCALFNO_GRAD_CLIP_NORM = float(
+    os.environ.get("LOCALFNO_GRAD_CLIP_NORM", "1.0")
+)
 
 # DataLoader workers.  Streamed loading (one ~370 MB HDF5 read per sample) is
 # the throughput bottleneck on cluster filesystems; parallelizing across the
 # allocated CPUs gets the GPU fed.  Defaults to SLURM_CPUS_PER_TASK on the
-# cluster and 0 locally.
-NUM_WORKERS = int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+# cluster and 0 locally; override with NUM_WORKERS when the prefetch queue
+# (num_workers x prefetch_factor x batch_size samples of ~280 MB) must fit a
+# tighter host-memory budget.
+NUM_WORKERS = int(
+    os.environ.get("NUM_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "0"))
+)
 
 # Per-step progress logging cadence (set to 0 to disable).
 LOG_EVERY = 25
@@ -143,6 +232,10 @@ _DEFAULT_CKPT = str(MODEL_CONFIG.default_checkpoint_dir)
 CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", _DEFAULT_CKPT)
 METRICS_PATH = f"{CHECKPOINT_DIR}/metrics.jsonl"
 SPECTRAL_HISTORY_PATH = f"{CHECKPOINT_DIR}/{HISTORY_FILENAME}"
+# Optional model-only warm start. This intentionally does not restore the
+# optimizer or scheduler, which is useful after a short feasibility run whose
+# cosine schedule used a tiny N_EPOCHS (for example T_max=1).
+INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT")
 
 # Learning-rate scaling rule for multi-GPU DDP runs.  "sqrt" is conservative
 # and rarely diverges; "linear" extracts more wall-clock speed but may need
@@ -320,12 +413,26 @@ class LoggingTrainer(Trainer):
         self.best_metric: float | None = None
         self.spectral_history = None
         if spectral_history_path is not None and self._is_rank_0:
-            self.spectral_history = SpectralWeightHistory(
-                spectral_history_path,
-                self.model,
-                reset=True,
-            )
-            self.spectral_history.record(-1)
+            try:
+                self.spectral_history = SpectralWeightHistory(
+                    spectral_history_path,
+                    self.model,
+                    reset=True,
+                )
+                # The constructor stores the model without inspecting it, so an
+                # architecture with no Fourier layer only raises here, on the
+                # first extraction. Both calls must sit inside the try.
+                self.spectral_history.record(-1)
+            except ValueError as error:
+                # Architectures with no Fourier layer at all (say wavelet or
+                # Walsh-Hadamard in both operator slots) have no mode-weight
+                # profile to track. That is not a reason to refuse to train.
+                print(f"[spectral-weights] disabled: {error}")
+                self.spectral_history = None
+
+    # set by main() when the contrast refit is active
+    _refit_objective = None
+    _schedule_stats = None
 
     def train_one_epoch(self, epoch, train_loader, training_loss):
         # DistributedSampler must be told the epoch so it reshuffles
@@ -335,6 +442,30 @@ class LoggingTrainer(Trainer):
             sampler.set_epoch(int(epoch))
         if hasattr(training_loss, "set_epoch"):
             training_loss.set_epoch(int(epoch))
+        if CONTRAST_REFIT and CONTRAST_MODE != "off":
+            from util import contrast_refit as _refit
+            if int(epoch) == 0:
+                _refit.disable(self.model)          # nothing to fit against yet
+                self._schedule_stats = None
+                if self._is_rank_0:
+                    print("[contrast] epoch 0: map disabled", flush=True)
+            else:
+                # Every rank refits independently on its own shard rather than
+                # broadcasting: the schedule is a handful of scalars and the fit
+                # is deterministic given the data, so the ranks stay close, and
+                # this avoids a collective inside the epoch loop.
+                st = _refit.refit_and_install(
+                    self.model, train_loader, self.device,
+                    CONTRAST_REFIT_SAMPLES, CONTRAST_REFIT_STEPS,
+                    objective=self._refit_objective,
+                    theta_floor=CONTRAST_THETA_FLOOR)
+                self._schedule_stats = st
+                if self._is_rank_0:
+                    print(f"[contrast] epoch {int(epoch)}: "
+                          f"{_refit.summary_line(st)}", flush=True)
+        trainer_device = torch.device(self.device)
+        if trainer_device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(trainer_device)
 
         out = super().train_one_epoch(epoch, train_loader, training_loss)
         train_err, avg_loss, avg_lasso, t = out
@@ -353,6 +484,12 @@ class LoggingTrainer(Trainer):
             avg_loss=float(avg_loss_global),
             avg_lasso_loss=float(avg_lasso_global),
             epoch_train_time=float(t),
+            train_samples_per_second=float(
+                len(train_loader)
+                * int(getattr(train_loader, "batch_size", 1))
+                * self._world_size
+                / max(float(t), 1e-12)
+            ),
         )
         if hasattr(training_loss, "active_weights"):
             active = training_loss.active_weights
@@ -360,10 +497,24 @@ class LoggingTrainer(Trainer):
                 active_l2_weight=float(active[0]),
                 active_h1_weight=float(active[1]),
                 active_bce_weight=float(active[2]),
+                active_ionized_wall_weight=float(active[3]),
             )
+        if hasattr(training_loss, "pop_term_means"):
+            # Raw (unweighted) per-term training losses, epoch-averaged.
+            # Weights are logged above, so the weighted contribution of each
+            # term is reconstructable. Terms skipped by a zero weight (e.g.
+            # H1 during warmup epoch 0) have no key in that row.
+            for name, value in training_loss.pop_term_means().items():
+                self._last_train[f"train_{name}_term"] = _all_reduce_mean(
+                    value, self._world_size
+                )
         grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
         if grad_norm is not None:
             self._last_train["last_grad_norm"] = float(grad_norm)
+        if trainer_device.type == "cuda":
+            self._last_train["peak_cuda_memory_gb"] = float(
+                torch.cuda.max_memory_allocated(trainer_device) / (1024 ** 3)
+            )
         if self.spectral_history is not None:
             self.spectral_history.record(int(epoch))
         if self.eval_interval and (epoch % self.eval_interval != 0):
@@ -381,7 +532,10 @@ class LoggingTrainer(Trainer):
         self._pred_sum += sampled.sum()
         self._pred_sq_sum += sampled.square().sum()
         self._pred_low_count += (sampled <= 1e-4).sum()
-        self._pred_high_count += (sampled >= 1.0 - 1e-4).sum()
+        # The simulated x_HI never reaches 1 (residual ionized floor caps it
+        # at ~0.99983), so a 1-1e-4 cutoff counts only unphysical clipping.
+        # At 0.999 the truth fraction is ~0.74, making this comparable.
+        self._pred_high_count += (sampled >= 0.999).sum()
         self._pred_count += sampled.numel()
         return losses, output if return_output else None
 
@@ -632,10 +786,25 @@ def main():
            + ", ".join(dataset.input_features.channel_names))
 
     fno = build_3d_model(MODEL_CONFIG, in_channels)
+    if CONTRAST_MODE != "off":
+        fno = ContrastComposed(fno, CONTRAST_MODE,
+                               schedule_kind=CONTRAST_SCHEDULE_KIND,
+                               n_bins=CONTRAST_BINS)
+        rprint(f"Contrast map: {CONTRAST_MODE}/{CONTRAST_SCHEDULE_KIND} "
+               f"({CONTRAST_BINS} bins), theta per LOS slice"
+               + (f"; refit each epoch on {CONTRAST_REFIT_SAMPLES} slices"
+                  if CONTRAST_REFIT else " (fixed)"))
     # Count params BEFORE the DDP wrap (DDP nests model under .module which
     # would confuse count_model_params).
     n_params = count_model_params(fno)
     model = TrainerModel(fno).to(device)
+    if INIT_CHECKPOINT:
+        report = load_checkpoint(model, INIT_CHECKPOINT)
+        rprint(
+            f"Warm-started from {INIT_CHECKPOINT}: "
+            f"{report.matched}/{report.total} parameters matched "
+            f"({report.transform})"
+        )
     if is_distributed:
         # SyncBatchNorm: convert every BatchNormNd in the model to its
         # synchronised counterpart BEFORE the DDP wrap.  Without this, each
@@ -655,9 +824,11 @@ def main():
 
     # -------------------------------------------- 5. optimizer / scheduler
     # LR scaling rule for the effective global batch (BATCH_SIZE * world_size).
-    base_lr = (
-        UFNO_LEARNING_RATE if MODEL_KIND == "ufno" else LEARNING_RATE
-    )
+    base_lr = {
+        "fno": LEARNING_RATE,
+        "ufno": UFNO_LEARNING_RATE,
+        "sirenfno": SIRENFNO_LEARNING_RATE,
+    }.get(MODEL_KIND, LOCALFNO_LEARNING_RATE)
     if is_distributed:
         global_bs = BATCH_SIZE * world_size
         if LR_SCALE_RULE == "linear":
@@ -669,10 +840,15 @@ def main():
         scaled_lr = base_lr
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=scaled_lr, weight_decay=WEIGHT_DECAY)
-    if MODEL_KIND == "ufno" and UFNO_GRAD_CLIP_NORM > 0:
+    grad_clip_norm = {
+        "fno": 0.0,
+        "ufno": UFNO_GRAD_CLIP_NORM,
+        "sirenfno": SIRENFNO_GRAD_CLIP_NORM,
+    }.get(MODEL_KIND, LOCALFNO_GRAD_CLIP_NORM)
+    if grad_clip_norm > 0:
         def _clip_before_step(optim, args, kwargs):
             norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=UFNO_GRAD_CLIP_NORM
+                model.parameters(), max_norm=grad_clip_norm
             )
             # Avoid synchronizing CUDA on every batch. The epoch logger
             # converts only the final recorded norm to a Python float.
@@ -684,35 +860,86 @@ def main():
                                                            T_max=N_EPOCHS)
 
     # -------------------------------------------- 6. losses (3-D)
-    # L2 + H1 (both absolute, d=3) are the v2/v3 baseline.  Relative norms
-    # blow up over the all-ionized late-z portion of the cube where x_HI = 0,
-    # so absolute is mandatory here.  BCE is a confidence regulariser that
-    # rewards bimodal {0, 1} predictions -- see BCETerm docstring.
+    # L2 + H1 (both absolute, d=3) are the v2/v3 baseline.  Historical note:
+    # relative norms blew up on the v2 sub-cube pipeline, where an all-ionized
+    # late-z chunk has ||y|| = 0; full lightcones always retain a neutral
+    # high-z region, so LOSS_*_MODE=relative is safe here and makes the term
+    # weights dimensionless and directly comparable.  BCE is a confidence
+    # regulariser that rewards bimodal {0, 1} predictions -- see BCETerm
+    # docstring.
     l2_loss = LpLoss(d=3, p=2)
     h1_loss = _build_h1_loss()
     bce_loss = BinaryCrossEntropyTerm()
-    loss_terms = (
-        (LOSS_L2_WEIGHT, AbsoluteLoss(l2_loss)),
-        (LOSS_H1_WEIGHT, AbsoluteLoss(h1_loss)),
-        (LOSS_BCE_WEIGHT, bce_loss),
+    ionized_wall_loss = IonizedWallRMSE(
+        band_kernel_size=IONIZED_WALL_KERNEL_SIZE,
+        threshold=IONIZED_WALL_THRESHOLD,
     )
-    if MODEL_KIND == "ufno":
+    norm_wrapper = {"absolute": AbsoluteLoss, "relative": RelativeLoss}
+    l2_term = norm_wrapper[LOSS_L2_MODE](l2_loss)
+    h1_term = norm_wrapper[LOSS_H1_MODE](h1_loss)
+    if LOSS_LOS_VOLUME_WEIGHTS:
+        los_w = los_volume_weights(dataset.target_z)
+        l2_term = LOSVolumeWeightedLoss(l2_term, los_w)
+        h1_term = LOSVolumeWeightedLoss(h1_term, los_w)
+        print(f"[loss] LOS volume weights ON: w in "
+              f"[{float(los_w.min()):.2f}, {float(los_w.max()):.2f}] "
+              f"(mean 1.0, {len(los_w)} slices)")
+    expwall_loss = ExponentialWallDistance(scale=EXPWALL_SCALE, cap=WALL_CAP)
+    loss_terms = (
+        (LOSS_L2_WEIGHT, l2_term),
+        (LOSS_H1_WEIGHT, h1_term),
+        (LOSS_BCE_WEIGHT, bce_loss),
+        (LOSS_IONIZED_WALL_WEIGHT, ionized_wall_loss),
+        (LOSS_EXPWALL_WEIGHT, expwall_loss),
+    )
+    loss_term_names = ("l2", "h1", "bce", "ionized_wall", "expwall")
+    h1_warmup_epochs = {
+        "fno": 0,
+        "ufno": UFNO_H1_WARMUP_EPOCHS,
+        "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
+    }.get(MODEL_KIND, LOCALFNO_H1_WARMUP_EPOCHS)
+    # index into loss_terms: 0 l2, 1 h1, 2 bce, 3 ionized_wall, 4 expwall
+    warmup_terms, warmup_epochs = (), 0
+    if h1_warmup_epochs > 0:
+        warmup_terms, warmup_epochs = (1,), h1_warmup_epochs
+    if LOSS_EXPWALL_WEIGHT > 0 and EXPWALL_WARMUP_EPOCHS > 0:
+        warmup_terms = tuple(sorted(set(warmup_terms) | {4}))
+        warmup_epochs = max(warmup_epochs, EXPWALL_WARMUP_EPOCHS)
+    if warmup_terms:
         train_loss_fn = ScheduledWeightedLoss(
             *loss_terms,
-            warmup_terms=(1,),
-            warmup_epochs=UFNO_H1_WARMUP_EPOCHS,
+            warmup_terms=warmup_terms,
+            warmup_epochs=warmup_epochs,
+            term_names=loss_term_names,
         )
+        print(f"[loss] warmup over {warmup_epochs} epochs for terms "
+              f"{[loss_term_names[i] for i in warmup_terms]}")
     else:
-        train_loss_fn = WeightedLoss(*loss_terms)
+        train_loss_fn = WeightedLoss(*loss_terms, term_names=loss_term_names)
     # Eval losses are tracked separately in metrics.jsonl so we can see how
     # each component evolves.  Keys here become column names in JSONL.
+    # val_l2 / val_h1 stay absolute for continuity with every archived run;
+    # the *_rel columns track the dimensionless variants regardless of which
+    # mode the training loss uses.
     eval_losses = {
         "l2": AbsoluteLoss(l2_loss),
         "h1": AbsoluteLoss(h1_loss),
+        "l2_rel": RelativeLoss(l2_loss),
+        "h1_rel": RelativeLoss(h1_loss),
         "bce": bce_loss,
+        "ionized_wall": ionized_wall_loss,
+        "expwall": expwall_loss,
     }
 
     # -------------------------------------------- 7. trainer
+    if CONTRAST_REFIT and CONTRAST_MODE != "off":
+        # Fit the map under the loss the run trains on, not a hardcoded MSE.
+        _active = [(w, term) for w, term in loss_terms if w > 0]
+
+        def _refit_objective(out, y):
+            return sum(w * term(out, y) for w, term in _active)
+        LoggingTrainer._refit_objective = staticmethod(_refit_objective)
+
     trainer = LoggingTrainer(
         model=model,
         n_epochs=N_EPOCHS,
@@ -737,14 +964,47 @@ def main():
     rprint(f"Epochs: {N_EPOCHS}")
     rprint(f"Model: {MODEL_CONFIG.describe()}")
     rprint(f"Run seed: {RUN_SEED}  deterministic={DETERMINISTIC_RUN}")
+    rprint(f"Initial checkpoint: {INIT_CHECKPOINT or '(fresh initialization)'}")
     rprint(f"Input ablation: {INPUT_FEATURES.name}")
     rprint(f"Out: x_HI")
-    rprint(f"Loss: {LOSS_L2_WEIGHT}*absL2 + {LOSS_H1_WEIGHT}*absH1 "
-           f"+ {LOSS_BCE_WEIGHT}*BCE  "
+    l2_tag = "relL2" if LOSS_L2_MODE == "relative" else "absL2"
+    h1_tag = "relH1" if LOSS_H1_MODE == "relative" else "absH1"
+    rprint(f"Loss: {LOSS_L2_WEIGHT}*{l2_tag} + {LOSS_H1_WEIGHT}*{h1_tag} "
+           f"+ {LOSS_BCE_WEIGHT}*BCE "
+           f"+ {LOSS_IONIZED_WALL_WEIGHT}*ionized-wall-RMSE  "
            f"(H1: periodic X/Y, centered interior-only Z)")
+    rprint(
+        "Ionized-wall mask: "
+        f"threshold={IONIZED_WALL_THRESHOLD:g}, "
+        f"transverse kernel={IONIZED_WALL_KERNEL_SIZE}"
+    )
     if MODEL_KIND == "ufno":
         rprint(f"UFNO stability: H1 warmup={UFNO_H1_WARMUP_EPOCHS} epochs, "
                f"gradient clip={UFNO_GRAD_CLIP_NORM:g}")
+    elif MODEL_KIND == "sirenfno":
+        rprint(
+            "SirenFNO stability: "
+            f"H1 warmup={SIRENFNO_H1_WARMUP_EPOCHS} epochs, "
+            f"gradient clip={SIRENFNO_GRAD_CLIP_NORM:g}, "
+            f"output sigmoid={MODEL_CONFIG.siren_output_sigmoid}, "
+            f"temperature={MODEL_CONFIG.siren_sigmoid_temperature:g}"
+        )
+    elif MODEL_CONFIG.is_local_global:
+        (local_slot, local_kwargs), (global_slot, global_kwargs) = (
+            MODEL_CONFIG.operator_slots()
+        )
+        rprint(
+            f"{MODEL_KIND} stability: "
+            f"H1 warmup={LOCALFNO_H1_WARMUP_EPOCHS} epochs, "
+            f"gradient clip={LOCALFNO_GRAD_CLIP_NORM:g}, "
+            f"window={MODEL_CONFIG.localfno_window}, "
+            f"chunk={MODEL_CONFIG.localfno_patch_chunk_size}"
+        )
+        rprint(
+            f"Operator slots: local={local_slot}{local_kwargs or ''} "
+            f"global={global_slot}{global_kwargs or ''} "
+            f"windowed-local={MODEL_CONFIG.local_slot_is_windowed}"
+        )
     rprint(f"DataLoader workers: {NUM_WORKERS} "
            f"(per-step log every {LOG_EVERY} batches)")
     rprint(f"Eval interval: every {EVAL_INTERVAL} epoch(s)")
@@ -782,14 +1042,50 @@ def main():
             "epochs": N_EPOCHS,
             "run_seed": RUN_SEED,
             "deterministic": DETERMINISTIC_RUN,
+            "init_checkpoint": INIT_CHECKPOINT,
             "base_learning_rate": base_lr,
             "scaled_learning_rate": scaled_lr,
             "lr_scale_rule": LR_SCALE_RULE,
+            "loss_weights": {
+                "l2": LOSS_L2_WEIGHT,
+                "h1": LOSS_H1_WEIGHT,
+                "bce": LOSS_BCE_WEIGHT,
+                "ionized_wall": LOSS_IONIZED_WALL_WEIGHT,
+                "expwall": LOSS_EXPWALL_WEIGHT,
+                "expwall_warmup_epochs": EXPWALL_WARMUP_EPOCHS,
+            },
+            "loss_modes": {
+                "l2": LOSS_L2_MODE,
+                "h1": LOSS_H1_MODE,
+            },
+            "los_volume_weights": LOSS_LOS_VOLUME_WEIGHTS,
+            "ionized_wall_kernel_size": IONIZED_WALL_KERNEL_SIZE,
+            "ionized_wall_threshold": IONIZED_WALL_THRESHOLD,
             "ufno_h1_warmup_epochs": (
                 UFNO_H1_WARMUP_EPOCHS if MODEL_KIND == "ufno" else 0
             ),
             "ufno_grad_clip_norm": (
                 UFNO_GRAD_CLIP_NORM if MODEL_KIND == "ufno" else None
+            ),
+            "sirenfno_h1_warmup_epochs": (
+                SIRENFNO_H1_WARMUP_EPOCHS
+                if MODEL_KIND == "sirenfno"
+                else 0
+            ),
+            "sirenfno_grad_clip_norm": (
+                SIRENFNO_GRAD_CLIP_NORM
+                if MODEL_KIND == "sirenfno"
+                else None
+            ),
+            "localfno_h1_warmup_epochs": (
+                LOCALFNO_H1_WARMUP_EPOCHS
+                if MODEL_CONFIG.is_local_global
+                else 0
+            ),
+            "localfno_grad_clip_norm": (
+                LOCALFNO_GRAD_CLIP_NORM
+                if MODEL_CONFIG.is_local_global
+                else None
             ),
             "best_metric_name": "val_l2",
             "best_metric": None,

@@ -52,7 +52,7 @@ NUM_SHARDS=33                                       # MUST equal the array width
 echo "shard ${SLURM_ARRAY_TASK_ID}/${NUM_SHARDS} on $(hostname)"
 python -m dataset.build_trainset \
     --data "$DATA_DIR" \
-    --out trainset.h5 \
+    --out "$DATA_DIR/trainset.h5" \
     --k 6 \
     --shard "$SLURM_ARRAY_TASK_ID" \
     --num-shards "$NUM_SHARDS"

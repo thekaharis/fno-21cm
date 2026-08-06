@@ -28,7 +28,7 @@
 #      already shines (val_h1 = 8.27 vs FNO floor 11.36).  Should sharpen
 #      bubble walls further without trading off val_l2 significantly.
 #
-# Distinct CHECKPOINT_DIR (./checkpoints_3d_ufno_v2) so v1 and v2 don't
+# Distinct CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno_v2) so v1 and v2 don't
 # overwrite each other.  Reuses the v1 sbatch's NVMe staging, master-addr
 # wiring, and resource sizing; only env-var overrides + the job name and
 # log paths differ.
@@ -86,37 +86,25 @@ export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
 # Separate checkpoint dir so v1 and v2 don't collide.  fno_21cm_3d.py
-# honors CHECKPOINT_DIR if set; otherwise it picks ./checkpoints_3d_ufno
+# honors CHECKPOINT_DIR if set; otherwise it picks ./checkpoints/checkpoints_3d_ufno
 # from MODEL_KIND=ufno.
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno_v2}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v2}"
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe (28 TB on the H200 node).
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 if [ "$LOCAL_SCRATCH" = "yes" ]; then
-    SCRATCH_BASE=""
-    for candidate in "${TMPDIR:-}" "/scratch/${SLURM_JOB_ID}" "/local/${SLURM_JOB_ID}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ]; then
-            SCRATCH_BASE="$candidate"; break
-        fi
-    done
-    if [ -n "$SCRATCH_BASE" ]; then
-        LOCAL_CUBES="$SCRATCH_BASE/cubes_3d.h5"
-        echo "Staging cube cache to local NVMe: $LOCAL_CUBES"
-        t0=$(date +%s)
-        cp --reflink=auto "$PROJECT_CUBES" "$LOCAL_CUBES" || cp "$PROJECT_CUBES" "$LOCAL_CUBES"
-        echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
-        export CUBES_CACHE="$LOCAL_CUBES"
-    else
-        echo "No local scratch detected (TMPDIR/scratch unset); reading cubes from project FS."
-        export CUBES_CACHE="$PROJECT_CUBES"
-    fi
+    LOCAL_CUBES="$TMPDIR/cubes_3d.h5"
+    echo "Staging cube cache to local scratch: $LOCAL_CUBES"
+    t0=$(date +%s)
+    cp "$PROJECT_CUBES" "$LOCAL_CUBES"
+    echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
+    export CUBES_CACHE="$LOCAL_CUBES"
 else
-    echo "LOCAL_SCRATCH=no: reading cubes from project FS."
-    export CUBES_CACHE="$PROJECT_CUBES"
+    export CUBES_CACHE="${CUBES_CACHE:-$PROJECT_CUBES}"
 fi
 
 # --- Distributed master coordinates -----------------------------------------

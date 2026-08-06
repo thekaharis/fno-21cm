@@ -18,8 +18,8 @@
 #     loudly (0 matched keys), which is the right behavior -- it's safer
 #     than silently loading a partial checkpoint.
 #
-#   * CHECKPOINT points at ./checkpoints_3d_ufno_v3_anisoz/, not the v1
-#     ./checkpoints_3d_ufno/.
+#   * CHECKPOINT points at ./checkpoints/checkpoints_3d_ufno_v3_anisoz/, not the v1
+#     ./checkpoints/checkpoints_3d_ufno/.
 #
 #   * VIZ_TAG=ufno-v3-anisoz so the per-run figure folder name encodes
 #     the variant (e.g. figures/ufno-v3-anisoz_20260607-..._jobNNN/),
@@ -78,13 +78,13 @@ export N_MODES_Z=32
 export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
-export CHECKPOINT_DIR=./checkpoints_3d_ufno_v3_anisoz
+export CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v3_anisoz
 export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-anisoz
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

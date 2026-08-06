@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from util.neuralop_setup import prefer_local_neuralop
@@ -27,6 +28,7 @@ from torch.utils.data import Subset
 import neuralop as _neuralop
 print(f"[visualize_3d] using neuralop from {_neuralop.__file__}")
 
+from dataset import paths
 from dataset.dataset_3d import (
     InputFeatures,
     LightconeCubeDataset,
@@ -97,7 +99,7 @@ UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
 FIGURES_BASE = Path("figures")
 
 # Tag used for the per-run figures folder + run_info breadcrumb.  Defaults
-# to MODEL_KIND ("fno"/"ufno") for back-compat with the v1 / v2 sbatches.
+# to MODEL_KIND for backward compatibility with older sbatches.
 # For v3 (D/E/F) variants, the matching viz sbatch sets VIZ_TAG explicitly
 # so figures land in e.g. ``figures/ufno-v3-anisoz_<timestamp>_job...`` --
 # essential when several variants' renders pile up in figures/ side by
@@ -107,7 +109,7 @@ VIZ_TAG = os.environ.get("VIZ_TAG", MODEL_KIND)
 # Data source: prefer the pre-built cube cache if it exists, otherwise stream
 # from raw lightcones.  Must match what training used so the deterministic
 # split (driven by len(dataset) + SPLIT_SEED) lines up.
-CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", "cubes_3d.h5"))
+CUBES_CACHE = Path(os.environ.get("CUBES_CACHE", paths.CUBES))
 DATA_DIR = Path(os.environ.get("LIGHTCONE_DIR", "data"))
 FILE_GLOB = "21cmfast_11d_sample*.h5"
 
@@ -170,6 +172,7 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
         f"timestamp:    {ts}",
         f"job_id:       {job_id or '(local, no SLURM)'}",
         f"MODEL_KIND:   {MODEL_KIND}",
+        f"MODEL:        {MODEL_CONFIG.describe()}",
         f"CHECKPOINT:   {CHECKPOINT}",
         f"CKPT_TYPE:    {CHECKPOINT_TYPE}",
         f"CKPT_EPOCH:   {CHECKPOINT_EPOCH}",
@@ -188,7 +191,13 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
 
 
 # ------------------------------------------------------------------ helpers
-def load_model(in_channels: int = 2) -> torch.nn.Module:
+def load_model(
+    in_channels: int = 2,
+    *,
+    checkpoint: str | Path | None = None,
+    model_config: ModelConfig | None = None,
+    device: str | torch.device | None = None,
+) -> torch.nn.Module:
     """Reconstruct the FNO architecture and load the latest checkpoint.
 
     Robust to multiple checkpoint formats:
@@ -204,15 +213,31 @@ def load_model(in_channels: int = 2) -> torch.nn.Module:
     ``dataset.in_channels`` from the caller so parameter-conditioned runs
     (where in_channels=13) load the correct lifting layer.
     """
-    model = TrainerModel(build_3d_model(MODEL_CONFIG, in_channels))
-    report = load_checkpoint(model, CHECKPOINT)
+    checkpoint_path = Path(checkpoint) if checkpoint is not None else CHECKPOINT
+    config = model_config
+    if config is None and checkpoint is not None:
+        metadata = load_run_metadata(checkpoint_path.parent)
+        if metadata and "model_config" in metadata:
+            config = ModelConfig.from_dict(metadata["model_config"])
+    config = config or MODEL_CONFIG
+    if config.is_local_global and "LOCALFNO_PATCH_CHUNK_SIZE" in os.environ:
+        # Chunk size changes execution memory only, not learned parameters.
+        config = replace(
+            config,
+            localfno_patch_chunk_size=int(
+                os.environ["LOCALFNO_PATCH_CHUNK_SIZE"]
+            ),
+        )
+    target_device = device or DEVICE
+    model = TrainerModel(build_3d_model(config, in_channels))
+    report = load_checkpoint(model, checkpoint_path)
     print(f"[load_model] transform: {report.transform!r}; "
           f"matched {report.matched}/{report.total} model params "
-          f"(in_channels={in_channels})")
+          f"(kind={config.kind}, in_channels={in_channels})")
     if report.missing:
         print(f"[load_model] WARNING: {len(report.missing)} parameters left at "
               f"random init: {sorted(report.missing)[:3]}...")
-    return model.to(DEVICE).eval()
+    return model.to(target_device).eval()
 
 
 def predict_cube(model, sample) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

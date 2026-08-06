@@ -26,11 +26,12 @@ import neuralop as _neuralop
 print(f"[visualize] using neuralop from {_neuralop.__file__}")
 
 from dataset.dataset import SliceCache, split_by_cone
+from dataset import paths
 from modeling import TrainerModel, load_checkpoint
 
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints/model_state_dict.pt"
-CACHE_FILE = Path("trainset.h5")
+CACHE_FILE = paths.TRAINSET
 FIGURES_DIR = Path("figures")
 N_SLICES_PER_SPLIT = 4
 

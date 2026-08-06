@@ -136,11 +136,18 @@ def _ufno_quadrant_profiles(
 def extract_spectral_weight_profiles(
     model: nn.Module,
 ) -> list[SpectralWeightProfile]:
-    """Summarize each FNO/U-FNO spectral layer by absolute mode index."""
+    """Summarize each FNO/U-FNO/SirenFNO layer by absolute mode index."""
     profiles: list[SpectralWeightProfile] = []
     root = _unwrap_model(model)
 
     for name, module in root.named_modules():
+        generated_weights = getattr(module, "spectral_weight_tensors", None)
+        if callable(generated_weights):
+            tensors = generated_weights()
+            x, y, z, shell = _ufno_quadrant_profiles(tensors)
+            profiles.append(SpectralWeightProfile(name, x, y, z, shell))
+            continue
+
         # NeuralOperator SpectralConv. Dense and factorized tensors both
         # expose to_tensor(), so the analysis does not depend on storage form.
         weight = getattr(module, "weight", None)
@@ -161,7 +168,7 @@ def extract_spectral_weight_profiles(
             profiles.append(SpectralWeightProfile(name, x, y, z, shell))
 
     if not profiles:
-        raise ValueError("No FNO or U-FNO spectral weight layers were found")
+        raise ValueError("No FNO, U-FNO, or SirenFNO spectral layers were found")
     return profiles
 
 
@@ -184,12 +191,14 @@ class SpectralWeightHistory:
     def record(self, epoch: int) -> None:
         profiles = extract_spectral_weight_profiles(self.model)
         layers = np.asarray([profile.layer for profile in profiles], dtype=str)
-        current = {
-            axis: np.stack(
-                [getattr(profile, axis) for profile in profiles], axis=0
-            ).astype(np.float32)
-            for axis in ("x", "y", "z", "shell")
-        }
+        current = {}
+        for axis in ("x", "y", "z", "shell"):
+            values = [getattr(profile, axis) for profile in profiles]
+            width = max(len(value) for value in values)
+            padded = np.full((len(values), width), np.nan, dtype=np.float32)
+            for index, value in enumerate(values):
+                padded[index, :len(value)] = value
+            current[axis] = padded
 
         if self.path.exists():
             with np.load(self.path, allow_pickle=False) as saved:

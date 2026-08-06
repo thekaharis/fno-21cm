@@ -93,7 +93,7 @@ export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
 # If this file exists, fno_21cm_3d.py and viz/visualize_3d.py use it directly --
 # ~10x faster than streaming the raw lightcones.  If it doesn't exist yet,
 # the scripts auto-fall-back to streaming from LIGHTCONE_DIR.
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # Stage cube cache on local NVMe scratch (28 TB on the H200 node) so reads
 # go at ~3 GB/s local instead of through the shared project FS.  One-time
@@ -101,26 +101,14 @@ PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
 # Set LOCAL_SCRATCH=no in the env to skip.
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 if [ "$LOCAL_SCRATCH" = "yes" ]; then
-    SCRATCH_BASE=""
-    for candidate in "${TMPDIR:-}" "/scratch/${SLURM_JOB_ID}" "/local/${SLURM_JOB_ID}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ]; then
-            SCRATCH_BASE="$candidate"; break
-        fi
-    done
-    if [ -n "$SCRATCH_BASE" ]; then
-        LOCAL_CUBES="$SCRATCH_BASE/cubes_3d.h5"
-        echo "Staging cube cache to local NVMe: $LOCAL_CUBES"
-        t0=$(date +%s)
-        cp --reflink=auto "$PROJECT_CUBES" "$LOCAL_CUBES" || cp "$PROJECT_CUBES" "$LOCAL_CUBES"
-        echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
-        export CUBES_CACHE="$LOCAL_CUBES"
-    else
-        echo "No local scratch detected (TMPDIR/scratch unset); reading cubes from project FS."
-        export CUBES_CACHE="$PROJECT_CUBES"
-    fi
+    LOCAL_CUBES="$TMPDIR/cubes_3d.h5"
+    echo "Staging cube cache to local scratch: $LOCAL_CUBES"
+    t0=$(date +%s)
+    cp "$PROJECT_CUBES" "$LOCAL_CUBES"
+    echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
+    export CUBES_CACHE="$LOCAL_CUBES"
 else
-    echo "LOCAL_SCRATCH=no: reading cubes from project FS."
-    export CUBES_CACHE="$PROJECT_CUBES"
+    export CUBES_CACHE="${CUBES_CACHE:-$PROJECT_CUBES}"
 fi
 
 # --- Diagnostics (captured in the .out log) ---------------------------------

@@ -55,13 +55,13 @@ export N_MODES_Z=32
 export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
-export CHECKPOINT_DIR=./checkpoints_3d_ufno_v3_globalres
+export CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v3_globalres
 export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-globalres
 
 # --- Data paths -------------------------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+export CUBES_CACHE=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 # --- Diagnostics ------------------------------------------------------------
 echo "================ job environment ================"

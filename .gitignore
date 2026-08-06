@@ -1,6 +1,13 @@
 # --- Large / external content (never upload) ---------------------------------
-# 21cmFAST lightcone HDF5 files (~13 GB)
+# 21cmFAST lightcone HDF5 files and every derived cache.
+# Datasets live in <work>/data/{data,compressed}/ -- see dataset/paths.py.
+# Nothing large belongs in the project root; /*.h5 catches strays.
 data/
+trainset*.h5*
+/*.h5
+zre_targets.h5
+zre_inputs.h5
+xhi_band*.h5
 
 # Local neuraloperator checkout — third-party library with its own git history.
 # Install via conda/pip, or clone https://github.com/neuraloperator/neuraloperator

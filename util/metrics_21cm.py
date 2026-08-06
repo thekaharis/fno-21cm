@@ -6,6 +6,145 @@ import numpy as np
 from scipy import ndimage
 
 
+def trace_ray_to_neutral_2d(
+    ionized_mask: np.ndarray,
+    start_xy: tuple[float, float],
+    direction_xy: tuple[float, float],
+    cell_size_mpc: tuple[float, float],
+    max_distance_mpc: float,
+) -> float:
+    """Trace one periodic transverse ray to the first neutral cell.
+
+    The ray starts at continuous cell coordinates ``start_xy`` inside an
+    ionized cell. ``direction_xy`` is interpreted in physical coordinates and
+    normalized internally. A 2-D digital differential analyzer advances
+    exactly from cell boundary to cell boundary, so the result does not depend
+    on an arbitrary ray-marching step size.
+
+    Returns ``NaN`` when no neutral cell is encountered before
+    ``max_distance_mpc``. This is a right-censored ray, as occurs for a
+    percolating or fully ionized slice.
+    """
+    mask = np.asarray(ionized_mask, dtype=bool)
+    if mask.ndim != 2 or not all(size > 0 for size in mask.shape):
+        raise ValueError("ionized_mask must be a non-empty 2-D array")
+    sx, sy = (float(value) for value in start_xy)
+    ux, uy = (float(value) for value in direction_xy)
+    dx, dy = (float(value) for value in cell_size_mpc)
+    max_distance = float(max_distance_mpc)
+    if not np.all(np.isfinite([sx, sy, ux, uy, dx, dy, max_distance])):
+        raise ValueError("ray inputs and distances must be finite")
+    if dx <= 0 or dy <= 0:
+        raise ValueError("cell sizes must be positive")
+    if max_distance <= 0:
+        raise ValueError("max_distance_mpc must be positive")
+    norm = float(np.hypot(ux, uy))
+    if norm == 0:
+        raise ValueError("direction_xy must be non-zero")
+    ux, uy = ux / norm, uy / norm
+
+    nx, ny = mask.shape
+    sx %= nx
+    sy %= ny
+    ix, iy = int(np.floor(sx)), int(np.floor(sy))
+    if not mask[ix, iy]:
+        raise ValueError("ray must start inside an ionized cell")
+
+    # Grid-coordinate velocities per physical Mpc; traversal time is therefore
+    # already the desired comoving distance.
+    vx, vy = ux / dx, uy / dy
+
+    def axis_state(position: float, index: int, velocity: float):
+        if velocity > 0:
+            return 1, (index + 1.0 - position) / velocity, 1.0 / velocity
+        if velocity < 0:
+            speed = -velocity
+            return -1, (position - index) / speed, 1.0 / speed
+        return 0, np.inf, np.inf
+
+    step_x, next_x, delta_x = axis_state(sx, ix, vx)
+    step_y, next_y, delta_y = axis_state(sy, iy, vy)
+
+    while True:
+        distance = min(next_x, next_y)
+        if distance > max_distance:
+            return float("nan")
+
+        # Ties are corner crossings. Advancing both axes chooses the diagonal
+        # cell, which is the limiting cell for almost every direction; exact
+        # ties have zero probability under isotropic random angles.
+        tolerance = 1e-12 * max(1.0, distance)
+        if next_x <= distance + tolerance:
+            ix = (ix + step_x) % nx
+            next_x += delta_x
+        if next_y <= distance + tolerance:
+            iy = (iy + step_y) % ny
+            next_y += delta_y
+        if not mask[ix, iy]:
+            return float(distance)
+
+
+def mean_free_path_samples_2d(
+    ionized_mask: np.ndarray,
+    n_rays: int,
+    cell_size_mpc: tuple[float, float],
+    max_distance_mpc: float,
+    seed: int | np.random.SeedSequence | None = None,
+) -> dict:
+    """Sample a transverse mean-free-path bubble-size distribution.
+
+    Starting cells are sampled uniformly over ionized area, sub-cell starting
+    positions are uniform, and ray directions are isotropic. This makes the
+    resulting distance distribution ionized-area weighted, matching the usual
+    MFP bubble-size estimator. Transverse boundaries are periodic.
+
+    The returned ``distances_mpc`` contains only boundary hits. Censored rays
+    are reported separately and should be retained as an overflow category
+    when comparing distributions.
+    """
+    mask = np.asarray(ionized_mask, dtype=bool)
+    if mask.ndim != 2:
+        raise ValueError("ionized_mask must be 2-D")
+    n_rays = int(n_rays)
+    if n_rays < 0:
+        raise ValueError("n_rays must be non-negative")
+    cells = np.argwhere(mask)
+    if n_rays == 0 or cells.size == 0:
+        return {
+            "distances_mpc": np.empty(0, dtype=np.float64),
+            "n_requested": n_rays,
+            "n_started": 0,
+            "n_hit": 0,
+            "n_censored": 0,
+            "ionized_fraction": float(mask.mean()),
+        }
+
+    rng = np.random.default_rng(seed)
+    chosen = cells[rng.integers(0, len(cells), size=n_rays)]
+    offsets = rng.random((n_rays, 2))
+    angles = rng.uniform(0.0, 2.0 * np.pi, size=n_rays)
+    distances = np.empty(n_rays, dtype=np.float64)
+    for index in range(n_rays):
+        start = chosen[index].astype(np.float64) + offsets[index]
+        direction = (np.cos(angles[index]), np.sin(angles[index]))
+        distances[index] = trace_ray_to_neutral_2d(
+            mask,
+            (float(start[0]), float(start[1])),
+            direction,
+            cell_size_mpc,
+            max_distance_mpc,
+        )
+    hit = np.isfinite(distances)
+    return {
+        "distances_mpc": distances[hit],
+        "n_requested": n_rays,
+        "n_started": n_rays,
+        "n_hit": int(hit.sum()),
+        "n_censored": int((~hit).sum()),
+        "ionized_fraction": float(mask.mean()),
+    }
+
+
 def find_low_z_cutoff_index(
     history: np.ndarray,
     target_z: np.ndarray,

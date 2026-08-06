@@ -23,7 +23,7 @@
 # anisotropic-Z effect from the v2 changes -- but the cleaner ablation is
 # v1 -> v3-anisoz comparison, holding everything except UFNO_UNET_VARIANT.
 #
-# Distinct CHECKPOINT_DIR (./checkpoints_3d_ufno_v3_anisoz) so this run
+# Distinct CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno_v3_anisoz) so this run
 # doesn't collide with v1, v2, or the other Tier 2 variants.
 # =============================================================================
 
@@ -73,34 +73,22 @@ export LOSS_L2_WEIGHT=0.3
 export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints_3d_ufno_v3_anisoz}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v3_anisoz}"
 
 # --- Data paths + NVMe staging ---------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data
-PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/data/cubes_3d.h5
+PROJECT_CUBES=/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5
 
 LOCAL_SCRATCH="${LOCAL_SCRATCH:-yes}"
 if [ "$LOCAL_SCRATCH" = "yes" ]; then
-    SCRATCH_BASE=""
-    for candidate in "${TMPDIR:-}" "/scratch/${SLURM_JOB_ID}" "/local/${SLURM_JOB_ID}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ]; then
-            SCRATCH_BASE="$candidate"; break
-        fi
-    done
-    if [ -n "$SCRATCH_BASE" ]; then
-        LOCAL_CUBES="$SCRATCH_BASE/cubes_3d.h5"
-        echo "Staging cube cache to local NVMe: $LOCAL_CUBES"
-        t0=$(date +%s)
-        cp --reflink=auto "$PROJECT_CUBES" "$LOCAL_CUBES" || cp "$PROJECT_CUBES" "$LOCAL_CUBES"
-        echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
-        export CUBES_CACHE="$LOCAL_CUBES"
-    else
-        echo "No local scratch detected; reading cubes from project FS."
-        export CUBES_CACHE="$PROJECT_CUBES"
-    fi
+    LOCAL_CUBES="$TMPDIR/cubes_3d.h5"
+    echo "Staging cube cache to local scratch: $LOCAL_CUBES"
+    t0=$(date +%s)
+    cp "$PROJECT_CUBES" "$LOCAL_CUBES"
+    echo "  staged ($(du -h "$LOCAL_CUBES" | cut -f1)) in $(( $(date +%s) - t0 ))s"
+    export CUBES_CACHE="$LOCAL_CUBES"
 else
-    echo "LOCAL_SCRATCH=no: reading cubes from project FS."
-    export CUBES_CACHE="$PROJECT_CUBES"
+    export CUBES_CACHE="${CUBES_CACHE:-$PROJECT_CUBES}"
 fi
 
 export MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
