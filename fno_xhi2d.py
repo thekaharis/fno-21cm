@@ -53,6 +53,7 @@ from losses import (
     BinaryCrossEntropyTerm,
     H1Seminorm,
     ExponentialWallDistance,
+    GranulometrySpectrum,
     HighKPowerRatio,
     ScheduledWeightedLoss,
     SlicedWassersteinEdges,
@@ -109,6 +110,13 @@ LOSS_H1SEMI_WEIGHT = float(os.environ.get("LOSS_H1SEMI_WEIGHT", "0.0"))
 # Median-seeking, so it does not hedge the way L2/BCE do; EXPWALL_SCALE sets
 # how fast the penalty grows with distance from the true wall.
 LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
+# Bubble-size spectrum (losses.GranulometrySpectrum). Auxiliary only: a size
+# spectrum is blind to where the bubbles are, so it needs an anchor exactly as
+# the edge terms do. Radii are in cells after BSD_DOWNSAMPLE.
+LOSS_BSD_WEIGHT = float(os.environ.get("LOSS_BSD_WEIGHT", "0.0"))
+BSD_RADII = tuple(int(v) for v in
+                  os.environ.get("BSD_RADII", "1,2,4,8").split(","))
+BSD_DOWNSAMPLE = int(os.environ.get("BSD_DOWNSAMPLE", "1"))
 EXPWALL_SCALE = float(os.environ.get("EXPWALL_SCALE", "8.0"))
 H1SEMI_CAP = os.environ.get("H1SEMI_CAP", "")
 # Output contrast map (contrast.py): off | global | head | xhi.
@@ -170,6 +178,7 @@ def build_losses():
         LOSS_L2_WEIGHT, LOSS_H1_WEIGHT, LOSS_BCE_WEIGHT,
         LOSS_SWD_WEIGHT, LOSS_HIGHK_WEIGHT,
         LOSS_WALL_WEIGHT, LOSS_H1SEMI_WEIGHT, LOSS_EXPWALL_WEIGHT,
+        LOSS_BSD_WEIGHT,
     )
     if all(weight <= 0 for weight in weights):
         raise ValueError("at least one loss weight must be positive")
@@ -181,6 +190,14 @@ def build_losses():
     wall = WallPlacementLoss(cap=WALL_CAP)
     h1semi = H1Seminorm(cap=float(H1SEMI_CAP) if H1SEMI_CAP else None)
     expwall = ExponentialWallDistance(scale=EXPWALL_SCALE, cap=WALL_CAP)
+    bsd = GranulometrySpectrum(radii=BSD_RADII, downsample=BSD_DOWNSAMPLE,
+                               max_slices=None)
+    if LOSS_BSD_WEIGHT > 0 and LOSS_L2_WEIGHT <= 0 and LOSS_EXPWALL_WEIGHT <= 0:
+        raise ValueError(
+            "LOSS_BSD_WEIGHT needs an anchor: set LOSS_L2_WEIGHT or "
+            "LOSS_EXPWALL_WEIGHT as well. A bubble-size spectrum is invariant "
+            "to translation and constrains neither level nor position."
+        )
     training = ScheduledWeightedLoss(
         (LOSS_L2_WEIGHT, l2),
         (LOSS_H1_WEIGHT, h1),
@@ -190,14 +207,15 @@ def build_losses():
         (LOSS_WALL_WEIGHT, wall),
         (LOSS_H1SEMI_WEIGHT, h1semi),
         (LOSS_EXPWALL_WEIGHT, expwall),
-        warmup_terms=(3, 4),
+        (LOSS_BSD_WEIGHT, bsd),
+        warmup_terms=(3, 4, 8),
         warmup_epochs=LOSS_EDGE_WARMUP_EPOCHS,
         term_names=("l2", "h1", "bce", "swd", "highk", "wall", "h1semi",
-                    "expwall"),
+                    "expwall", "bsd"),
     )
     return training, {
         "l2": l2, "h1": h1, "bce": bce, "swd": swd, "highk": highk,
-        "wall": wall, "h1semi": h1semi, "expwall": expwall,
+        "wall": wall, "h1semi": h1semi, "expwall": expwall, "bsd": bsd,
     }
 
 

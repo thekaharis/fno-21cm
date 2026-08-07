@@ -255,13 +255,13 @@ class MetricsTrainer(Trainer):
                 if key in self._schedule_stats:
                     row[f"contrast_{key}"] = list(self._schedule_stats[key])
         if hasattr(training_loss, "active_weights"):
-            active = training_loss.active_weights
-            row.update(
-                active_l2_weight=float(active[0]),
-                active_h1_weight=float(active[1]),
-                active_bce_weight=float(active[2]),
-                active_ionized_wall_weight=float(active[3]),
-            )
+            # Keyed by term name, not position. The three entry points use
+            # different term orders -- the 2-D stack has swd at index 3 where
+            # the 3-D one has ionized_wall -- so positional logging silently
+            # mislabels the weights, and crashes outright on a shorter stack.
+            names = getattr(training_loss, "term_names", ())
+            for name, weight in zip(names, training_loss.active_weights):
+                row[f"active_{name}_weight"] = float(weight)
         if hasattr(training_loss, "pop_term_means"):
             # Raw per-term losses; the weights above make each term's weighted
             # contribution reconstructable. Terms skipped by a zero weight

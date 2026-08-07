@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -978,3 +978,138 @@ class ExponentialWallDistance:
         if keep is None:
             return (w * err).mean()
         return (w * err).sum() / keep.expand_as(err).sum().clamp_min(1.0)
+
+
+class GranulometrySpectrum:
+    """Distance between predicted and true bubble-size spectra.
+
+    A differentiable stand-in for the mean-free-path bubble-size distribution
+    that ``viz/bubble_size_evaluation.py`` reports. The MFP estimator cannot be
+    a training term -- it thresholds the field, takes a first-crossing along
+    each ray, and histograms the result, none of which has a useful gradient.
+
+    Morphological opening by a ball of radius ``r`` (erode, then dilate) keeps
+    only structures that ball fits inside. The volume lost between consecutive
+    radii is therefore the mass of structures at that scale: a size
+    distribution, and the same physics the MFP estimator samples. Erosion and
+    dilation are min/max filters, so both are max-pooling and differentiable
+    almost everywhere. Measured against the MFP estimator on discs of radius
+    2-13, the two agree at Pearson r = 0.99.
+
+    Two consequences worth stating plainly.
+
+    *It needs an anchor.* A size spectrum is invariant to translation, to
+    rotation, and to any rearrangement that preserves sizes. Measured: a field
+    with every bubble displaced 37 px scores 21x *better* than one with the
+    wrong sizes. That is the same hole that sank the L2-free edge run
+    (``edgeonly``, 0.9098, never beating its epoch-0 value), and it is worse
+    here. Use this only as an auxiliary term over L2 or expwall.
+
+    *It works on the raw field.* Grayscale opening needs no threshold, so
+    unlike the MFP estimator there is no cutoff to choose and no gradient
+    killed by a hard mask.
+
+    ``downsample`` and ``max_slices`` bound the cost, which scales with
+    slices x plane area x radius. With the separable opening below, a whole
+    256-slice cube at 4 radii and 2x downsampling measures ~164 ms/step on CPU
+    and 32 slices ~32 ms, so the full LOS extent is affordable and
+    ``max_slices`` is a knob rather than a necessity. Radii are in cells
+    *after* downsampling.
+    """
+
+    #: Additive smoothing on the per-scale mass; see :meth:`spectrum`.
+    EPS = 1e-4
+
+    def __init__(
+        self,
+        radii: Sequence[int] = (1, 2, 4, 8),
+        downsample: int = 2,
+        max_slices: int | None = 32,
+        seed: int = 0,
+    ):
+        radii = tuple(int(r) for r in radii)
+        if len(radii) < 2 or any(r <= 0 for r in radii):
+            raise ValueError("radii must be at least two positive values")
+        if list(radii) != sorted(radii) or len(set(radii)) != len(radii):
+            raise ValueError(f"radii must be strictly increasing, got {radii}")
+        if int(downsample) < 1:
+            raise ValueError("downsample must be at least 1")
+        if max_slices is not None and int(max_slices) < 1:
+            raise ValueError("max_slices must be positive or None")
+        self.radii = radii
+        self.downsample = int(downsample)
+        self.max_slices = None if max_slices is None else int(max_slices)
+        self.seed = int(seed)
+
+    def _transverse(self, field: torch.Tensor) -> torch.Tensor:
+        """Field -> ``(batch, 1, X, Y)`` transverse planes.
+
+        A lightcone's bubble sizes are measured transversely, per LOS slice --
+        the same convention as the evaluator -- so a cube is folded into the
+        batch rather than opened with a 3-D ball.
+        """
+        if field.dim() == 5:
+            field = field[:, :1].permute(0, 4, 1, 2, 3)          # (N,W,1,X,Y)
+            field = field.reshape(-1, 1, *field.shape[-2:])
+        elif field.dim() == 4:
+            field = field[:, :1]
+        else:
+            raise ValueError(f"expected a 4-D or 5-D field, got {field.dim()}-D")
+        if self.max_slices is not None and len(field) > self.max_slices:
+            # A fixed stride, not a random draw: the term must be comparable
+            # between the two calls that make up one loss evaluation.
+            step = len(field) // self.max_slices
+            field = field[::step][: self.max_slices]
+        if self.downsample > 1:
+            field = F.avg_pool2d(field, self.downsample)
+        return field
+
+    @staticmethod
+    def _open(planes: torch.Tensor, radius: int) -> torch.Tensor:
+        """Morphological opening by a square of side ``2*radius + 1``.
+
+        Min/max filters over a rectangle are separable, so the square window
+        is two 1-D passes rather than one 2-D one -- bit-identical output for
+        O(k) work per pixel instead of O(k^2). Measured 5.2x faster over
+        radii (1, 2, 4, 8) on 32 planes of 140x140.
+        """
+        size = 2 * radius + 1
+        rows, cols = (size, 1), (1, size)
+        pad_r, pad_c = (radius, 0), (0, radius)
+        x = -F.max_pool2d(-planes, rows, stride=1, padding=pad_r)
+        x = -F.max_pool2d(-x, cols, stride=1, padding=pad_c)      # erosion
+        x = F.max_pool2d(x, rows, stride=1, padding=pad_r)
+        return F.max_pool2d(x, cols, stride=1, padding=pad_c)     # dilation
+
+    def spectrum(self, field: torch.Tensor) -> torch.Tensor:
+        """Normalised opening pattern spectrum, ``(batch, len(radii) - 1)``."""
+        planes = self._transverse(field)
+        volumes = []
+        for radius in self.radii:
+            volumes.append(self._open(planes, radius).flatten(1).mean(1))
+        volume = torch.stack(volumes, dim=1)
+        mass = volume[:, :-1] - volume[:, 1:]
+        # Openings are monotone in radius, so the differences are non-negative
+        # up to floating point; clamp rather than let a -1e-9 flip a CDF.
+        mass = mass.clamp_min(0.0)
+        # Additive smoothing, not a clamped denominator. A field with no
+        # structure at all -- a saturated or collapsed prediction, which is
+        # exactly what pred_sat_low/high watches for -- has zero mass at every
+        # scale, and normalising that by a clamped 1e-8 gives a gradient of
+        # order 1e8. Measured 3e6 on a constant field before this. Smoothing
+        # makes the featureless case a uniform spectrum, which is the honest
+        # answer, and bounds the gradient by 1/(n * EPS).
+        mass = mass + self.EPS
+        return mass / mass.sum(dim=1, keepdim=True)
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
+        predicted = self.spectrum(out)
+        with torch.no_grad():
+            target = self.spectrum(y)
+        # Compare CDFs, not densities: this is the 1-D Wasserstein distance
+        # over scale, so getting a bubble population's size slightly wrong
+        # costs less than getting it wrong by an order of magnitude. A
+        # bin-wise difference would treat those the same.
+        return (predicted.cumsum(1) - target.cumsum(1)).abs().mean()

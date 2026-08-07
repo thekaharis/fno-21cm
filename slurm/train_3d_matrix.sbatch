@@ -2,7 +2,7 @@
 # One sbatch for the 3-D architecture x loss matrix, 50 epochs each.
 #
 #   ARCH  ufno | fno_whno | wno_whno | whno_whno
-#   LOSS  plain | expwall | hybrid | expwall_theta
+#   LOSS  plain | expwall | hybrid | expwall_theta | bsd
 #
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=hybrid slurm/train_3d_matrix.sbatch
 #
@@ -62,7 +62,7 @@ conda activate fno-env
 export PYTHONUNBUFFERED=1
 
 ARCH="${ARCH:?set ARCH to ufno|fno_whno|wno_whno|whno_whno}"
-LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta}"
+LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta|bsd}"
 
 # ---- architecture ------------------------------------------------------
 case "$ARCH" in
@@ -113,6 +113,16 @@ case "$LOSS" in
   hybrid)
     export LOSS_L2_WEIGHT=1.0 LOSS_EXPWALL_WEIGHT="${EXPWALL_HYBRID_W:-30.0}"
     export EXPWALL_WARMUP_EPOCHS="${EXPWALL_WARMUP_EPOCHS:-5}" ;;
+  bsd)
+    # BSD is auxiliary by construction: a size spectrum is blind to where the
+    # bubbles are, so it rides on the expwall anchor rather than replacing it.
+    export LOSS_L2_WEIGHT=1.0 LOSS_EXPWALL_WEIGHT="${EXPWALL_HYBRID_W:-30.0}"
+    export EXPWALL_WARMUP_EPOCHS="${EXPWALL_WARMUP_EPOCHS:-5}"
+    export LOSS_BSD_WEIGHT="${LOSS_BSD_WEIGHT:-1.0}"
+    export BSD_WARMUP_EPOCHS="${BSD_WARMUP_EPOCHS:-5}"
+    export BSD_RADII="${BSD_RADII:-1,2,4,8}"
+    export BSD_DOWNSAMPLE="${BSD_DOWNSAMPLE:-2}"
+    export BSD_MAX_SLICES="${BSD_MAX_SLICES:-64}" ;;
   expwall_theta)
     export LOSS_L2_WEIGHT=0.0 LOSS_EXPWALL_WEIGHT=1.0
     export EXPWALL_WARMUP_EPOCHS=0
@@ -155,6 +165,7 @@ echo "============ 3-D matrix: ARCH=$ARCH  LOSS=$LOSS ============"
 echo "MODEL_KIND:   $MODEL_KIND ${LOCAL_OPERATOR:+($LOCAL_OPERATOR local / $GLOBAL_OPERATOR global)}"
 echo "LOSS:         L2=$LOSS_L2_WEIGHT expwall=$LOSS_EXPWALL_WEIGHT"
 echo "              scale=$EXPWALL_SCALE cap=$WALL_CAP warmup=$EXPWALL_WARMUP_EPOCHS"
+echo "BSD:          ${LOSS_BSD_WEIGHT:-0} radii=${BSD_RADII:--} down=${BSD_DOWNSAMPLE:--} slices=${BSD_MAX_SLICES:--}"
 echo "              axes=${EXPWALL_AXES:-3d}"
 echo "CONTRAST:     ${CONTRAST_MODE:-off} ${CONTRAST_SCHEDULE_KIND:+/$CONTRAST_SCHEDULE_KIND}${CONTRAST_KEY:+ key=$CONTRAST_KEY}"
 echo "EPOCHS:       $N_EPOCHS"

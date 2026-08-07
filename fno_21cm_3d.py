@@ -51,6 +51,7 @@ from losses import (
     BinaryCrossEntropyTerm,
     IonizedWallRMSE,
     ExponentialWallDistance,
+    GranulometrySpectrum,
     LightconeH1Loss,
     LOSVolumeWeightedLoss,
     RelativeLoss,
@@ -173,6 +174,18 @@ LOSS_EXPWALL_WEIGHT = float(os.environ.get("LOSS_EXPWALL_WEIGHT", "0.0"))
 # 85.8 once the prediction is merely blurred. A fixed weight therefore either
 # swamps L2 early or vanishes late; the ramp lets L2 establish structure first.
 EXPWALL_WARMUP_EPOCHS = int(os.environ.get("EXPWALL_WARMUP_EPOCHS", "0"))
+# Bubble-size spectrum (losses.GranulometrySpectrum): a differentiable stand-in
+# for the MFP bubble-size distribution the evaluator reports. Auxiliary only --
+# a size spectrum is blind to where the bubbles are, so it needs an L2 or
+# expwall anchor exactly as the edge terms do. Radii are in cells after
+# BSD_DOWNSAMPLE. With separable openings a full 256-slice cube at 4 radii and
+# 2x downsampling costs ~164 ms/step on CPU; 32 slices ~32 ms.
+LOSS_BSD_WEIGHT = float(os.environ.get("LOSS_BSD_WEIGHT", "0.0"))
+BSD_RADII = tuple(int(v) for v in
+                  os.environ.get("BSD_RADII", "1,2,4,8").split(","))
+BSD_DOWNSAMPLE = int(os.environ.get("BSD_DOWNSAMPLE", "2"))
+BSD_MAX_SLICES = int(os.environ.get("BSD_MAX_SLICES", "64"))
+BSD_WARMUP_EPOCHS = int(os.environ.get("BSD_WARMUP_EPOCHS", "0"))
 # Output contrast map (contrast.py), same machinery as the 2-D trainer. In 3-D
 # theta is indexed per line-of-sight slice, not per cube: a cube spans the whole
 # reionisation history, so one mean per cube averages x_HI ~ 0 and x_HI ~ 1
@@ -527,26 +540,43 @@ def main():
               f"(mean 1.0, {len(los_w)} slices)")
     expwall_loss = ExponentialWallDistance(scale=EXPWALL_SCALE, cap=WALL_CAP,
                                            axes=EXPWALL_AXES)
+    bsd_loss = GranulometrySpectrum(
+        radii=BSD_RADII, downsample=BSD_DOWNSAMPLE, max_slices=BSD_MAX_SLICES)
     loss_terms = (
         (LOSS_L2_WEIGHT, l2_term),
         (LOSS_H1_WEIGHT, h1_term),
         (LOSS_BCE_WEIGHT, bce_loss),
         (LOSS_IONIZED_WALL_WEIGHT, ionized_wall_loss),
         (LOSS_EXPWALL_WEIGHT, expwall_loss),
+        (LOSS_BSD_WEIGHT, bsd_loss),
     )
-    loss_term_names = ("l2", "h1", "bce", "ionized_wall", "expwall")
+    loss_term_names = ("l2", "h1", "bce", "ionized_wall", "expwall", "bsd")
+    if LOSS_BSD_WEIGHT > 0 and LOSS_L2_WEIGHT == 0 and LOSS_EXPWALL_WEIGHT == 0:
+        # Measured: a field with every bubble displaced 37 px scores 21x better
+        # than one with the wrong sizes. Without an anchor this run would go
+        # the way of edgeonly (0.9098, never beat its epoch-0 value).
+        raise SystemExit(
+            "LOSS_BSD_WEIGHT needs an anchor: set LOSS_L2_WEIGHT or "
+            "LOSS_EXPWALL_WEIGHT as well. A bubble-size spectrum is invariant "
+            "to translation and constrains neither level nor position."
+        )
     h1_warmup_epochs = {
         "fno": 0,
         "ufno": UFNO_H1_WARMUP_EPOCHS,
         "sirenfno": SIRENFNO_H1_WARMUP_EPOCHS,
     }.get(MODEL_KIND, LOCALFNO_H1_WARMUP_EPOCHS)
-    # index into loss_terms: 0 l2, 1 h1, 2 bce, 3 ionized_wall, 4 expwall
+    # index into loss_terms: 0 l2, 1 h1, 2 bce, 3 ionized_wall, 4 expwall, 5 bsd
     warmup_terms, warmup_epochs = (), 0
     if h1_warmup_epochs > 0:
         warmup_terms, warmup_epochs = (1,), h1_warmup_epochs
     if LOSS_EXPWALL_WEIGHT > 0 and EXPWALL_WARMUP_EPOCHS > 0:
         warmup_terms = tuple(sorted(set(warmup_terms) | {4}))
         warmup_epochs = max(warmup_epochs, EXPWALL_WARMUP_EPOCHS)
+    if LOSS_BSD_WEIGHT > 0 and BSD_WARMUP_EPOCHS > 0:
+        # Ramped for the same reason as expwall: the anchor should establish
+        # position before a morphology term starts pulling on sizes.
+        warmup_terms = tuple(sorted(set(warmup_terms) | {5}))
+        warmup_epochs = max(warmup_epochs, BSD_WARMUP_EPOCHS)
     if warmup_terms:
         train_loss_fn = ScheduledWeightedLoss(
             *loss_terms,
@@ -571,6 +601,7 @@ def main():
         "bce": bce_loss,
         "ionized_wall": ionized_wall_loss,
         "expwall": expwall_loss,
+        "bsd": bsd_loss,
     }
 
     # -------------------------------------------- 7. trainer
@@ -716,6 +747,7 @@ def main():
                 "bce": LOSS_BCE_WEIGHT,
                 "ionized_wall": LOSS_IONIZED_WALL_WEIGHT,
                 "expwall": LOSS_EXPWALL_WEIGHT,
+                "bsd": LOSS_BSD_WEIGHT,
                 "expwall_warmup_epochs": EXPWALL_WARMUP_EPOCHS,
             },
             "loss_modes": {
