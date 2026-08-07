@@ -64,8 +64,40 @@ from modeling import (
     build_model,
     load_checkpoint,
 )
+from contrast import ContrastComposed
 from util.metrics_21cm import compute_physical_metrics
 from util.run_metadata import load_run_metadata, resolve_checkpoint
+
+
+def _contrast_spec(checkpoint_path) -> dict | None:
+    """Detect a saved contrast wrapper and recover enough to rebuild it.
+
+    A run trained with CONTRAST_MODE!=off saves ``fno.base.*`` plus
+    ``fno.contrast.*``, so an unwrapped model matches zero keys and
+    ``load_checkpoint`` fails loudly.  run_metadata.json does not record the
+    contrast settings, so the shape of the saved schedule is the only source:
+    ``n_bins`` from the table length, and stepped-vs-sigmoid from whether bin
+    edges were saved at all.
+
+    ``key_mode`` is *not* recoverable from weights -- it changes the forward
+    pass, not the parameters -- so it follows CONTRAST_KEY, defaulting to the
+    same "monotone" the 3-D sbatch defaults to.
+    """
+    try:
+        sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception:
+        return None
+    raw = next((v for k, v in sd.items()
+                if k.endswith("contrast.schedule.raw")), None)
+    if raw is None:
+        return None
+    stepped = any(k.endswith("contrast.schedule.edges") for k in sd)
+    return {
+        "mode": os.environ.get("CONTRAST_MODE", "xhi"),
+        "schedule_kind": "stepped" if stepped else "sigmoid",
+        "n_bins": int(raw.numel()),
+        "key_mode": os.environ.get("CONTRAST_KEY", "monotone"),
+    }
 
 
 # ------------------------------------------------------- env-var switches
@@ -384,7 +416,17 @@ def load_model(
             ),
         )
     target_device = device or DEVICE
-    model = TrainerModel(build_model(config, in_channels))
+    inner = build_model(config, in_channels)
+    spec = _contrast_spec(checkpoint_path)
+    if spec is not None:
+        # The map is part of what the model outputs, so visualising the
+        # unwrapped base would show a prediction the run never made.
+        inner = ContrastComposed(inner, spec["mode"],
+                                 schedule_kind=spec["schedule_kind"],
+                                 n_bins=spec["n_bins"],
+                                 key_mode=spec["key_mode"])
+        print(f"[load_model] contrast wrapper detected: {spec}")
+    model = TrainerModel(inner)
     report = load_checkpoint(model, checkpoint_path)
     print(f"[load_model] transform: {report.transform!r}; "
           f"matched {report.matched}/{report.total} model params "
