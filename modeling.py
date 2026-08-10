@@ -83,8 +83,8 @@ def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
             "dropout": float(settings["cnn_dropout"]),
             "norm": str(settings["cnn_norm"]),
         }
-    if operator == "siren_fourier":
-        return {
+    if operator in {"siren_fourier", "siren_hadamard"}:
+        siren = {
             "hidden_dim": int(settings["siren_hidden_dim"]),
             "omega": float(settings["siren_omega"]),
             "n_hidden": int(settings["siren_n_hidden"]),
@@ -92,6 +92,11 @@ def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
             "ff_sigma": float(settings["siren_ff_sigma"]),
             "learnable_ff": bool(settings["siren_learnable_ff"]),
         }
+        if operator == "siren_hadamard":
+            # The SIREN generates the mixing weights; the Walsh basis it mixes
+            # still needs its ordering, so this slot reads both groups.
+            siren["ordering"] = str(settings["whno_ordering"])
+        return siren
     return {}
 
 

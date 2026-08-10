@@ -970,8 +970,22 @@ class ExponentialWallDistance:
                 w = w * keep
             # Normalise over the voxels that actually contribute, so dropping
             # single-phase slices rescales the loss rather than shrinking it.
-            denom = w.mean() if keep is None else w.sum() / keep.expand_as(w).sum()
+            # A cube can legitimately contain no wall at all -- cube 85 of the
+            # production cache is single-phase in all 256 slices -- and then
+            # `keep` is all zero. Without the guard that is 0/0, and the NaN
+            # propagates into w and out through the whole eval mean.
+            no_wall = False
+            if keep is None:
+                denom = w.mean()
+            else:
+                n_keep = keep.expand_as(w).sum()
+                no_wall = bool(n_keep == 0)
+                denom = w.sum() / n_keep.clamp_min(1.0)
             w = w / denom.clamp_min(1e-12)
+        if no_wall:
+            # Return through `out` so the result still carries a grad_fn --
+            # a bare constant would break backward(). Zero weight, zero grad.
+            return (out * 0.0).sum()
         err = (out - y).abs()
         if self.power != 1.0:
             err = err.clamp_min(1e-12) ** self.power

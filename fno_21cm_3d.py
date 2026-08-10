@@ -117,6 +117,10 @@ LOCALFNO_LEARNING_RATE = float(
 WEIGHT_DECAY = 1e-5
 # N_EPOCHS overridable from the sbatch (U-FNO defaults to a shorter first run).
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "100"))
+# Epochs between evaluation passes. The sbatch exports this; the definition
+# was dropped in the pipeline refactor, so every run using it died at
+# trainer construction with NameError until this was restored.
+EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "1"))
 
 # Loss term weights.  Defaults (0.5, 0.5, 0.0) match the v1 run.  All three
 # are env-var overridable so experiments don't need to edit this file:

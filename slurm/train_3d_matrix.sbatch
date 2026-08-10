@@ -1,7 +1,8 @@
 #!/bin/bash
 # One sbatch for the 3-D architecture x loss matrix, 50 epochs each.
 #
-#   ARCH  ufno | fno_whno | wno_whno | whno_whno
+#   ARCH  ufno | fno_fno | fno_whno | wno_whno | whno_whno
+#         swhno_swhno | sfno_swhno | whno_swhno   (SIREN Walsh weights)
 #   LOSS  plain | expwall | hybrid | expwall_theta | bsd
 #
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=hybrid slurm/train_3d_matrix.sbatch
@@ -61,7 +62,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-ARCH="${ARCH:?set ARCH to ufno|fno_whno|wno_whno|whno_whno}"
+ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno}"
 LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta|bsd}"
 
 # ---- architecture ------------------------------------------------------
@@ -70,9 +71,16 @@ case "$ARCH" in
               # --export=ALL can carry stale operator vars in from the calling
               # shell; an empty LOCAL_OPERATOR is a hard error in from_env().
               unset LOCAL_OPERATOR GLOBAL_OPERATOR ;;
+  fno_fno)    export MODEL_KIND=localop LOCAL_OPERATOR=fourier  GLOBAL_OPERATOR=fourier ;;
   fno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=fourier  GLOBAL_OPERATOR=hadamard ;;
   wno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=wavelet  GLOBAL_OPERATOR=hadamard ;;
   whno_whno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=hadamard ;;
+  # SIREN-generated Walsh weights: sequency is the Walsh analogue of
+  # frequency, so the same hypernetwork trick the SirenFNO applies to
+  # Fourier modes applies here (operators.SirenWalshHadamardOperator).
+  swhno_swhno) export MODEL_KIND=localop LOCAL_OPERATOR=siren_hadamard GLOBAL_OPERATOR=siren_hadamard ;;
+  sfno_swhno)  export MODEL_KIND=localop LOCAL_OPERATOR=siren_fourier  GLOBAL_OPERATOR=siren_hadamard ;;
+  whno_swhno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard       GLOBAL_OPERATOR=siren_hadamard ;;
   *) echo "unknown ARCH=$ARCH" >&2; exit 2 ;;
 esac
 
