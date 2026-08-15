@@ -29,8 +29,14 @@ OPERATOR_TAGS = {
     "siren_fourier": "sirenfno",
     "wavelet": "wno",
     "hadamard": "whno",
+    "siren_hadamard": "swhno",
     "cnn": "cnn",
 }
+# Every operator in the registry needs a tag here. checkpoint_tag looks each
+# slot up unconditionally, so a registered-but-untagged operator raises
+# KeyError at import time -- before the model is built and before any log line
+# is written, which is how three swhno runs died with no output but a
+# traceback. "siren_hadamard" was registered in operators.py without a tag.
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
