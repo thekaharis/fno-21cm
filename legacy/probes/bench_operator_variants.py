@@ -29,21 +29,34 @@ prefer_local_neuralop()
 
 import torch
 
+# These were never imported here: the script predates the pipeline
+# refactor and reached them through the now-deleted `fno_21cm` module.
+from modeling import ModelConfig, build_model
+
 IN_CHANNELS = 13          # density + 1/(1+z) + 11 cosmological parameters
 RESOLUTION = 140
 TAGS = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
-        "siren_fourier": "sirenfno", "cnn": "cnn"}
+        "siren_fourier": "sfno", "siren_hadamard": "swhno", "cnn": "cnn"}
 
 # (label, MODEL_KIND, LOCAL_OPERATOR, GLOBAL_OPERATOR)
 VARIANTS = [("FNO (plain)", "fno", None, None),
             ("U-FNO", "ufno", None, None)]
-for loc in ("fourier", "wavelet", "hadamard"):
-    for glob in ("fourier", "wavelet", "hadamard"):
+# The matrix grew from 3x3 to 4x4: siren_hadamard (SIREN-generated Walsh
+# weights) is now a first-class slot operator, and it is the global slot of the
+# strongest new cells. cnn in the local slot IS the U-FNO's U-Net path, so the
+# cnn/* row isolates the global basis at fixed local path.
+MATRIX = ("fourier", "wavelet", "hadamard", "siren_hadamard")
+for loc in MATRIX:
+    for glob in MATRIX:
         VARIANTS.append((f"local {TAGS[loc]} / global {TAGS[glob]}",
                          "localop", loc, glob))
 VARIANTS += [("local sirenfno / global sirenfno", "localop",
               "siren_fourier", "siren_fourier"),
-             ("local cnn / global fno", "localop", "cnn", "fourier")]
+             ("local sfno / global swhno", "localop",
+              "siren_fourier", "siren_hadamard"),
+             ("local cnn / global fno", "localop", "cnn", "fourier"),
+             ("local cnn / global whno", "localop", "cnn", "hadamard"),
+             ("local cnn / global swhno", "localop", "cnn", "siren_hadamard")]
 
 BASE_ENV = {
     "N_MODES_X": "32", "N_MODES_Y": "32", "HIDDEN_CHANNELS": "64",
@@ -58,9 +71,14 @@ BASE_ENV = {
 
 
 def build(kind, local_op, global_op):
-    """Rebuild fno_21cm in a subprocess-free way: its module-level config is
-    read from the environment at import, so reload it per variant."""
-    import importlib
+    """Build one variant from the environment.
+
+    This used to `import fno_21cm; importlib.reload(...)` because that module
+    read its config at import time. ModelConfig.from_env() does that now, and
+    the 2-D module was removed in the pipeline refactor -- the stale import
+    made every variant fail with ModuleNotFoundError while the run still
+    reported success and wrote an empty JSON over the previous results.
+    """
     os.environ.update(BASE_ENV)
     os.environ["MODEL_KIND"] = kind
     if local_op:
@@ -69,9 +87,10 @@ def build(kind, local_op, global_op):
     else:
         os.environ.pop("LOCAL_OPERATOR", None)
         os.environ.pop("GLOBAL_OPERATOR", None)
-    import fno_21cm
-    importlib.reload(fno_21cm)
-    return build_model(ModelConfig.from_env(ndim=2), IN_CHANNELS)
+    cfg = ModelConfig.from_env(ndim=2)
+    # The caller unpacks three values; returning only the model is the other
+    # half of the refactor breakage that left this script unrunnable.
+    return build_model(cfg, IN_CHANNELS), cfg, cfg.checkpoint_tag
 
 
 def bench(model, batch, repeats, device):
@@ -139,6 +158,14 @@ def main() -> None:
         del model
         if args.device == "cuda":
             torch.cuda.empty_cache()
+
+    # Never overwrite good results with a failed sweep. A stale import once
+    # made all 23 variants fail, and the run still wrote an empty JSON over the
+    # only copy of the previous benchmark, which was untracked by git.
+    if not rows:
+        print(f"\nALL {len(VARIANTS)} VARIANTS FAILED -- refusing to write "
+              f"{args.json}; the existing file is left untouched.")
+        raise SystemExit(1)
 
     os.makedirs("figures", exist_ok=True)
     with open(args.json, "w") as f:

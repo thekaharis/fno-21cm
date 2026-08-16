@@ -81,6 +81,13 @@ case "$ARCH" in
   swhno_swhno) export MODEL_KIND=localop LOCAL_OPERATOR=siren_hadamard GLOBAL_OPERATOR=siren_hadamard ;;
   sfno_swhno)  export MODEL_KIND=localop LOCAL_OPERATOR=siren_fourier  GLOBAL_OPERATOR=siren_hadamard ;;
   whno_swhno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard       GLOBAL_OPERATOR=siren_hadamard ;;
+  # U-FNO's shape with the global slot swapped. The U-FNO is a Fourier
+  # bottleneck plus a real-space U-Net; "cnn" in the local slot IS that U-Net
+  # (ConvUNetOperator, windowed=False so it runs at full width), so these two
+  # isolate the global basis: Walsh-Hadamard, or SIREN-generated Walsh, against
+  # the U-FNO's Fourier.
+  cnn_whno)    export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=hadamard ;;
+  cnn_swhno)   export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=siren_hadamard ;;
   *) echo "unknown ARCH=$ARCH" >&2; exit 2 ;;
 esac
 

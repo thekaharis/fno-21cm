@@ -38,9 +38,12 @@ INK_2 = "#52514e"
 INK_MUTED = "#8a8880"
 GRID = "#e4e3de"
 # Validated for all-pairs in light mode (worst CVD dE 9.2, normal-vision 24.0).
-LOCAL_HUE = {"fourier": "#2a78d6", "wavelet": "#eb6834", "hadamard": "#1baf7a"}
+LOCAL_HUE = {"fourier": "#2a78d6", "wavelet": "#eb6834", "hadamard": "#1baf7a",
+             "siren_hadamard": "#9d4edd", "cnn": "#d4a017",
+             "siren_fourier": "#00a6a6"}
 LOCAL_NAME = {"fourier": "local FNO", "wavelet": "local WNO",
-              "hadamard": "local WHNO"}
+              "hadamard": "local WHNO", "siren_hadamard": "local SWHNO",
+              "cnn": "local CNN (U-Net path)", "siren_fourier": "local SirenFNO"}
 TRAINED = "local fno / global whno"      # the configuration actually trained
 
 # (dx, dy) in points, per label, to keep the dense cluster legible.
@@ -56,14 +59,22 @@ NUDGE = {
     "local cnn / global fno": (0, 13),
 }
 SHORT = {"FNO (plain)": "FNO", "U-FNO": "U-FNO",
-         "local sirenfno / global sirenfno": "SirenFNO",
-         "local cnn / global fno": "CNN / FNO"}
+         "local sirenfno / global sirenfno": "SirenFNO"}
+DEFAULT_NUDGE = (0, 12)      # any variant not in NUDGE still gets a label
+# The matrix is the square local x global sweep. cnn and siren_fourier have
+# their own hue (they are distinct local families) but sit outside it, so
+# membership drives the marker, not the colour.
+MATRIX_OPS = ("fourier", "wavelet", "hadamard", "siren_hadamard")
 
 
 def short(v: str) -> str:
     if v in SHORT:
         return SHORT[v]
+    if "global " not in v:
+        return v
     g = v.split("global ")[1]
+    if v.startswith("local cnn"):
+        return f"CNN / {g}"                # cnn has its own hue but is the
     return f"…/ {g}"                       # local family is already the colour
 
 
@@ -78,15 +89,15 @@ def main() -> None:
     seen = set()
     for r in rows:
         loc = r["local"]
-        matrix = loc in LOCAL_HUE and r["global"] in LOCAL_HUE
-        colour = LOCAL_HUE[loc] if matrix else INK_MUTED
+        matrix = loc in MATRIX_OPS and r["global"] in MATRIX_OPS
+        colour = LOCAL_HUE.get(loc, INK_MUTED)
         marker = "o" if matrix else "s"
         lbl = None
-        if matrix and loc not in seen:
+        if loc in LOCAL_NAME and loc not in seen:
             lbl = LOCAL_NAME[loc]
             seen.add(loc)
-        elif not matrix and "other" not in seen:
-            lbl = "outside the 3x3 matrix"
+        elif loc not in LOCAL_NAME and "other" not in seen:
+            lbl = "outside the matrix"
             seen.add("other")
         is_trained = r["variant"] == TRAINED
         ax.plot(r["params_real"], r["slices_per_s"], marker, ms=13 if is_trained else 10,
@@ -95,7 +106,7 @@ def main() -> None:
         if is_trained:                      # ring the configuration in use
             ax.plot(r["params_real"], r["slices_per_s"], "o", ms=22, mfc="none",
                     mec=colour, mew=1.6, alpha=0.55, zorder=2, linestyle="none")
-        dx, dy = NUDGE.get(r["variant"], (0, 12))
+        dx, dy = NUDGE.get(r["variant"], DEFAULT_NUDGE)
         ax.annotate(short(r["variant"]), (r["params_real"], r["slices_per_s"]),
                     textcoords="offset points", xytext=(dx, dy),
                     ha="center", fontsize=8.5, color=INK_2, zorder=4)
@@ -109,8 +120,7 @@ def main() -> None:
     ax.text(0.0, 1.012,
             f"{meta['device']}, batch {meta['batch']} x {meta['in_channels']} x "
             f"{meta['resolution']}², median of {meta['repeats']} forward passes"
-            "\ncolour is the LOCAL operator; the global operator moves speed "
-            "by under 1%",
+            "\ncolour is the LOCAL operator; square = outside the local x global matrix",
             transform=ax.transAxes, fontsize=9, color=INK_MUTED, va="bottom")
 
     ax.grid(True, which="major", color=GRID, lw=0.8, zorder=0)
