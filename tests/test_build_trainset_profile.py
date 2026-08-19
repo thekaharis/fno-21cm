@@ -3,7 +3,7 @@ from __future__ import annotations
 import h5py
 import numpy as np
 
-from dataset.build_trainset import xHI_profile
+from dataset.build_slices import xHI_profile
 
 
 def test_global_profile_is_interpolated_to_los_grid(tmp_path) -> None:

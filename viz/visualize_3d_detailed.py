@@ -23,6 +23,13 @@ Variant of ``visualize_3d.py`` with two deliberate differences:
 The standard plot functions are reused with a shared low-z crop derived from
 the displayed cones' global x_HI history. Model loading, prediction, and cone
 selection by reionization behavior still come from ``visualize_3d``.
+
+Both differences are defaults, not fixtures: ``N_CONES_PER_SPLIT`` and
+``N_SLICES_PER_CONE`` are read from the environment here exactly as they are
+there, as are ``VIZ_FIGURES`` and ``VIZ_SPLITS`` (see ``visualize_3d``'s
+module docstring). The only figure kind this script does not offer is
+``physical`` -- the diagnostics panel and metrics JSON stay in the standard
+viz.
 """
 
 from __future__ import annotations
@@ -52,6 +59,7 @@ from viz.visualize_3d import (
     plot_z_slices, plot_lightcone_strip, plot_scatter,
     plot_lightcone_summary_grid,
     pick_cones_by_reion_behavior,
+    env_int, env_float, resolve_figures, resolve_splits,
 )
 from dataset.dataset_3d import LightconeCubeDataset, LightconeCubeCache, resolve_split
 from util.metrics_21cm import find_low_z_cutoff_index
@@ -62,11 +70,22 @@ from util.metrics_21cm import find_low_z_cutoff_index
 from viz.visualize_3d import CHECKPOINT, MODEL_KIND
 
 # ------------------------------------------------------------------ config
-N_CONES_PER_SPLIT = 16             # was 4 in visualize_3d
-N_SLICES_PER_CONE = 6              # was 4; with active-z each slice is more
-                                   # information-dense, so a few more is fine
-ACTIVE_VAR_FRAC = 0.05             # active window = transverse std > 5% of max
-LOW_Z_MIN_CHANGE = 0.01            # 1 percentage-point change in global x_HI
+# Same switches as visualize_3d (see its module docstring), but with this
+# script's heavier defaults.  There is no "physical" figure here -- the
+# physical diagnostics and metrics JSON come from the standard viz -- so
+# VIZ_FIGURES=all means the four kinds below.
+FIGURE_KINDS = ("slices", "lightcone", "scatter", "grid")
+VIZ_FIGURES = resolve_figures(os.environ.get("VIZ_FIGURES", "all"),
+                              FIGURE_KINDS)
+VIZ_SPLITS = resolve_splits(os.environ.get("VIZ_SPLITS", "validation,test"))
+# 16 cones vs 4 in visualize_3d, and 6 slices vs 4 -- with the active-z
+# picker each slice is more information-dense, so a few more is worth it.
+N_CONES_PER_SPLIT = env_int("N_CONES_PER_SPLIT", 16)
+N_SLICES_PER_CONE = env_int("N_SLICES_PER_CONE", 6)
+# active window = transverse std > 5% of max
+ACTIVE_VAR_FRAC = env_float("ACTIVE_VAR_FRAC", 0.05)
+# 1 percentage-point change in global x_HI
+LOW_Z_MIN_CHANGE = env_float("LOW_Z_MIN_CHANGE", 0.01)
 
 
 # ---------------------------------------------------- active-z slice picker
@@ -148,6 +167,14 @@ def main():
     print(f"[visualize_3d_detailed]  MODEL_KIND={MODEL_KIND}  "
           f"N_CONES_PER_SPLIT={N_CONES_PER_SPLIT}  "
           f"N_SLICES_PER_CONE={N_SLICES_PER_CONE}")
+    print(f"Figures: {', '.join(VIZ_FIGURES) or '(none)'}; "
+          f"splits: {', '.join(VIZ_SPLITS) or '(none)'}")
+    if not VIZ_FIGURES:
+        print("Nothing to do: VIZ_FIGURES selected no figures", file=sys.stderr)
+        sys.exit(1)
+    if not VIZ_SPLITS:
+        print("Nothing to do: VIZ_SPLITS selected no splits", file=sys.stderr)
+        sys.exit(1)
     print(f"Device: {DEVICE}")
     if not Path(CHECKPOINT).exists():
         print(f"Checkpoint not found: {CHECKPOINT}", file=sys.stderr)
@@ -210,6 +237,9 @@ def main():
         (val_ds, val_idx, "validation"),
         (test_ds, test_idx, "test"),
     ]:
+        if split_name not in VIZ_SPLITS:
+            print(f"Split {split_name} not selected by VIZ_SPLITS; skipping")
+            continue
         if len(split_ds) == 0:
             print(f"No cones in {split_name} split; skipping")
             continue
@@ -253,44 +283,48 @@ def main():
             )
 
         for cone_id, summ, dens, truth, pred in per_cone_for_grid:
-            # Active-z slice picker (the headline change vs visualize_3d).
-            active_idxs = pick_active_z_slices(truth, N_SLICES_PER_CONE)
-            active_idxs = [i for i in active_idxs if i >= z_start_idx]
-            if not active_idxs:
-                active_idxs = np.linspace(
-                    z_start_idx, len(target_z) - 1, N_SLICES_PER_CONE,
-                    dtype=int,
-                ).tolist()
-            print(f"  active-z slices (z indices): {active_idxs}")
-            print(f"  -> z values: "
-                  f"{[float(f'{target_z[i]:.2f}') for i in active_idxs]}")
+            if "slices" in VIZ_FIGURES:
+                # Active-z slice picker (the headline change vs visualize_3d).
+                active_idxs = pick_active_z_slices(truth, N_SLICES_PER_CONE)
+                active_idxs = [i for i in active_idxs if i >= z_start_idx]
+                if not active_idxs:
+                    active_idxs = np.linspace(
+                        z_start_idx, len(target_z) - 1, N_SLICES_PER_CONE,
+                        dtype=int,
+                    ).tolist()
+                print(f"  active-z slices (z indices): {active_idxs}")
+                print(f"  -> z values: "
+                      f"{[float(f'{target_z[i]:.2f}') for i in active_idxs]}")
 
-            fig = plot_z_slices(dens, truth, pred, target_z, active_idxs,
-                                cone_id, split_name)
-            out = figures_dir / f"comparison_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+                fig = plot_z_slices(dens, truth, pred, target_z, active_idxs,
+                                    cone_id, split_name)
+                out = (figures_dir /
+                       f"comparison_3d_{split_name}_cone{cone_id}.png")
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
-            fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
-                                       split_name, z_start_idx=z_start_idx)
-            out = figures_dir / f"lightcone_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+            if "lightcone" in VIZ_FIGURES:
+                fig = plot_lightcone_strip(dens, truth, pred, target_z, cone_id,
+                                           split_name, z_start_idx=z_start_idx)
+                out = figures_dir / f"lightcone_3d_{split_name}_cone{cone_id}.png"
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
-            fig = plot_scatter(
-                truth, pred, cone_id, split_name,
-                z_start_idx=z_start_idx, z_min=z_min,
-            )
-            out = figures_dir / f"scatter_3d_{split_name}_cone{cone_id}.png"
-            fig.savefig(out, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  saved {out}")
+            if "scatter" in VIZ_FIGURES:
+                fig = plot_scatter(
+                    truth, pred, cone_id, split_name,
+                    z_start_idx=z_start_idx, z_min=z_min,
+                )
+                out = figures_dir / f"scatter_3d_{split_name}_cone{cone_id}.png"
+                fig.savefig(out, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  saved {out}")
 
         # Summary grid: 16-row lightcone-strip stack.  Tall but readable;
         # the canonical "compare across 16 reionization regimes" figure.
-        if per_cone_for_grid:
+        if per_cone_for_grid and "grid" in VIZ_FIGURES:
             fig = plot_lightcone_summary_grid(per_cone_for_grid, target_z,
                                               split_name,
                                               z_start_idx=z_start_idx)

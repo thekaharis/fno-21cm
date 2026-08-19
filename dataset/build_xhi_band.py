@@ -29,7 +29,7 @@ import h5py
 import numpy as np
 
 from dataset import paths
-from dataset.build_trainset import xHI_profile
+from dataset.build_slices import xHI_profile
 from dataset.lightcone_params import PARAM_NAMES, read_sampled_params
 
 

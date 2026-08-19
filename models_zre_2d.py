@@ -845,7 +845,7 @@ class LocalFNO2d(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# SirenFNO2d: siren_fno_3d.SirenFNO3d reduced to the sky plane.  The SIREN
+# SirenFNO2d: legacy.arch.siren_fno_3d.SirenFNO3d reduced to the sky plane.  The SIREN
 # machinery (Fourier-feature mapping -> sine MLP -> dense channel-mixing
 # weights per retained mode) is unchanged apart from 2-D mode coordinates;
 # rfft2 keeps signed frequencies on X and the non-negative half on Y, so the
@@ -1083,7 +1083,7 @@ class PointwiseMLP2d(nn.Module):
 class SirenFNO2d(nn.Module):
     """Residual 2-D FNO with SIREN-generated truncated spectral weights.
 
-    ``siren_fno_3d.SirenFNO3d`` on the sky plane: both axes are periodic
+    ``legacy.arch.siren_fno_3d.SirenFNO3d`` on the sky plane: both axes are periodic
     transverse simulation axes, so the 3-D version's LOS padding is dropped
     entirely.
     """

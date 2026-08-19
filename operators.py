@@ -230,13 +230,115 @@ class WalshHadamardOperator(nn.Module):
         coefficients = self._contract(x, bases, analysis=True)
         letters = _SPATIAL_LETTERS[: self.ndim]
         mixed = torch.einsum(
-            f"bi{letters},io{letters}->bo{letters}", coefficients, self.weight
+            f"bi{letters},io{letters}->bo{letters}",
+            coefficients,
+            self._mixing_weight(device=x.device, dtype=x.dtype),
         )
         return self._contract(mixed, bases, analysis=False)
 
+    def _mixing_weight(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """The (C, C, *modes) per-sequency mixing tensor.
+
+        A hook rather than a direct ``self.weight`` read so that
+        :class:`SirenWalshHadamardOperator` can generate it instead of storing
+        it, without duplicating the transform.
+        """
+        return self.weight
+
     def walsh_weight_tensors(self) -> list[torch.Tensor]:
         """Return the per-sequency-mode mixing matrix for diagnostics."""
-        return [self.weight]
+        parameter = next(self.parameters())
+        return [self._mixing_weight(
+            device=parameter.device, dtype=parameter.dtype
+        )]
+
+
+
+class SirenWalshHadamardOperator(WalshHadamardOperator):
+    """Walsh-Hadamard transform whose per-sequency mixing is SIREN-generated.
+
+    The Walsh analogue of :class:`local_fno_3d.QuadrantSpectralConv3dSiren`.
+    ``WalshHadamardOperator`` stores one dense ``(C, C, *modes)`` parameter, so
+    every retained sequency learns its channel mixing independently and the
+    parameter count grows with the mode budget.  Here a single
+    ``SirenWeightNetwork`` maps the *sequency coordinate* to that mixing
+    matrix, making the truncation a smooth learned function of the frequency
+    analogue rather than a set of unrelated per-mode parameters -- the same
+    change SIREN makes to the FNO, applied to the Walsh basis.
+
+    Two differences from the Fourier case, both simplifications:
+
+    * The Walsh-Hadamard transform is **real**, so there is one trunk rather
+      than the Fourier version's real/imaginary pair.
+    * Sequency is **non-negative** by construction (it counts sign changes),
+      so there are no signed quadrants -- one coordinate block covers the
+      retained band, where the Fourier version needs four.
+
+    Coordinates are normalized by the retained band, so the same learned
+    function is evaluated at the same coordinates regardless of mode count,
+    exactly as ``_quadrant_coordinates`` does for the Fourier operator.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        ndim: int,
+        modes: Sequence[int],
+        ordering: str = "sequency",
+        *,
+        hidden_dim: int = 64,
+        omega: float = 30.0,
+        n_hidden: int = 1,
+        feature_dim: int = 16,
+        ff_sigma: float = 128.0,
+        learnable_ff: bool = True,
+    ):
+        super().__init__(channels, ndim, modes, ordering)
+        # Drop the dense parameter the base class registered: the SIREN
+        # replaces it, and leaving it would train an unused tensor and put a
+        # stale key in every checkpoint.
+        del self._parameters["weight"]
+
+        kwargs = dict(
+            hidden_dim=hidden_dim,
+            omega=omega,
+            n_hidden=n_hidden,
+            feature_dim=feature_dim,
+            ff_sigma=ff_sigma,
+            learnable_ff=learnable_ff,
+        )
+        if self.ndim == 3:
+            from siren import SirenWeightNetwork as Trunk
+        else:
+            from models_zre_2d import SirenWeightNetwork2d as Trunk
+        self.mixing_weight_net = Trunk(self.channels * self.channels, **kwargs)
+
+    def _sequency_coordinates(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """(*modes, ndim) grid of band-normalized sequency coordinates.
+
+        Sequency 0 is the constant Walsh function -- the DC term -- so the
+        coordinate runs 0 -> 1 across the retained band and 0 keeps its
+        meaning, unlike the Fourier operator's signed range.
+        """
+        axes = [
+            torch.arange(m, device=device, dtype=dtype) / max(1, m - 1)
+            for m in self.n_modes
+        ]
+        return torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+
+    def _mixing_weight(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        coordinates = self._sequency_coordinates(device=device, dtype=dtype)
+        shape = (*self.n_modes, self.channels, self.channels)
+        weight = self.mixing_weight_net(coordinates).reshape(shape)
+        # (*modes, C_in, C_out) -> (C_in, C_out, *modes) for the forward einsum
+        order = (self.ndim, self.ndim + 1, *range(self.ndim))
+        return weight.permute(*order).contiguous()
 
 
 # =============================================================================
@@ -452,6 +554,15 @@ def _build_hadamard(channels, ndim, modes, hyperparameters):
     )
 
 
+def _build_siren_hadamard(channels, ndim, modes, hyperparameters):
+    values = dict(hyperparameters)
+    return SirenWalshHadamardOperator(
+        channels, ndim=ndim, modes=modes,
+        ordering=str(values.pop("ordering")),
+        **values,
+    )
+
+
 def _build_cnn(channels, ndim, modes, hyperparameters):
     return ConvUNetOperator(
         channels,
@@ -553,6 +664,22 @@ OPERATORS: dict[str, OperatorSpec] = {
         required_size=WalshHadamardOperator.required_size,
         validate=_validate_hadamard,
     ),
+    "siren_hadamard": OperatorSpec(
+        name="siren_hadamard",
+        build=_build_siren_hadamard,
+        defaults={
+            "ordering": "sequency",
+            "hidden_dim": 64,
+            "omega": 30.0,
+            "n_hidden": 1,
+            "feature_dim": 16,
+            "ff_sigma": 128.0,
+            "learnable_ff": True,
+        },
+        uses_modes=True,
+        required_size=WalshHadamardOperator.required_size,
+        validate=_validate_hadamard,
+    ),
     "cnn": OperatorSpec(
         name="cnn",
         build=_build_cnn,
@@ -577,6 +704,9 @@ OPERATOR_ALIASES = {
     "sirenfno": "siren_fourier",
     "haar": "wavelet",
     "wno": "wavelet",
+    "siren_whno": "siren_hadamard",
+    "sirenwhno": "siren_hadamard",
+    "siren_walsh": "siren_hadamard",
     "walsh": "hadamard",
     "whno": "hadamard",
     "walsh_hadamard": "hadamard",

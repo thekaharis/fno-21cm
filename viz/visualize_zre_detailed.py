@@ -44,11 +44,11 @@ import fno_zre
 from fno_zre import (
     CHECKPOINT_DIR, DATA_DIR, FILE_GLOB, INPUT_FEATURES, MODEL_KIND,
     N_Z_IN, SPLIT_SEED, TARGET_CACHE, TARGET_KIND, TEST_FRACTION,
-    VAL_FRACTION, Z_MAX, Z_MIN, build_zre_model,
+    VAL_FRACTION, Z_MAX, Z_MIN, MODEL_CONFIG,
 )
 from dataset.dataset_zre import ZreMapDataset, split_by_cone
 from dataset import paths
-from modeling import TrainerModel, load_checkpoint
+from modeling import TrainerModel, build_model, load_checkpoint
 from util.run_metadata import resolve_checkpoint
 
 # ------------------------------------------------------------------ config
@@ -329,7 +329,8 @@ def main():
         dataset.fit_parameter_normalization(train_ds.indices)
     )
 
-    inner, description = build_zre_model(MODEL_KIND, dataset.in_channels)
+    inner = build_model(MODEL_CONFIG, dataset.in_channels)
+    description = MODEL_CONFIG.describe()
     model = TrainerModel(inner)
     report = load_checkpoint(model, CHECKPOINT)
     print(f"[load_model] transform: {report.transform!r}; matched "

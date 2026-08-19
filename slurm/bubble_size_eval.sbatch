@@ -44,7 +44,13 @@ MODEL_A_CHECKPOINT="${MODEL_A_CHECKPOINT:-./checkpoints/checkpoints_3d_localsire
 MODEL_B_NAME="${MODEL_B_NAME:-localsirenfno-l2only}"
 MODEL_B_CHECKPOINT="${MODEL_B_CHECKPOINT:-./checkpoints/checkpoints_3d_localsirenfno_l2only/best_model_state_dict.pt}"
 
-for checkpoint in "$MODEL_A_CHECKPOINT" "$MODEL_B_CHECKPOINT"; do
+# Optional third model: the granulometry experiment needs plain / hybrid / bsd
+# side by side, and comparing them pairwise would recompute the truth BSD twice
+# and give two incomparable percentile bands.
+MODEL_C_NAME="${MODEL_C_NAME:-}"
+MODEL_C_CHECKPOINT="${MODEL_C_CHECKPOINT:-}"
+
+for checkpoint in "$MODEL_A_CHECKPOINT" "$MODEL_B_CHECKPOINT" ${MODEL_C_CHECKPOINT:+"$MODEL_C_CHECKPOINT"}; do
     if [ ! -f "$checkpoint" ]; then
         echo "Checkpoint not found: $checkpoint" >&2
         exit 1
@@ -121,6 +127,7 @@ echo "================ bubble-size evaluation ================"
 echo "Host / job:          $(hostname) / ${SLURM_JOB_ID:-N/A}"
 echo "Model A:             $MODEL_A_NAME=$MODEL_A_CHECKPOINT"
 echo "Model B:             $MODEL_B_NAME=$MODEL_B_CHECKPOINT"
+[ -n "$MODEL_C_CHECKPOINT" ] && echo "Model C:             $MODEL_C_NAME=$MODEL_C_CHECKPOINT"
 echo "Split / cones:       $SPLIT / $N_CONES"
 echo "Rays / slices:       $RAYS_PER_SLICE / $SLICES_PER_STAGE per stage"
 echo "Threshold / max MFP: $THRESHOLD / $MAX_DISTANCE_MPC cMpc"
@@ -132,6 +139,7 @@ args=(
     --checkpoints
     "${MODEL_A_NAME}=${MODEL_A_CHECKPOINT}"
     "${MODEL_B_NAME}=${MODEL_B_CHECKPOINT}"
+    ${MODEL_C_CHECKPOINT:+"${MODEL_C_NAME}=${MODEL_C_CHECKPOINT}"}
     --split "$SPLIT"
     --n-cones "$N_CONES"
     --rays-per-slice "$RAYS_PER_SLICE"

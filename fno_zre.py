@@ -51,10 +51,11 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import sys
 from pathlib import Path
 
+from training import MetricsTrainer
+from util import seed_everything
 from util.neuralop_setup import prefer_local_neuralop
 
 prefer_local_neuralop()
@@ -75,7 +76,7 @@ from dataset.dataset_zre import ZreMapDataset, split_by_cone
 from dataset import paths
 from dataset.zre_target import TARGET_KINDS, build_target_cache
 from losses import AbsoluteLoss, H2Loss2d, RelativeLoss, WeightedLoss
-from modeling import LOCAL_GLOBAL_KINDS, OperatorSlots, TrainerModel
+from modeling import ModelConfig, TrainerModel, build_model
 
 
 # ------------------------------------------------------------------ config
@@ -91,53 +92,11 @@ INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_params").lower()
 N_Z_IN = int(os.environ.get("N_Z_IN", "64"))
 Z_MIN, Z_MAX = 5.0, 25.0
 
-MODEL_KIND = os.environ.get("MODEL_KIND", "fno").lower()
-N_MODES = (
-    int(os.environ.get("N_MODES_X", "32")),
-    int(os.environ.get("N_MODES_Y", "32")),
-)
-HIDDEN_CHANNELS = int(os.environ.get("HIDDEN_CHANNELS", "64"))
-N_LAYERS = int(os.environ.get("N_LAYERS", "4"))
-UFNO_WIDTH = int(os.environ.get("UFNO_WIDTH", "32"))
-UFNO_NORM = os.environ.get("UFNO_NORM", "batchnorm").lower()
-LOCALFNO_BASE_WIDTH = int(os.environ.get("LOCALFNO_BASE_WIDTH", "16"))
-LOCALFNO_WINDOW = (
-    int(os.environ.get("LOCALFNO_WINDOW_X", "16")),
-    int(os.environ.get("LOCALFNO_WINDOW_Y", "16")),
-)
-LOCALFNO_MODES = (
-    int(os.environ.get("LOCALFNO_MODES_X", "6")),
-    int(os.environ.get("LOCALFNO_MODES_Y", "6")),
-)
-LOCALFNO_SPECTRAL_RANK = int(os.environ.get("LOCALFNO_SPECTRAL_RANK", "16"))
-LOCALFNO_PATCH_CHUNK_SIZE = int(
-    os.environ.get("LOCALFNO_PATCH_CHUNK_SIZE", "32")
-)
-LOCALWNO_LEVELS = int(os.environ.get("LOCALWNO_LEVELS", "2"))
-SIREN_HIDDEN_DIM = int(os.environ.get("SIREN_HIDDEN_DIM", "64"))
-SIREN_OMEGA = float(os.environ.get("SIREN_OMEGA", "30.0"))
-SIREN_N_HIDDEN = int(os.environ.get("SIREN_N_HIDDEN", "1"))
-SIREN_FEATURE_DIM = int(os.environ.get("SIREN_FEATURE_DIM", "16"))
-SIREN_FF_SIGMA = float(os.environ.get("SIREN_FF_SIGMA", "128.0"))
-SIREN_LEARNABLE_FF = os.environ.get("SIREN_LEARNABLE_FF", "1").strip() == "1"
-SIREN_MLP_DROPOUT = float(os.environ.get("SIREN_MLP_DROPOUT", "0.0"))
-SIREN_SIGMOID_TEMPERATURE = float(
-    os.environ.get("SIREN_SIGMOID_TEMPERATURE", "2.0")
-)
-# The z_re target's clamped-to-zero majority makes a sigmoid output a
-# saturation trap for the SIREN variant (logits run to the rails within
-# ~60 batches and gradients die); the task's best model (plain FNO) uses a
-# linear output. Default 0 = linear; set 1 to restore the 3-D-style sigmoid.
-SIREN_OUTPUT_SIGMOID = (
-    os.environ.get("SIREN_OUTPUT_SIGMOID", "0").strip() == "1"
-)
-# The LocalFNO bottleneck runs at 1/4 map resolution (35x35 for 140x140
-# cones), so its global modes are capped by 35//2 = 17 -- keep them separate
-# from the full-resolution N_MODES used by the plain FNO.
-LOCALFNO_GLOBAL_MODES = (
-    int(os.environ.get("LOCALFNO_GLOBAL_MODES_X", "16")),
-    int(os.environ.get("LOCALFNO_GLOBAL_MODES_Y", "16")),
-)
+# Same switches, registry and metadata as the x_HI entry points; only the task
+# and ndim differ.
+MODEL_CONFIG = ModelConfig.from_env(ndim=2)
+MODEL_KIND = MODEL_CONFIG.kind
+
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "2"))
 # U-FNO's sigmoid output and LocalFNO's deep residual stack train more
 # stably at a conservative LR, mirroring the 3-D pipeline's defaults.
@@ -163,20 +122,10 @@ EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
 
 # Separate checkpoint directories per model kind so runs never overwrite
 # each other (same convention as the 3-D pipeline).
-_LOCAL_KINDS = tuple(LOCAL_GLOBAL_KINDS) + ("localop",)
-_KIND_SUFFIX = {"fno": "", "ufno": "_ufno", "sirenfno": "_sirenfno",
-                **{kind: f"_{kind}" for kind in _LOCAL_KINDS}}
-OPERATOR_SLOTS = (
-    OperatorSlots.from_env(MODEL_KIND) if MODEL_KIND in _LOCAL_KINDS else None
-)
-_KIND_TAG = (
-    f"_{OPERATOR_SLOTS.checkpoint_tag}" if OPERATOR_SLOTS is not None
-    else _KIND_SUFFIX.get(MODEL_KIND, "")
-)
 CHECKPOINT_DIR = Path(
     os.environ.get(
         "CHECKPOINT_DIR",
-        f"checkpoints/checkpoints_zre{_KIND_TAG}",
+        f"checkpoints/checkpoints_zre_{MODEL_CONFIG.checkpoint_tag}",
     )
 )
 
@@ -198,145 +147,6 @@ DEVICE = os.environ.get(
 )
 
 
-class ZreLoggingTrainer(Trainer):
-    """``neuralop.Trainer`` + per-epoch metrics appended to metrics.jsonl.
-
-    Same schema as the 3-D pipeline's ``LoggingTrainer`` (one JSON object
-    per epoch: ``epoch``, ``train_err``, ``avg_loss``, ``epoch_train_time``,
-    plus ``val_*``/``test_*`` on eval epochs), which is exactly what the
-    dashboard scans ``checkpoints/*/metrics.jsonl`` for.  Single-process
-    only -- no DDP reductions.
-    """
-
-    def __init__(self, *args, metrics_path=None, append=False, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.metrics_path = Path(metrics_path) if metrics_path else None
-        if self.metrics_path is not None:
-            self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
-            # fresh runs start a fresh history; resumed runs append
-            if not append:
-                self.metrics_path.unlink(missing_ok=True)
-        self._last_train: dict | None = None
-
-    def train_one_epoch(self, epoch, train_loader, training_loss):
-        out = super().train_one_epoch(epoch, train_loader, training_loss)
-        train_err, avg_loss, _avg_lasso, t = out
-        self._last_train = dict(
-            epoch=int(epoch),
-            train_err=float(train_err),
-            avg_loss=float(avg_loss),
-            epoch_train_time=float(t),
-        )
-        # eval epochs are flushed (with their metrics) by evaluate_all
-        if self.eval_interval and (epoch % self.eval_interval != 0):
-            self._flush_row({})
-        return out
-
-    def evaluate_all(self, *args, **kwargs):
-        eval_metrics = super().evaluate_all(*args, **kwargs)
-        self._flush_row({k: float(v) for k, v in eval_metrics.items()})
-        return eval_metrics
-
-    def resume_state_from_dir(self, save_dir):
-        super().resume_state_from_dir(save_dir)
-        # neuralop manifests store the epoch that just completed.
-        self.start_epoch += 1
-        if self.verbose:
-            print(f"Continuing with epoch {self.start_epoch}")
-
-    def _flush_row(self, eval_metrics: dict) -> None:
-        if self.metrics_path is None or self._last_train is None:
-            return
-        row = {**self._last_train, **eval_metrics}
-        with open(self.metrics_path, "a") as f:
-            f.write(json.dumps(row) + "\n")
-
-
-def build_zre_model(kind: str, in_channels: int):
-    """Construct the configured 2-D architecture (returns model, description)."""
-    if kind == "ufno":
-        from models_zre_2d import UFNO2d
-
-        model = UFNO2d(
-            modes1=N_MODES[0],
-            modes2=N_MODES[1],
-            width=UFNO_WIDTH,
-            in_channels=in_channels,
-            out_channels=1,
-            sigmoid=True,
-            norm=UFNO_NORM,
-        )
-        desc = (f"U-FNO2d modes={N_MODES} width={UFNO_WIDTH} "
-                f"norm={UFNO_NORM} sigmoid-output")
-        return model, desc
-    if kind in _LOCAL_KINDS:
-        from models_zre_2d import LocalFNO2d
-
-        slots = (
-            OPERATOR_SLOTS if kind == MODEL_KIND
-            else OperatorSlots.from_env(kind)
-        )
-        model = LocalFNO2d(
-            in_channels=in_channels,
-            out_channels=1,
-            base_width=LOCALFNO_BASE_WIDTH,
-            local_window=LOCALFNO_WINDOW,
-            local_modes=LOCALFNO_MODES,
-            global_modes=LOCALFNO_GLOBAL_MODES,
-            spectral_rank=LOCALFNO_SPECTRAL_RANK,
-            patch_chunk_size=LOCALFNO_PATCH_CHUNK_SIZE,
-            output_sigmoid=True,
-            **slots.model_kwargs(),
-        )
-        local_modes_desc = (
-            f"local-modes={LOCALFNO_MODES} " if slots.uses_local_modes() else ""
-        )
-        desc = (f"{slots.model_name}2d window={LOCALFNO_WINDOW} "
-                f"{local_modes_desc}"
-                f"global-modes={LOCALFNO_GLOBAL_MODES} "
-                f"widths={LOCALFNO_BASE_WIDTH}/{2 * LOCALFNO_BASE_WIDTH}/"
-                f"{4 * LOCALFNO_BASE_WIDTH} rank={LOCALFNO_SPECTRAL_RANK} "
-                f"chunk={LOCALFNO_PATCH_CHUNK_SIZE} "
-                f"{slots.describe()} sigmoid-output")
-        return model, desc
-    if kind == "sirenfno":
-        from models_zre_2d import SirenFNO2d
-
-        model = SirenFNO2d(
-            n_modes=N_MODES,
-            hidden_channels=HIDDEN_CHANNELS,
-            in_channels=in_channels,
-            out_channels=1,
-            n_layers=N_LAYERS,
-            siren_hidden_dim=SIREN_HIDDEN_DIM,
-            siren_omega=SIREN_OMEGA,
-            siren_n_hidden=SIREN_N_HIDDEN,
-            siren_feature_dim=SIREN_FEATURE_DIM,
-            siren_ff_sigma=SIREN_FF_SIGMA,
-            siren_learnable_ff=SIREN_LEARNABLE_FF,
-            mlp_dropout=SIREN_MLP_DROPOUT,
-            output_sigmoid=SIREN_OUTPUT_SIGMOID,
-            sigmoid_temperature=SIREN_SIGMOID_TEMPERATURE,
-        )
-        out_kind = "sigmoid" if SIREN_OUTPUT_SIGMOID else "linear"
-        desc = (f"SirenFNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} "
-                f"layers={N_LAYERS} siren={SIREN_HIDDEN_DIM}x{SIREN_N_HIDDEN} "
-                f"ff={SIREN_FEATURE_DIM}@{SIREN_FF_SIGMA} {out_kind}-output")
-        return model, desc
-    model = FNO(
-        n_modes=N_MODES,
-        hidden_channels=HIDDEN_CHANNELS,
-        in_channels=in_channels,
-        out_channels=1,
-        n_layers=N_LAYERS,
-        projection_channel_ratio=2,
-        positional_embedding="grid",
-    )
-    desc = (f"FNO2d modes={N_MODES} hidden={HIDDEN_CHANNELS} "
-            f"layers={N_LAYERS} pos-emb=grid")
-    return model, desc
-
-
 class MaskedMSE:
     """Mean squared error restricted to pixels with a real transition.
 
@@ -350,14 +160,6 @@ class MaskedMSE:
             return torch.mean((out - y) ** 2)
         weight = mask.sum().clamp(min=1.0)
         return (((out - y) ** 2) * mask).sum() / weight
-
-
-def _seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def build_losses():
@@ -497,13 +299,8 @@ def main() -> None:
         raise SystemExit(f"TARGET_KIND must be one of {TARGET_KINDS}")
     if INPUT_FEATURES not in {"density", "density_params"}:
         raise SystemExit("INPUT_FEATURES must be 'density' or 'density_params'")
-    if MODEL_KIND not in _KIND_SUFFIX:
-        raise SystemExit(
-            f"MODEL_KIND must be one of {sorted(_KIND_SUFFIX)}, "
-            f"got {MODEL_KIND!r}"
-        )
 
-    _seed_everything(RUN_SEED)
+    seed_everything(RUN_SEED)
 
     files = sorted(DATA_DIR.glob(FILE_GLOB))
     if len(files) < 3:
@@ -549,7 +346,8 @@ def main() -> None:
     test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
     test_loaders = {"val": val_loader, "test": test_loader}
 
-    inner, description = build_zre_model(MODEL_KIND, dataset.in_channels)
+    inner = build_model(MODEL_CONFIG, dataset.in_channels)
+    description = MODEL_CONFIG.describe()
     model = TrainerModel(inner).to(DEVICE)
     print(f"Model: {description} -> "
           f"{count_model_params(model.fno):,} parameters")
@@ -581,36 +379,9 @@ def main() -> None:
         # over base width / window / local modes / omega is otherwise
         # indistinguishable in the run metadata (and therefore on the
         # dashboard), leaving the job log as the only record of what ran.
-        "model_config": {
-            "kind": MODEL_KIND,
-            "in_channels": dataset.in_channels,
-            "out_channels": 1,
-            "n_modes": list(N_MODES),
-            "hidden_channels": HIDDEN_CHANNELS,
-            "n_layers": N_LAYERS,
-            **({"ufno_width": UFNO_WIDTH, "ufno_norm": UFNO_NORM}
-               if MODEL_KIND == "ufno" else {}),
-            **({"localfno_base_width": LOCALFNO_BASE_WIDTH,
-                "localfno_window": list(LOCALFNO_WINDOW),
-                "localfno_modes": list(LOCALFNO_MODES),
-                "localfno_global_modes": list(LOCALFNO_GLOBAL_MODES),
-                "localfno_spectral_rank": LOCALFNO_SPECTRAL_RANK,
-                "localfno_patch_chunk_size": LOCALFNO_PATCH_CHUNK_SIZE}
-               if MODEL_KIND in _LOCAL_KINDS else {}),
-            **(OPERATOR_SLOTS.metadata() if OPERATOR_SLOTS is not None else {}),
-            **({"localwno_levels": LOCALWNO_LEVELS,
-                "localwno_wavelet": "haar"}
-               if OPERATOR_SLOTS is not None
-               and "wavelet" in {OPERATOR_SLOTS.local, OPERATOR_SLOTS.global_}
-               else {}),
-            **({"siren_omega": SIREN_OMEGA,
-                "siren_hidden_dim": SIREN_HIDDEN_DIM,
-                "siren_n_hidden": SIREN_N_HIDDEN,
-                "siren_feature_dim": SIREN_FEATURE_DIM,
-                "siren_ff_sigma": SIREN_FF_SIGMA,
-                "siren_output_sigmoid": SIREN_OUTPUT_SIGMOID}
-               if MODEL_KIND in ("sirenfno", "localsirenfno") else {}),
-        },
+        "model_config": {**MODEL_CONFIG.to_dict(),
+                         "in_channels": dataset.in_channels,
+                         "out_channels": 1},
         "training": {
             "epochs": N_EPOCHS,
             "batch_size": BATCH_SIZE,
@@ -632,7 +403,7 @@ def main() -> None:
         },
     })
 
-    trainer = ZreLoggingTrainer(
+    trainer = MetricsTrainer(
         model=model,
         n_epochs=N_EPOCHS,
         device=DEVICE,
@@ -676,9 +447,9 @@ def main() -> None:
         target_kind=TARGET_KIND,
         input_features=INPUT_FEATURES,
         n_z_in=N_Z_IN,
-        n_modes=list(N_MODES),
-        hidden_channels=HIDDEN_CHANNELS,
-        n_layers=N_LAYERS,
+        n_modes=list(MODEL_CONFIG.modes),
+        hidden_channels=MODEL_CONFIG.hidden_channels,
+        n_layers=MODEL_CONFIG.n_layers,
         n_epochs=N_EPOCHS,
         learning_rate=LEARNING_RATE,
         run_seed=RUN_SEED,

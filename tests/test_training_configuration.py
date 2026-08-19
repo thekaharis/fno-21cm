@@ -7,18 +7,16 @@ import pytest
 import torch
 import torch.nn as nn
 
-from fno_21cm_3d import (
-    LoggingTrainer,
-    _build_h1_loss,
-    _loss_mode,
-    _seed_everything,
-)
+from fno_21cm_3d import _build_h1_loss, _loss_mode
+from modeling import TrainerModel
+from training import MetricsTrainer
+from util import seed_everything
 from losses import IonizedWallRMSE, ScheduledWeightedLoss, WeightedLoss
 
 
-def test_logging_trainer_rejects_trainer_owned_ddp() -> None:
+def test_metrics_trainer_rejects_trainer_owned_ddp() -> None:
     with pytest.raises(ValueError, match="single DDP wrapper"):
-        LoggingTrainer(
+        MetricsTrainer(
             model=nn.Identity(),
             n_epochs=1,
             device="cpu",
@@ -210,13 +208,13 @@ def test_ionized_wall_mask_wraps_periodic_xy_but_not_z() -> None:
 
 
 def test_seed_everything_repeats_python_numpy_and_torch() -> None:
-    _seed_everything(123)
+    seed_everything(123)
     first = (
         random.random(),
         np.random.random(),
         torch.rand(3),
     )
-    _seed_everything(123)
+    seed_everything(123)
     second = (
         random.random(),
         np.random.random(),
@@ -226,3 +224,54 @@ def test_seed_everything_repeats_python_numpy_and_torch() -> None:
     assert first[0] == second[0]
     assert first[1] == second[1]
     assert torch.equal(first[2], second[2])
+
+
+def test_active_weights_are_logged_by_term_name_not_position() -> None:
+    """The three entry points use different term orders.
+
+    The 2-D x_HI stack has ``swd`` where the 3-D one has ``ionized_wall``, so
+    positional logging mislabelled the weights in metrics.jsonl -- and raised
+    IndexError outright on a stack with fewer than four terms.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import torch
+    from torch.utils.data import DataLoader, Dataset
+    from neuralop import LpLoss
+
+    from losses import WeightedLoss
+    from training import MetricsTrainer
+
+    class _Tiny(Dataset):
+        def __len__(self): return 2
+        def __getitem__(self, _):
+            return {"x": torch.rand(1, 8, 8), "y": torch.rand(1, 8, 8)}
+
+    model = TrainerModel(nn.Conv2d(1, 1, 3, padding=1))
+    loss_fn = WeightedLoss(
+        (1.0, LpLoss(d=2, p=2)), (0.25, LpLoss(d=2, p=1)),
+        term_names=("l2", "l1"),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "metrics.jsonl"
+        loader = DataLoader(_Tiny(), batch_size=1)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        trainer = MetricsTrainer(
+            model=model, n_epochs=1, device="cpu", data_processor=None,
+            wandb_log=False, eval_interval=1, use_distributed=False,
+            verbose=False, metrics_path=path,
+        )
+        trainer.train(
+            train_loader=loader, test_loaders={"val": loader},
+            optimizer=optimizer,
+            scheduler=torch.optim.lr_scheduler.StepLR(optimizer, 1),
+            regularizer=None, training_loss=loss_fn,
+            eval_losses={"l2": LpLoss(d=2, p=2)},
+        )
+        row = json.loads(path.read_text().splitlines()[-1])
+
+    assert row["active_l2_weight"] == pytest.approx(1.0)
+    assert row["active_l1_weight"] == pytest.approx(0.25)
+    assert "active_ionized_wall_weight" not in row

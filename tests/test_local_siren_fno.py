@@ -210,7 +210,7 @@ def test_mode_weight_viz_builds_siren_from_metadata(tmp_path, monkeypatch):
 
 
 def test_modeling_registration(tmp_path):
-    from modeling import ModelConfig, TrainerModel, build_3d_model, \
+    from modeling import ModelConfig, TrainerModel, build_model, \
         load_checkpoint
 
     config = ModelConfig(
@@ -228,14 +228,14 @@ def test_modeling_registration(tmp_path):
     rebuilt = ModelConfig.from_dict(config.to_dict())
     assert rebuilt == config
 
-    model = build_3d_model(config, in_channels=2)
+    model = build_model(config, in_channels=2)
     assert isinstance(model, LocalFNO3d)
     assert isinstance(model.encoder0.spectral, QuadrantSpectralConv3dSiren)
 
     wrapped = TrainerModel(model)
     checkpoint = tmp_path / "best_model_state_dict.pt"
     torch.save(wrapped.state_dict(), checkpoint)
-    fresh = TrainerModel(build_3d_model(config, in_channels=2))
+    fresh = TrainerModel(build_model(config, in_channels=2))
     report = load_checkpoint(fresh, checkpoint)
     assert report.matched == report.total
     assert not report.missing and not report.unexpected

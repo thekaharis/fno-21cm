@@ -270,7 +270,7 @@ class QuadrantSpectralConv3dSiren(nn.Module):
     but the per-mode channel-mixing weights are produced by two shared
     ``SirenWeightNetwork`` trunks (real/imaginary) evaluated at signed mode
     coordinates normalized by the retained band, exactly following
-    ``siren_fno_3d.SpectralConv3dSiren``. The truncation therefore becomes a
+    ``legacy.arch.siren_fno_3d.SpectralConv3dSiren``. The truncation therefore becomes a
     smooth learned function of the mode coordinate instead of independent
     per-mode parameters. Bias-free: the enclosing residual block's spatial
     convolution carries the bias.
@@ -293,7 +293,7 @@ class QuadrantSpectralConv3dSiren(nn.Module):
         learnable_ff: bool = True,
     ):
         super().__init__()
-        from siren_fno_3d import SirenWeightNetwork
+        from siren import SirenWeightNetwork
 
         self.channels = int(channels)
         self.n_modes = _triple(modes, "modes")

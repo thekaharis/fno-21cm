@@ -1,8 +1,9 @@
 #!/bin/bash
 # One sbatch for the 3-D architecture x loss matrix, 50 epochs each.
 #
-#   ARCH  ufno | fno_whno | wno_whno | whno_whno
-#   LOSS  plain | expwall | hybrid | expwall_theta
+#   ARCH  ufno | fno_fno | fno_whno | wno_whno | whno_whno
+#         swhno_swhno | sfno_swhno | whno_swhno   (SIREN Walsh weights)
+#   LOSS  plain | expwall | hybrid | expwall_theta | bsd
 #
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=hybrid slurm/train_3d_matrix.sbatch
 #
@@ -61,8 +62,8 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-ARCH="${ARCH:?set ARCH to ufno|fno_whno|wno_whno|whno_whno}"
-LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta}"
+ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno}"
+LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta|bsd}"
 
 # ---- architecture ------------------------------------------------------
 case "$ARCH" in
@@ -70,9 +71,23 @@ case "$ARCH" in
               # --export=ALL can carry stale operator vars in from the calling
               # shell; an empty LOCAL_OPERATOR is a hard error in from_env().
               unset LOCAL_OPERATOR GLOBAL_OPERATOR ;;
+  fno_fno)    export MODEL_KIND=localop LOCAL_OPERATOR=fourier  GLOBAL_OPERATOR=fourier ;;
   fno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=fourier  GLOBAL_OPERATOR=hadamard ;;
   wno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=wavelet  GLOBAL_OPERATOR=hadamard ;;
   whno_whno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=hadamard ;;
+  # SIREN-generated Walsh weights: sequency is the Walsh analogue of
+  # frequency, so the same hypernetwork trick the SirenFNO applies to
+  # Fourier modes applies here (operators.SirenWalshHadamardOperator).
+  swhno_swhno) export MODEL_KIND=localop LOCAL_OPERATOR=siren_hadamard GLOBAL_OPERATOR=siren_hadamard ;;
+  sfno_swhno)  export MODEL_KIND=localop LOCAL_OPERATOR=siren_fourier  GLOBAL_OPERATOR=siren_hadamard ;;
+  whno_swhno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard       GLOBAL_OPERATOR=siren_hadamard ;;
+  # U-FNO's shape with the global slot swapped. The U-FNO is a Fourier
+  # bottleneck plus a real-space U-Net; "cnn" in the local slot IS that U-Net
+  # (ConvUNetOperator, windowed=False so it runs at full width), so these two
+  # isolate the global basis: Walsh-Hadamard, or SIREN-generated Walsh, against
+  # the U-FNO's Fourier.
+  cnn_whno)    export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=hadamard ;;
+  cnn_swhno)   export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=siren_hadamard ;;
   *) echo "unknown ARCH=$ARCH" >&2; exit 2 ;;
 esac
 
@@ -113,11 +128,25 @@ case "$LOSS" in
   hybrid)
     export LOSS_L2_WEIGHT=1.0 LOSS_EXPWALL_WEIGHT="${EXPWALL_HYBRID_W:-30.0}"
     export EXPWALL_WARMUP_EPOCHS="${EXPWALL_WARMUP_EPOCHS:-5}" ;;
+  bsd)
+    # BSD is auxiliary by construction: a size spectrum is blind to where the
+    # bubbles are, so it rides on the expwall anchor rather than replacing it.
+    export LOSS_L2_WEIGHT=1.0 LOSS_EXPWALL_WEIGHT="${EXPWALL_HYBRID_W:-30.0}"
+    export EXPWALL_WARMUP_EPOCHS="${EXPWALL_WARMUP_EPOCHS:-5}"
+    export LOSS_BSD_WEIGHT="${LOSS_BSD_WEIGHT:-1.0}"
+    export BSD_WARMUP_EPOCHS="${BSD_WARMUP_EPOCHS:-5}"
+    export BSD_RADII="${BSD_RADII:-1,2,4,8}"
+    export BSD_DOWNSAMPLE="${BSD_DOWNSAMPLE:-2}"
+    export BSD_MAX_SLICES="${BSD_MAX_SLICES:-64}" ;;
   expwall_theta)
     export LOSS_L2_WEIGHT=0.0 LOSS_EXPWALL_WEIGHT=1.0
     export EXPWALL_WARMUP_EPOCHS=0
     export CONTRAST_MODE=xhi CONTRAST_REFIT=1 CONTRAST_SCHEDULE_KIND=stepped
-    export CONTRAST_BINS="${CONTRAST_BINS:-14}" ;;
+    export CONTRAST_BINS="${CONTRAST_BINS:-14}"
+    # monotone: smooth the per-slice x_HI key along the LOS axis before it
+    # picks a bin. Set CONTRAST_KEY=mean for the unsmoothed 2-D behaviour.
+    export CONTRAST_KEY="${CONTRAST_KEY:-monotone}"
+    export CONTRAST_REFIT_BATCH="${CONTRAST_REFIT_BATCH:-2}" ;;
   *) echo "unknown LOSS=$LOSS" >&2; exit 2 ;;
 esac
 
@@ -151,7 +180,9 @@ echo "============ 3-D matrix: ARCH=$ARCH  LOSS=$LOSS ============"
 echo "MODEL_KIND:   $MODEL_KIND ${LOCAL_OPERATOR:+($LOCAL_OPERATOR local / $GLOBAL_OPERATOR global)}"
 echo "LOSS:         L2=$LOSS_L2_WEIGHT expwall=$LOSS_EXPWALL_WEIGHT"
 echo "              scale=$EXPWALL_SCALE cap=$WALL_CAP warmup=$EXPWALL_WARMUP_EPOCHS"
-echo "CONTRAST:     ${CONTRAST_MODE:-off} ${CONTRAST_SCHEDULE_KIND:+/$CONTRAST_SCHEDULE_KIND}"
+echo "BSD:          ${LOSS_BSD_WEIGHT:-0} radii=${BSD_RADII:--} down=${BSD_DOWNSAMPLE:--} slices=${BSD_MAX_SLICES:--}"
+echo "              axes=${EXPWALL_AXES:-3d}"
+echo "CONTRAST:     ${CONTRAST_MODE:-off} ${CONTRAST_SCHEDULE_KIND:+/$CONTRAST_SCHEDULE_KIND}${CONTRAST_KEY:+ key=$CONTRAST_KEY}"
 echo "EPOCHS:       $N_EPOCHS"
 echo "CONTINUE:     ${INIT_CHECKPOINT:-fresh initialization}"
 echo "CHECKPOINT:   $CHECKPOINT_DIR"

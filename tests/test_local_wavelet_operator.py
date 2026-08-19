@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from local_fno_3d import LocalFNO3d, QuadrantSpectralConv3d
-from modeling import ModelConfig, build_3d_model
+from modeling import ModelConfig, build_model
 from models_zre_2d import LocalFNO2d, QuadrantSpectralConv2d
 from wavelet_operator import HaarWaveletOperator
 
@@ -88,7 +88,7 @@ def test_localwno_3d_forward_backward_and_configuration() -> None:
     }
     with patch.dict(os.environ, env, clear=True):
         config = ModelConfig.from_env()
-    model = build_3d_model(config, in_channels=2)
+    model = build_model(config, in_channels=2)
     x = torch.randn(1, 2, 8, 8, 8, requires_grad=True)
 
     output = model(x)

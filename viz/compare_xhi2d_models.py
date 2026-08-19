@@ -22,10 +22,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from dataset.dataset import SliceCache
+from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
-from modeling import LOCAL_GLOBAL_KINDS, TrainerModel, load_checkpoint
-from models_zre_2d import LocalFNO2d, UFNO2d
+from modeling import (
+    LOCAL_GLOBAL_KINDS,
+    ModelConfig,
+    TrainerModel,
+    build_model as build_model_from_config,
+    load_checkpoint,
+)
 
 
 ARCHITECTURE_ORDER = ("localwno", "localfno", "ufno", "localop")
@@ -114,46 +119,18 @@ def load_run(label: str, path: Path) -> Run | None:
 
 
 def build_model(config: dict) -> TrainerModel:
-    kind = str(config["kind"])
+    """Rebuild a trained 2-D model from its recorded ``model_config``.
+
+    Delegates to the one factory; ``ModelConfig.from_dict`` absorbs the older
+    per-task metadata shapes, so runs predating the unified config still load.
+    """
+    inner = build_model_from_config(
+        ModelConfig.from_dict(config), int(config["in_channels"])
+    )
     contrast_mode = str(config.get("contrast_mode", "off"))
-    in_channels = int(config["in_channels"])
-    out_channels = int(config.get("out_channels", 1))
-    if kind == "ufno":
-        modes = tuple(int(value) for value in config["n_modes"])
-        inner = UFNO2d(
-            modes1=modes[0],
-            modes2=modes[1],
-            width=int(config["ufno_width"]),
-            in_channels=in_channels,
-            out_channels=out_channels,
-            sigmoid=True,
-            norm=str(config["ufno_norm"]),
-        )
-    elif kind in LOCAL_GLOBAL_KINDS or kind == "localop":
-        # Runs predating the operator registry record only their kind, so fall
-        # back to the pair that kind is shorthand for.
-        local, global_ = LOCAL_GLOBAL_KINDS.get(kind, ("fourier", "fourier"))
-        inner = LocalFNO2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            base_width=int(config["localfno_base_width"]),
-            local_window=tuple(config["localfno_window"]),
-            local_modes=tuple(config.get("localfno_modes", (6, 6))),
-            global_modes=tuple(config["localfno_global_modes"]),
-            spectral_rank=int(config["localfno_spectral_rank"]),
-            patch_chunk_size=int(config["localfno_patch_chunk_size"]),
-            output_sigmoid=True,
-            local_operator=config.get("local_operator", local),
-            global_operator=config.get("global_operator", global_),
-            local_operator_kwargs=config.get("local_operator_kwargs"),
-            global_operator_kwargs=config.get("global_operator_kwargs"),
-            local_windowed=config.get("local_windowed"),
-            wavelet_levels=int(config.get("localwno_levels", 2)),
-        )
-    else:
-        raise ValueError(f"unsupported model kind {kind!r}")
     if contrast_mode != "off":
         from contrast import ContrastComposed
+
         inner = ContrastComposed(
             inner, contrast_mode,
             schedule=config.get("contrast_schedule"),

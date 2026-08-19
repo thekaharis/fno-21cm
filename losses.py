@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -792,6 +792,45 @@ def signed_distance(target: torch.Tensor, cap: int = 32,
             - _chamfer_distance(~inside, cap))      # inside: negative
 
 
+def transverse_signed_distance(target: torch.Tensor, cap: int = 32,
+                               threshold: float = 0.5
+                               ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-XY-slice signed distance for a cube, plus a has-wall slice mask.
+
+    Why this exists.  On the production lightcone cache a transverse cell is
+    ~1.43 Mpc while a LOS cell is ~9.7 Mpc (41.7 Mpc at the z=5 end), so a
+    voxel-space distance transform treats one transverse step as equal to a
+    step ~7x longer in Mpc.  Worse, the measured truth front is 3.6 Mpc: 2.5
+    transverse cells, but 0.37 of a LOS cell -- along the LOS the correct
+    answer is not representable on this grid at all, so the 3-D transform
+    spends most of its weight on a direction where nothing can be learned.
+
+    There is a second effect, independent of units.  In 3-D a wall in an
+    adjacent LOS slice is always a voxel or two away, so the transform rarely
+    approaches ``cap``: measured phi range [-6, +7] and weight spread 1.5x,
+    against [-32, +32] and 7x per-slice.  The exponential weighting that makes
+    this loss work is effectively switched off in 3-D.
+
+    Returns ``(phi, has_wall)`` where ``has_wall`` is True for slices that
+    contain a front.  Single-phase slices carry no edge information, and every
+    voxel in them sits at ``cap`` -- so they would otherwise receive the
+    *largest* weight in the batch.  The caller must mask them out.
+    """
+    if target.dim() != 4:
+        raise ValueError(
+            f"expected a channel-less cube (N,X,Y,Z), got {tuple(target.shape)}"
+        )
+    n, x, y, z = target.shape
+    flat = target.permute(0, 3, 1, 2).reshape(n * z, x, y)
+    phi = signed_distance(flat, cap, threshold)
+    inside = flat > threshold
+    # A slice has a wall only if it contains both phases.
+    has_wall = inside.any(dim=(-2, -1)) & (~inside).any(dim=(-2, -1))
+    phi = phi.reshape(n, z, x, y).permute(0, 2, 3, 1)
+    has_wall = has_wall.reshape(n, 1, 1, z)        # broadcasts over X, Y
+    return phi, has_wall
+
+
 class WallPlacementLoss:
     """Penalise every pixel by its distance from the true bubble wall.
 
@@ -892,24 +931,199 @@ class ExponentialWallDistance:
     optimiser sails through.
 
     ``cap`` bounds the distance, hence ``w``, hence the gradient.
+
+    ``axes`` selects the geometry of the distance transform.  ``"3d"`` is the
+    historical behaviour.  ``"transverse"`` runs the transform independently in
+    each XY slice and drops slices with no front -- see
+    :func:`transverse_signed_distance` for why the LOS axis is not merely a
+    different scale but an unrepresentable one on this grid.
     """
 
     def __init__(self, scale: float = 8.0, cap: int = 32,
-                 threshold: float = 0.5, power: float = 1.0):
+                 threshold: float = 0.5, power: float = 1.0,
+                 axes: str = "3d"):
         self.scale = float(scale)
         self.cap = int(cap)
         self.threshold = float(threshold)
         self.power = float(power)
+        if str(axes).lower() not in {"3d", "transverse"}:
+            raise ValueError(
+                f"axes must be '3d' or 'transverse', got {axes!r}"
+            )
+        self.axes = str(axes).lower()
 
     def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
         if out.shape != y.shape:
             raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
+        field = _drop_channel(y.detach())
+        keep = None
         with torch.no_grad():
-            phi = signed_distance(_drop_channel(y.detach()), self.cap,
-                                  self.threshold)
+            if self.axes == "transverse" and field.dim() == 4:
+                phi, has_wall = transverse_signed_distance(
+                    field, self.cap, self.threshold)
+                keep = _match_rank(has_wall.to(phi.dtype), out)
+            else:
+                # A 2-D field is already transverse, so both modes agree there.
+                phi = signed_distance(field, self.cap, self.threshold)
             w = _match_rank(torch.exp(phi.abs() / self.scale), out)
-            w = w / w.mean()                      # keep the loss scale stable
+            if keep is not None:
+                w = w * keep
+            # Normalise over the voxels that actually contribute, so dropping
+            # single-phase slices rescales the loss rather than shrinking it.
+            # A cube can legitimately contain no wall at all -- cube 85 of the
+            # production cache is single-phase in all 256 slices -- and then
+            # `keep` is all zero. Without the guard that is 0/0, and the NaN
+            # propagates into w and out through the whole eval mean.
+            no_wall = False
+            if keep is None:
+                denom = w.mean()
+            else:
+                n_keep = keep.expand_as(w).sum()
+                no_wall = bool(n_keep == 0)
+                denom = w.sum() / n_keep.clamp_min(1.0)
+            w = w / denom.clamp_min(1e-12)
+        if no_wall:
+            # Return through `out` so the result still carries a grad_fn --
+            # a bare constant would break backward(). Zero weight, zero grad.
+            return (out * 0.0).sum()
         err = (out - y).abs()
         if self.power != 1.0:
             err = err.clamp_min(1e-12) ** self.power
-        return (w * err).mean()
+        if keep is None:
+            return (w * err).mean()
+        return (w * err).sum() / keep.expand_as(err).sum().clamp_min(1.0)
+
+
+class GranulometrySpectrum:
+    """Distance between predicted and true bubble-size spectra.
+
+    A differentiable stand-in for the mean-free-path bubble-size distribution
+    that ``viz/bubble_size_evaluation.py`` reports. The MFP estimator cannot be
+    a training term -- it thresholds the field, takes a first-crossing along
+    each ray, and histograms the result, none of which has a useful gradient.
+
+    Morphological opening by a ball of radius ``r`` (erode, then dilate) keeps
+    only structures that ball fits inside. The volume lost between consecutive
+    radii is therefore the mass of structures at that scale: a size
+    distribution, and the same physics the MFP estimator samples. Erosion and
+    dilation are min/max filters, so both are max-pooling and differentiable
+    almost everywhere. Measured against the MFP estimator on discs of radius
+    2-13, the two agree at Pearson r = 0.99.
+
+    Two consequences worth stating plainly.
+
+    *It needs an anchor.* A size spectrum is invariant to translation, to
+    rotation, and to any rearrangement that preserves sizes. Measured: a field
+    with every bubble displaced 37 px scores 21x *better* than one with the
+    wrong sizes. That is the same hole that sank the L2-free edge run
+    (``edgeonly``, 0.9098, never beating its epoch-0 value), and it is worse
+    here. Use this only as an auxiliary term over L2 or expwall.
+
+    *It works on the raw field.* Grayscale opening needs no threshold, so
+    unlike the MFP estimator there is no cutoff to choose and no gradient
+    killed by a hard mask.
+
+    ``downsample`` and ``max_slices`` bound the cost, which scales with
+    slices x plane area x radius. With the separable opening below, a whole
+    256-slice cube at 4 radii and 2x downsampling measures ~164 ms/step on CPU
+    and 32 slices ~32 ms, so the full LOS extent is affordable and
+    ``max_slices`` is a knob rather than a necessity. Radii are in cells
+    *after* downsampling.
+    """
+
+    #: Additive smoothing on the per-scale mass; see :meth:`spectrum`.
+    EPS = 1e-4
+
+    def __init__(
+        self,
+        radii: Sequence[int] = (1, 2, 4, 8),
+        downsample: int = 2,
+        max_slices: int | None = 32,
+        seed: int = 0,
+    ):
+        radii = tuple(int(r) for r in radii)
+        if len(radii) < 2 or any(r <= 0 for r in radii):
+            raise ValueError("radii must be at least two positive values")
+        if list(radii) != sorted(radii) or len(set(radii)) != len(radii):
+            raise ValueError(f"radii must be strictly increasing, got {radii}")
+        if int(downsample) < 1:
+            raise ValueError("downsample must be at least 1")
+        if max_slices is not None and int(max_slices) < 1:
+            raise ValueError("max_slices must be positive or None")
+        self.radii = radii
+        self.downsample = int(downsample)
+        self.max_slices = None if max_slices is None else int(max_slices)
+        self.seed = int(seed)
+
+    def _transverse(self, field: torch.Tensor) -> torch.Tensor:
+        """Field -> ``(batch, 1, X, Y)`` transverse planes.
+
+        A lightcone's bubble sizes are measured transversely, per LOS slice --
+        the same convention as the evaluator -- so a cube is folded into the
+        batch rather than opened with a 3-D ball.
+        """
+        if field.dim() == 5:
+            field = field[:, :1].permute(0, 4, 1, 2, 3)          # (N,W,1,X,Y)
+            field = field.reshape(-1, 1, *field.shape[-2:])
+        elif field.dim() == 4:
+            field = field[:, :1]
+        else:
+            raise ValueError(f"expected a 4-D or 5-D field, got {field.dim()}-D")
+        if self.max_slices is not None and len(field) > self.max_slices:
+            # A fixed stride, not a random draw: the term must be comparable
+            # between the two calls that make up one loss evaluation.
+            step = len(field) // self.max_slices
+            field = field[::step][: self.max_slices]
+        if self.downsample > 1:
+            field = F.avg_pool2d(field, self.downsample)
+        return field
+
+    @staticmethod
+    def _open(planes: torch.Tensor, radius: int) -> torch.Tensor:
+        """Morphological opening by a square of side ``2*radius + 1``.
+
+        Min/max filters over a rectangle are separable, so the square window
+        is two 1-D passes rather than one 2-D one -- bit-identical output for
+        O(k) work per pixel instead of O(k^2). Measured 5.2x faster over
+        radii (1, 2, 4, 8) on 32 planes of 140x140.
+        """
+        size = 2 * radius + 1
+        rows, cols = (size, 1), (1, size)
+        pad_r, pad_c = (radius, 0), (0, radius)
+        x = -F.max_pool2d(-planes, rows, stride=1, padding=pad_r)
+        x = -F.max_pool2d(-x, cols, stride=1, padding=pad_c)      # erosion
+        x = F.max_pool2d(x, rows, stride=1, padding=pad_r)
+        return F.max_pool2d(x, cols, stride=1, padding=pad_c)     # dilation
+
+    def spectrum(self, field: torch.Tensor) -> torch.Tensor:
+        """Normalised opening pattern spectrum, ``(batch, len(radii) - 1)``."""
+        planes = self._transverse(field)
+        volumes = []
+        for radius in self.radii:
+            volumes.append(self._open(planes, radius).flatten(1).mean(1))
+        volume = torch.stack(volumes, dim=1)
+        mass = volume[:, :-1] - volume[:, 1:]
+        # Openings are monotone in radius, so the differences are non-negative
+        # up to floating point; clamp rather than let a -1e-9 flip a CDF.
+        mass = mass.clamp_min(0.0)
+        # Additive smoothing, not a clamped denominator. A field with no
+        # structure at all -- a saturated or collapsed prediction, which is
+        # exactly what pred_sat_low/high watches for -- has zero mass at every
+        # scale, and normalising that by a clamped 1e-8 gives a gradient of
+        # order 1e8. Measured 3e6 on a constant field before this. Smoothing
+        # makes the featureless case a uniform spectrum, which is the honest
+        # answer, and bounds the gradient by 1/(n * EPS).
+        mass = mass + self.EPS
+        return mass / mass.sum(dim=1, keepdim=True)
+
+    def __call__(self, out: torch.Tensor, y: torch.Tensor, **_) -> torch.Tensor:
+        if out.shape != y.shape:
+            raise ValueError(f"shape mismatch: {out.shape} != {y.shape}")
+        predicted = self.spectrum(out)
+        with torch.no_grad():
+            target = self.spectrum(y)
+        # Compare CDFs, not densities: this is the 1-D Wasserstein distance
+        # over scale, so getting a bubble population's size slightly wrong
+        # costs less than getting it wrong by an order of magnitude. A
+        # bin-wise difference would treat those the same.
+        return (predicted.cumsum(1) - target.cumsum(1)).abs().mean()
