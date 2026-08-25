@@ -9,7 +9,7 @@
 # rather than N models resident at once.
 #
 #   SPECS_FILE  file with one `name=path` per line (blank lines/# ignored)
-#   SUITE       bsd | ps | edge3d | edgeslice | parity | rmse
+#   SUITE       bsd | ps | edge3d | edgeslice | parity | rmse | speed
 #
 #   sbatch --export=ALL,SUITE=bsd,SPECS_FILE=figures/final_eval/specs.txt \
 #     slurm/final_eval_suite.sbatch
@@ -49,7 +49,7 @@ export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/d
 export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-64}"
 
-SUITE="${SUITE:?set SUITE to bsd|ps|edge3d|edgeslice|parity|rmse}"
+SUITE="${SUITE:?set SUITE to bsd|ps|edge3d|edgeslice|parity|rmse|speed}"
 SPECS_FILE="${SPECS_FILE:?set SPECS_FILE}"
 [ -f "$SPECS_FILE" ] || { echo "no such SPECS_FILE: $SPECS_FILE" >&2; exit 2; }
 
@@ -96,6 +96,15 @@ case "$SUITE" in
   rmse)
     python -m viz.rmse_r2_eval --checkpoints "${SPECS[@]}" \
         --split "$SPLIT" --n-cones "$N_CONES" --out "$OUT" ;;
+  speed)
+    # Timing, not accuracy, so N_CONES is irrelevant -- N_SAMPLES cubes are
+    # cycled through WARMUP + ITERS passes. The --gres allocation is one whole
+    # GPU, so no other job shares the device, but the node's CPUs and PCIe are
+    # shared: treat the spread between models as meaningful and the absolute
+    # numbers as machine-specific.
+    python -m viz.inference_speed_eval --checkpoints "${SPECS[@]}" \
+        --split "$SPLIT" --n-samples "${N_SAMPLES:-4}" \
+        --warmup "${WARMUP:-3}" --iters "${ITERS:-15}" --out "$OUT" ;;
   *) echo "unknown SUITE=$SUITE" >&2; exit 2 ;;
 esac
 

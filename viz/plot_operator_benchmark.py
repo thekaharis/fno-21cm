@@ -44,23 +44,9 @@ LOCAL_HUE = {"fourier": "#2a78d6", "wavelet": "#eb6834", "hadamard": "#1baf7a",
 LOCAL_NAME = {"fourier": "local FNO", "wavelet": "local WNO",
               "hadamard": "local WHNO", "siren_hadamard": "local SWHNO",
               "cnn": "local CNN (U-Net path)", "siren_fourier": "local SirenFNO"}
-TRAINED = "local fno / global whno"      # the configuration actually trained
 
-# (dx, dy) in points, per label, to keep the dense cluster legible.
-NUDGE = {
-    "FNO (plain)": (0, 13), "U-FNO": (0, -20),
-    "local fno / global fno": (10, 9), "local fno / global wno": (-12, -19),
-    "local fno / global whno": (12, -19),
-    "local wno / global fno": (12, 11), "local wno / global wno": (-13, 11),
-    "local wno / global whno": (13, 11),
-    "local whno / global fno": (11, 10), "local whno / global wno": (-14, -19),
-    "local whno / global whno": (12, -19),
-    "local sirenfno / global sirenfno": (-2, -21),
-    "local cnn / global fno": (0, 13),
-}
 SHORT = {"FNO (plain)": "FNO", "U-FNO": "U-FNO",
          "local sirenfno / global sirenfno": "SirenFNO"}
-DEFAULT_NUDGE = (0, 12)      # any variant not in NUDGE still gets a label
 # The matrix is the square local x global sweep. cnn and siren_fourier have
 # their own hue (they are distinct local families) but sit outside it, so
 # membership drives the marker, not the colour.
@@ -68,14 +54,32 @@ MATRIX_OPS = ("fourier", "wavelet", "hadamard", "siren_hadamard")
 
 
 def short(v: str) -> str:
+    """Label text. Colour already encodes the local operator, so inside the
+    matrix only the global slot needs naming."""
     if v in SHORT:
         return SHORT[v]
     if "global " not in v:
         return v
-    g = v.split("global ")[1]
-    if v.startswith("local cnn"):
-        return f"CNN / {g}"                # cnn has its own hue but is the
-    return f"…/ {g}"                       # local family is already the colour
+    return v.split("global ")[1]
+
+
+def offsets(rows) -> dict[str, tuple[float, float]]:
+    """Alternate labels above/below within each local family.
+
+    Throughput varies under 1% across the global slot, so a family's four
+    points form a near-horizontal band and a fixed offset stacks every label on
+    its neighbour. Sorting by x and flipping the sign staggers them, which is
+    what the old hand-fitted NUDGE table did by hand for 13 points and could
+    not do for 23.
+    """
+    out, groups = {}, {}
+    for r in rows:
+        groups.setdefault(r["local"], []).append(r)
+    for members in groups.values():
+        members.sort(key=lambda r: r["params_real"])
+        for i, r in enumerate(members):
+            out[r["variant"]] = (0, 11) if i % 2 == 0 else (0, -19)
+    return out
 
 
 def main() -> None:
@@ -86,6 +90,7 @@ def main() -> None:
     fig.patch.set_facecolor(SURFACE)
     ax.set_facecolor(SURFACE)
 
+    nudge = offsets(rows)
     seen = set()
     for r in rows:
         loc = r["local"]
@@ -99,14 +104,10 @@ def main() -> None:
         elif loc not in LOCAL_NAME and "other" not in seen:
             lbl = "outside the matrix"
             seen.add("other")
-        is_trained = r["variant"] == TRAINED
-        ax.plot(r["params_real"], r["slices_per_s"], marker, ms=13 if is_trained else 10,
+        ax.plot(r["params_real"], r["slices_per_s"], marker, ms=10,
                 color=colour, mec=SURFACE, mew=2, label=lbl, zorder=3,
                 linestyle="none")
-        if is_trained:                      # ring the configuration in use
-            ax.plot(r["params_real"], r["slices_per_s"], "o", ms=22, mfc="none",
-                    mec=colour, mew=1.6, alpha=0.55, zorder=2, linestyle="none")
-        dx, dy = NUDGE.get(r["variant"], DEFAULT_NUDGE)
+        dx, dy = nudge[r["variant"]]
         ax.annotate(short(r["variant"]), (r["params_real"], r["slices_per_s"]),
                     textcoords="offset points", xytext=(dx, dy),
                     ha="center", fontsize=8.5, color=INK_2, zorder=4)
@@ -131,15 +132,6 @@ def main() -> None:
         ax.spines[s].set_color(GRID)
     ax.tick_params(colors=INK_2, labelsize=9)
 
-    # Name the ringed marker, otherwise the ring is unexplained.
-    trained = next(r for r in rows if r["variant"] == TRAINED)
-    ax.annotate("the configuration trained\n(whno_glob)",
-                xy=(trained["params_real"], trained["slices_per_s"]),
-                xytext=(34, -46), textcoords="offset points",
-                fontsize=8.5, color=INK_2, ha="left",
-                arrowprops=dict(arrowstyle="-", color=INK_MUTED, lw=1.0,
-                                connectionstyle="arc3,rad=-0.25"))
-
     ax.annotate("smaller and faster", xy=(0.055, 0.955), xycoords="axes fraction",
                 xytext=(0.20, 0.955), textcoords="axes fraction",
                 fontsize=9, color=INK_MUTED, va="center", ha="left",
@@ -148,10 +140,14 @@ def main() -> None:
     ax.set_ylim(440, 820)
     ax.set_xlim(2.2e5, 4.2e7)
 
-    # Fixed legend order: the three matrix families, then the fold-in.
+    # Legend order is derived, not hardcoded: the previous fixed list silently
+    # dropped every family added after it was written.
     handles, labels = ax.get_legend_handles_labels()
     by_label = {lab: h for h, lab in zip(handles, labels)}
-    order = ["local FNO", "local WNO", "local WHNO", "outside the 3x3 matrix"]
+    order = [LOCAL_NAME[k] for k in
+             ("fourier", "wavelet", "hadamard", "siren_hadamard",
+              "siren_fourier", "cnn")] + ["outside the matrix"]
+    order += [l for l in by_label if l not in order]       # never lose one
     leg = ax.legend([by_label[l] for l in order if l in by_label],
                     [l for l in order if l in by_label],
                     loc="lower right", frameon=True, fontsize=9.5,

@@ -28,6 +28,7 @@ from util.neuralop_setup import prefer_local_neuralop
 prefer_local_neuralop()
 
 import torch
+import dataclasses
 
 # These were never imported here: the script predates the pipeline
 # refactor and reached them through the now-deleted `fno_21cm` module.
@@ -45,6 +46,10 @@ VARIANTS = [("FNO (plain)", "fno", None, None),
 # weights) is now a first-class slot operator, and it is the global slot of the
 # strongest new cells. cnn in the local slot IS the U-FNO's U-Net path, so the
 # cnn/* row isolates the global basis at fixed local path.
+REFERENCE_KINDS = ("fno", "ufno", "sirenfno")   # sized outside the sweep
+REFERENCE_MODES = (32, 32)
+REFERENCE_HIDDEN = 64
+
 MATRIX = ("fourier", "wavelet", "hadamard", "siren_hadamard")
 for loc in MATRIX:
     for glob in MATRIX:
@@ -88,8 +93,18 @@ def build(kind, local_op, global_op):
         os.environ.pop("LOCAL_OPERATOR", None)
         os.environ.pop("GLOBAL_OPERATOR", None)
     cfg = ModelConfig.from_env(ndim=2)
-    # The caller unpacks three values; returning only the model is the other
-    # half of the refactor breakage that left this script unrunnable.
+    # The whole-volume reference architectures are sized independently of the
+    # local/global sweep, and BASE_ENV can no longer express that:
+    #   * modes -- ModelConfig.axes() takes the FIRST prefix that is set, and
+    #     BASE_ENV sets LOCALFNO_GLOBAL_MODES_* (for the sweep), which silently
+    #     shadows N_MODES_* and left FNO/U-FNO at 16 modes instead of 32.
+    #   * hidden_channels -- never read from the environment at all; it is a
+    #     dataclass default, so HIDDEN_CHANNELS=64 was a no-op.
+    # Set them on the config directly so the reference points are what they
+    # claim to be, and so a future env rename cannot quietly resize them again.
+    if kind in REFERENCE_KINDS:
+        cfg = dataclasses.replace(cfg, modes=REFERENCE_MODES,
+                                  hidden_channels=REFERENCE_HIDDEN)
     return build_model(cfg, IN_CHANNELS), cfg, cfg.checkpoint_tag
 
 
