@@ -380,6 +380,11 @@ def main() -> None:
     from util.run_metadata import write_run_metadata
     write_run_metadata(CHECKPOINT_DIR, {
         "task": "zre",
+        "input_features": {
+            "name": INPUT_FEATURES,
+            "in_channels": dataset.in_channels,
+            "spatial_shape": list(dataset.map_shape),
+        },
         # Record every architecture knob, not just the generic ones: a sweep
         # over base width / window / local modes / omega is otherwise
         # indistinguishable in the run metadata (and therefore on the

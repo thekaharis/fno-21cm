@@ -446,6 +446,7 @@ def main() -> None:
         "model_config": model_config,
         "input_features": {
             "name": INPUT_FEATURES,
+            "spatial_shape": list(cache.x.shape[-2:]),
             "in_channels": cache.in_channels,
             "channel_names": list(cache.channel_names),
         },

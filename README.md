@@ -135,6 +135,10 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `legacy/slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
 | `legacy/slurm/viz_ufno_detailed.sbatch` | Same as `slurm/viz_detailed.sbatch` but for the U-FNO checkpoint. |
 | `slurm/viz_localop.sbatch` | Prediction visualization for any `localop` operator pairing. Takes a required `CHECKPOINT_DIR` and nothing else — the architecture comes from that run's `run_metadata.json`, and `VIZ_TAG` defaults to the directory's basename. |
+| `slurm/train_3d_waveform.sbatch` | Single-A100 learned-waveform 3-D training; delegates to the matrix runner as `ARCH=lwf_lwf`, default `LOSS=plain`. |
+| `slurm/train_2d_xhi_waveform.sbatch` | Single-A100 learned-waveform 2-D x_HI training, with overridable waveform controls and batch size. |
+| `slurm/train_zre_waveform.sbatch` | Single-A100 learned-waveform z_re training; absolute L2 by default. |
+| `slurm/viz_waveforms.sbatch` | CPU-only all-branch/all-axis waveform report from `CHECKPOINT_DIR`; raw bins, effective orthonormal modes, detailed plots and NPZ exports. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
 | `legacy/slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |

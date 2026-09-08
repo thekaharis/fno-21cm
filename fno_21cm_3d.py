@@ -336,6 +336,7 @@ def main():
             CUBES_CACHE,
             input_features=INPUT_FEATURES,
         )
+        spatial_shape = (dataset.n_x, dataset.n_y, dataset.n_z)
         rprint(f"Dataset: {len(dataset)} cubes  "
                f"({dataset.n_x} x {dataset.n_y} x {dataset.n_z}, "
                f"z in [{dataset.target_z[0]:.2f}, {dataset.target_z[-1]:.2f}])")
@@ -362,6 +363,9 @@ def main():
             preload=False,
             input_features=INPUT_FEATURES,
         )
+        from dataset.loader import LightconeFile
+        with LightconeFile(files[0]) as first_cone:
+            spatial_shape = (*first_cone.field_shape(dataset.input_field)[:2], dataset.n_z)
         rprint(f"Dataset: {len(dataset)} cubes  ({N_Z} LOS cells each, "
                f"z in [{Z_MIN}, {Z_MAX}])")
 
@@ -720,6 +724,7 @@ def main():
         "model_config": MODEL_CONFIG.to_dict(),
         "input_features": {
             "name": INPUT_FEATURES.name,
+            "spatial_shape": list(spatial_shape),
             "channel_names": list(INPUT_FEATURES.channel_names),
             "in_channels": in_channels,
         },

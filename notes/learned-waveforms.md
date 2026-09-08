@@ -106,8 +106,43 @@ benchmark this overhead at the intended GPU patch count.
 `metrics.jsonl` includes each bank/axis's last-training-forward condition,
 minimum singular value, and orthogonality error under `waveform_*` keys. These
 are snapshot diagnostics, not epoch maxima. Raw learned tables are stored in
-the checkpoint under `*.spectral.bank.tables.<axis>`. The plotting helper below
-shows both candidate and effective modes at an explicitly supplied grid size.
+the checkpoint under `*.spectral.bank.tables.<axis>`. New training metadata
+records the input spatial shape, so the plotting helper reconstructs all local
+and global grids without opening a simulation dataset.
+
+## Waveform visualization
+
+```bash
+python -m viz.learned_waveforms --checkpoint-dir checkpoints/checkpoints_2d_xhi_local_lwf_lwf
+python -m viz.learned_waveforms --checkpoint-dir checkpoints/my_3d_run --checkpoint-kind final
+```
+
+The report contains:
+
+* `overview_bins.png`: one row per independent branch bank, one column per
+  spatial axis, showing the learned bin amplitudes.
+* `overview_modes.png`: the same branch/axis layout showing orthonormal mode
+  shapes, with vertical offsets and unit-peak scaling for legibility.
+* One detailed PNG per bank: raw table, filtered sampled candidates labeled by
+  dilation/phase, and orthonormal modes including DC. The two bottleneck blocks
+  appear as one explicitly shared bank, rather than two independent waveforms.
+* One NPZ per bank with the actual, unscaled numerical arrays, plus a JSON
+  manifest recording checkpoint, shapes, sharing, and output files.
+
+Default output: `figures/waveforms/<run-directory>/<checkpoint-stem>/`.
+Use `--out-dir` to change it and `--max-modes` (default 6) to display more modes.
+All retained modes are exported to NPZ regardless of the display limit. Repeating
+the same command replaces that snapshot's report; use a distinct output directory
+to preserve earlier figures from an evolving best checkpoint.
+
+For older runs without `input_features.spatial_shape`, add `--input-shape` with
+the **original training input** dimensions, for example `--input-shape 140 140
+256` for a run trained at that 3-D resolution, or `--input-shape 140 140` for
+2-D/z_re. The script never assumes these example resolutions. z_re has two
+spatial dimensions: its LOS slices are input channels. Local-only waveform
+runs with windowed branches need only the saved local-window sizes.
+
+The existing single-bank interface also remains available:
 
 ```bash
 # List the exact bank prefixes in a saved model:
@@ -121,6 +156,64 @@ Prefixes can include extra wrappers (for example `module.`); use the listed name
 The helper also saves an NPZ containing the raw bins, normalized candidates and
 orthonormal matrices. For a bottleneck bank, supply its downsampled whole-field
 shape, not the local window shape. These are checkpoint snapshots, not histories.
+
+## SLURM launchers
+
+Submit from the project root, creating the logs directory **before** submission
+because SLURM opens log files before the script runs:
+
+```bash
+mkdir -p logs
+sbatch slurm/train_2d_xhi_waveform.sbatch
+sbatch slurm/train_zre_waveform.sbatch
+sbatch slurm/train_3d_waveform.sbatch
+```
+
+These use the existing cluster environment (`devel/miniforge`, `fno-env`) and
+data/cache conventions, with both slots fixed to `learned_waveform`:
+
+| Launcher | Default training | Resources requested | Default checkpoint directory |
+| --- | --- | --- | --- |
+| `train_2d_xhi_waveform.sbatch` | 20 epochs, batch 8, LR 1e-4 | 1 A100, 8 CPUs, 32G, 8h | `checkpoints/checkpoints_2d_xhi_local_lwf_lwf` |
+| `train_zre_waveform.sbatch` | 200 epochs, batch 8, absolute L2, LR 1e-4 | 1 A100, 16 CPUs, 64G, 6h | `checkpoints/checkpoints_zre_local_lwf_lwf_l2` |
+| `train_3d_waveform.sbatch` | 20 epochs, fixed batch 1, `LOSS=plain`, LR 1e-4 | 1 A100, 24 CPUs, 200G, 96h | `checkpoints/checkpoints_3d_lwf_lwf_plain` |
+
+All set table LR ratio 0.1, bins 15/31, condition limit 10000, and gradient
+clipping 1.0. Waveform controls, epoch count, and checkpoint directory remain
+overridable via `--export`; 2-D batch sizes and LRs are overridable as in their
+base launchers. The 3-D trainer uses `LOCALFNO_LEARNING_RATE` and its fixed
+batch size of one. These are single-process/single-GPU launchers. Resource
+requests follow comparable variants; waveform-specific GPU memory/runtime
+have not been benchmarked.
+
+```bash
+sbatch --export=ALL,N_EPOCHS=50,WAVEFORM_LOCAL_BINS=31,WAVEFORM_LR_RATIO=0.05,CHECKPOINT_DIR=checkpoints/my_waveform_run \
+  slurm/train_2d_xhi_waveform.sbatch
+sbatch --export=ALL,LOSS=hybrid,N_EPOCHS=30 \
+  slurm/train_3d_waveform.sbatch
+```
+
+3-D delegates to `train_3d_matrix.sbatch`, so its `LOSS` presets, scratch
+staging controls and `CONTINUE_FROM` warm start work unchanged. It also accepts
+`ARCH=lwf_lwf` directly. The wrappers override stale architecture variables
+exported from your shell; other experiment overrides are preserved. Use a new
+`CHECKPOINT_DIR` for concurrent runs or changed loss settings.
+
+Plot every branch on the CPU partition after training:
+
+```bash
+sbatch --export=ALL,CHECKPOINT_DIR=checkpoints/my_waveform_run \
+  slurm/viz_waveforms.sbatch
+# For older metadata, export a space-separated shape before submitting:
+export WAVEFORM_INPUT_SHAPE="140 140 256"
+sbatch --export=ALL,CHECKPOINT_DIR=checkpoints/my_3d_run,CHECKPOINT_KIND=final \
+  slurm/viz_waveforms.sbatch
+```
+
+`viz_waveforms.sbatch` requests 2 CPUs, 8G and 20 minutes on `compute`; no GPU
+or data cache is needed. `WAVEFORM_VIZ_MODES` controls displayed mode count and
+`OUT_DIR` controls the report directory. The scripts were syntax-checked and
+their delegation tested with stub cluster commands; no jobs were submitted.
 
 Old operator models retain their parameter registration and single optimizer
 group. Learned-waveform runs have two groups; resume with their own checkpoint

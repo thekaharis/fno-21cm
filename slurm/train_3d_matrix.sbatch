@@ -3,6 +3,7 @@
 #
 #   ARCH  ufno | fno_fno | fno_whno | wno_whno | whno_whno
 #         swhno_swhno | sfno_swhno | whno_swhno   (SIREN Walsh weights)
+#         lwf_lwf                              (learned orthonormal waveforms)
 #   LOSS  plain | expwall | hybrid | expwall_theta | bsd
 #
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=hybrid slurm/train_3d_matrix.sbatch
@@ -62,7 +63,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno}"
+ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno|lwf_lwf}"
 LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta|bsd}"
 
 # ---- architecture ------------------------------------------------------
@@ -75,6 +76,7 @@ case "$ARCH" in
   fno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=fourier  GLOBAL_OPERATOR=hadamard ;;
   wno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=wavelet  GLOBAL_OPERATOR=hadamard ;;
   whno_whno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=hadamard ;;
+  lwf_lwf)    export MODEL_KIND=localop LOCAL_OPERATOR=learned_waveform GLOBAL_OPERATOR=learned_waveform ;;
   # SIREN-generated Walsh weights: sequency is the Walsh analogue of
   # frequency, so the same hypernetwork trick the SirenFNO applies to
   # Fourier modes applies here (operators.SirenWalshHadamardOperator).
