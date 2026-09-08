@@ -19,6 +19,9 @@ registry entry so either slot can host any of:
 ``cnn``
     A classical U-Net convolution path, the Wen et al. ``U_net`` local branch
     generalized to 2-D/3-D and to configurable depth.
+``learned_waveform``
+    Random learned bin tables, anti-aliased dilation, and orthonormal real QR
+    transforms with per-mode channel mixing.
 
 Every operator maps ``(B, C, *spatial) -> (B, C, *spatial)``. What differs is
 declared on :class:`OperatorSpec`: whether the enclosing block should wrap it in
@@ -574,6 +577,24 @@ def _build_cnn(channels, ndim, modes, hyperparameters):
     )
 
 
+def _build_learned_waveform(channels, ndim, modes, hyperparameters):
+    from learned_waveform_operator import LearnedWaveformOperator
+
+    return LearnedWaveformOperator(channels, ndim, modes, **hyperparameters)
+
+
+def _validate_learned_waveform(sizes, modes, hyperparameters, *, context):
+    from learned_waveform_operator import validate_waveform_shape
+
+    bins = int(hyperparameters["bins"])
+    limit = float(hyperparameters["condition_limit"])
+    if bins < 3 or bins % 2 != 1:
+        raise ValueError("waveform bins must be odd and at least 3")
+    if not math.isfinite(limit) or limit <= 1:
+        raise ValueError("waveform condition_limit must be finite and greater than 1")
+    validate_waveform_shape(sizes, modes, context=context)
+
+
 def _fft_limits(sizes: Sequence[int]) -> tuple[int, ...]:
     """Retained-mode ceilings of the quadrant rFFT convolutions."""
     return tuple(
@@ -627,6 +648,13 @@ def _validate_cnn(sizes, modes, hyperparameters, *, context):
 
 
 OPERATORS: dict[str, OperatorSpec] = {
+    "learned_waveform": OperatorSpec(
+        name="learned_waveform",
+        build=_build_learned_waveform,
+        defaults={"bins": 31, "condition_limit": 1e4},
+        uses_modes=True,
+        validate=_validate_learned_waveform,
+    ),
     "fourier": OperatorSpec(
         name="fourier",
         build=_build_fourier,
@@ -698,6 +726,8 @@ OPERATORS: dict[str, OperatorSpec] = {
 
 #: Friendly spellings accepted wherever an operator name is read.
 OPERATOR_ALIASES = {
+    "waveform": "learned_waveform",
+    "orthogonal_waveform": "learned_waveform",
     "fno": "fourier",
     "fft": "fourier",
     "siren": "siren_fourier",

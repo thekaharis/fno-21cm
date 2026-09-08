@@ -61,6 +61,7 @@ from losses import (
 )
 from contrast import ContrastComposed
 from modeling import ModelConfig, TrainerModel, build_model, load_checkpoint
+from learned_waveform_operator import waveform_parameter_groups
 from training import (
     ContrastRefit,
     MetricsTrainer,
@@ -496,8 +497,12 @@ def main():
     else:
         global_bs = BATCH_SIZE
         scaled_lr = base_lr
-    optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=scaled_lr, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.Adam(
+        waveform_parameter_groups(
+            model, lr=scaled_lr, weight_decay=WEIGHT_DECAY,
+            waveform_lr_ratio=MODEL_CONFIG.waveform_lr_ratio,
+        ), lr=scaled_lr, weight_decay=WEIGHT_DECAY,
+    )
     grad_clip_norm = {
         "fno": 0.0,
         "ufno": UFNO_GRAD_CLIP_NORM,

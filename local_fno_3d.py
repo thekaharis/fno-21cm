@@ -2,7 +2,7 @@
 
 The U-Net skeleton is fixed; the operator inside each residual block is chosen
 per slot from the registry in :mod:`operators` -- ``fourier``, ``siren_fourier``,
-``wavelet``, ``hadamard``, or ``cnn``. The four windowed encoder/decoder
+``wavelet``, ``hadamard``, ``learned_waveform``, or ``cnn``. The four windowed encoder/decoder
 branches form the "local" slot and the two whole-volume bottleneck blocks the
 "global" slot.
 """
@@ -510,10 +510,22 @@ class SpectralResidualBlock3d(nn.Module):
         )
         return crop_to_original(transform(padded), amounts)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, operator_transform=None) -> torch.Tensor:
         projected = self.in_projection(x)
+        prepare = getattr(self.spectral, "materialize_transform", None)
         materialize = getattr(self.spectral, "materialize_weights", None)
-        if materialize is None:
+        if prepare is not None:
+            if operator_transform is None:
+                shape = (self.window_grid.window_size if self.window_grid is not None
+                         else projected.shape[2:])
+                operator_transform = prepare(
+                    shape, device=projected.device, dtype=projected.dtype
+                )
+
+            def transform(patches: torch.Tensor) -> torch.Tensor:
+                return self.spectral(patches, transform=operator_transform)
+
+        elif materialize is None:
             transform = self.spectral
         else:
             # SIREN-generated weights depend only on the retained modes, so
@@ -686,6 +698,10 @@ class LocalFNO3d(nn.Module):
                 width2, self.global_modes, spectral_rank, **global_block,
             ),
         )
+        if global_name == "learned_waveform":
+            from learned_waveform_operator import SharedWaveformBottleneck
+
+            self.bottleneck = SharedWaveformBottleneck(*self.bottleneck)
         self.fuse1 = nn.Conv3d(width2 + width1, width1, kernel_size=1)
         self.decoder1 = SpectralResidualBlock3d(
             width1, local_modes, spectral_rank,

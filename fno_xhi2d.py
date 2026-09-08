@@ -61,6 +61,7 @@ from losses import (
 )
 from contrast import ContrastComposed
 from modeling import ModelConfig, TrainerModel, build_model
+from learned_waveform_operator import waveform_parameter_groups
 from training import ContrastRefit, MetricsTrainer
 from util import seed_everything
 from util.run_metadata import write_run_metadata
@@ -415,7 +416,10 @@ def main() -> None:
                                            max_norm=GRAD_CLIP_NORM)
             return None
     optimizer = torch.optim.Adam(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+        waveform_parameter_groups(
+            model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
+            waveform_lr_ratio=MODEL_CONFIG.waveform_lr_ratio,
+        ), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
     )
     if GRAD_CLIP_NORM > 0:
         optimizer.register_step_pre_hook(_clip_before_step)

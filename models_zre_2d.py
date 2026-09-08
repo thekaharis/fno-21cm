@@ -644,10 +644,22 @@ class SpectralResidualBlock2d(nn.Module):
         )
         return crop_to_original(transform(padded), amounts)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, operator_transform=None) -> torch.Tensor:
         projected = self.in_projection(x)
+        prepare = getattr(self.spectral, "materialize_transform", None)
         materialize = getattr(self.spectral, "materialize_weights", None)
-        if materialize is None:
+        if prepare is not None:
+            if operator_transform is None:
+                shape = (self.window_grid.window_size if self.window_grid is not None
+                         else projected.shape[2:])
+                operator_transform = prepare(
+                    shape, device=projected.device, dtype=projected.dtype
+                )
+
+            def transform(patches: torch.Tensor) -> torch.Tensor:
+                return self.spectral(patches, transform=operator_transform)
+
+        elif materialize is None:
             transform = self.spectral
         else:
             # SIREN-generated weights depend only on the retained modes, so
@@ -810,6 +822,10 @@ class LocalFNO2d(nn.Module):
                 width2, self.global_modes, spectral_rank, **global_block,
             ),
         )
+        if global_name == "learned_waveform":
+            from learned_waveform_operator import SharedWaveformBottleneck
+
+            self.bottleneck = SharedWaveformBottleneck(*self.bottleneck)
         self.fuse1 = nn.Conv2d(width2 + width1, width1, kernel_size=1)
         self.decoder1 = SpectralResidualBlock2d(
             width1, local_modes, spectral_rank,

@@ -23,6 +23,7 @@ import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 
 from neuralop import Trainer
+from learned_waveform_operator import waveform_diagnostics
 
 DEFAULT_DEVICE = (
     "cuda" if torch.cuda.is_available()
@@ -271,6 +272,7 @@ class MetricsTrainer(Trainer):
                     value, self._world_size
                 )
         grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
+        row.update(waveform_diagnostics(self.model))
         if grad_norm is not None:
             row["last_grad_norm"] = float(grad_norm)
         if device.type == "cuda":

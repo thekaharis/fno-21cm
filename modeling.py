@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -25,6 +26,7 @@ LOCAL_GLOBAL_KINDS = {
 
 #: Short tags used to name checkpoint directories of explicit ``localop`` runs.
 OPERATOR_TAGS = {
+    "learned_waveform": "lwf",
     "fourier": "fno",
     "siren_fourier": "sirenfno",
     "wavelet": "wno",
@@ -61,6 +63,10 @@ def operator_env_settings() -> dict:
         "local_operator": os.environ.get("LOCAL_OPERATOR", "fourier"),
         "global_operator": os.environ.get("GLOBAL_OPERATOR", "fourier"),
         "local_windowed": _env_optional_bool("LOCAL_WINDOWED"),
+        "waveform_local_bins": int(os.environ.get("WAVEFORM_LOCAL_BINS", "15")),
+        "waveform_global_bins": int(os.environ.get("WAVEFORM_GLOBAL_BINS", "31")),
+        "waveform_condition_limit": float(os.environ.get("WAVEFORM_CONDITION_LIMIT", "1e4")),
+        "waveform_lr_ratio": float(os.environ.get("WAVEFORM_LR_RATIO", "0.1")),
         "whno_ordering": os.environ.get("WHNO_ORDERING", "sequency").lower(),
         "cnn_depth": int(os.environ.get("CNN_DEPTH", "3")),
         "cnn_kernel_size": int(os.environ.get("CNN_KERNEL_SIZE", "3")),
@@ -78,6 +84,9 @@ def operator_env_settings() -> dict:
 
 def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
     """Pick the hyperparameters one operator reads out of a settings mapping."""
+    if operator == "learned_waveform":
+        return {"bins": int(settings.get("waveform_bins", 31)),
+                "condition_limit": float(settings.get("waveform_condition_limit", 1e4))}
     if operator == "wavelet":
         return {"levels": int(settings["localwno_levels"])}
     if operator == "hadamard":
@@ -149,6 +158,10 @@ class ModelConfig:
     local_operator: str = "fourier"
     global_operator: str = "fourier"
     local_windowed: bool | None = None
+    waveform_local_bins: int = 15
+    waveform_global_bins: int = 31
+    waveform_condition_limit: float = 1e4
+    waveform_lr_ratio: float = 0.1
     whno_ordering: str = "sequency"
     cnn_depth: int = 3
     cnn_kernel_size: int = 3
@@ -239,6 +252,13 @@ class ModelConfig:
             raise ValueError("localfno_patch_chunk_size must be positive")
         if self.localwno_levels <= 0:
             raise ValueError("localwno_levels must be positive")
+        for bins in (self.waveform_local_bins, self.waveform_global_bins):
+            if bins < 3 or bins % 2 != 1:
+                raise ValueError("waveform bins must be odd and at least 3")
+        if not math.isfinite(self.waveform_condition_limit) or self.waveform_condition_limit <= 1:
+            raise ValueError("waveform_condition_limit must be finite and greater than 1")
+        if not math.isfinite(self.waveform_lr_ratio) or self.waveform_lr_ratio <= 0:
+            raise ValueError("waveform_lr_ratio must be finite and positive")
         if self.cnn_depth <= 0:
             raise ValueError("cnn_depth must be positive")
         if self.cnn_kernel_size <= 0 or not self.cnn_kernel_size % 2:
@@ -282,11 +302,13 @@ class ModelConfig:
             return bool(self.local_windowed)
         return operator_spec(self.local_operator).windowed
 
-    def _slot_kwargs(self, operator: str) -> dict:
+    def _slot_kwargs(self, operator: str, *, local: bool = True) -> dict:
         """Hyperparameters this configuration supplies to one operator."""
         return slot_hyperparameters(
             operator,
             {
+                "waveform_bins": self.waveform_local_bins if local else self.waveform_global_bins,
+                "waveform_condition_limit": self.waveform_condition_limit,
                 "localwno_levels": self.localwno_levels,
                 "whno_ordering": self.whno_ordering,
                 "cnn_depth": self.cnn_depth,
@@ -310,7 +332,7 @@ class ModelConfig:
             self.local_operator,
             self.global_operator,
             self._slot_kwargs(self.local_operator),
-            self._slot_kwargs(self.global_operator),
+            self._slot_kwargs(self.global_operator, local=False),
         )
 
     @classmethod
@@ -442,6 +464,10 @@ class ModelConfig:
             "local_operator": self.local_operator,
             "global_operator": self.global_operator,
             "local_windowed": self.local_windowed,
+            "waveform_local_bins": self.waveform_local_bins,
+            "waveform_global_bins": self.waveform_global_bins,
+            "waveform_condition_limit": self.waveform_condition_limit,
+            "waveform_lr_ratio": self.waveform_lr_ratio,
             "whno_ordering": self.whno_ordering,
             "cnn_depth": self.cnn_depth,
             "cnn_kernel_size": self.cnn_kernel_size,
@@ -538,6 +564,11 @@ class ModelConfig:
                 if "cnn" in slots
                 else ""
             )
+            waveform = (
+                f" waveform=orthonormal-qr bins={self.waveform_local_bins}/{self.waveform_global_bins}"
+                f" waveform-lr={self.waveform_lr_ratio:g}"
+                if "learned_waveform" in slots else ""
+            )
             # Only operators that truncate modes report them.
             local_modes = (
                 f"local-modes={self.localfno_modes} "
@@ -556,7 +587,7 @@ class ModelConfig:
                 f"{4 * self.localfno_base_width} "
                 f"rank={self.localfno_spectral_rank} "
                 f"chunk={self.localfno_patch_chunk_size}"
-                f"{siren}{wavelet}{walsh}{cnn}{windowed} "
+                f"{siren}{wavelet}{walsh}{cnn}{waveform}{windowed} "
                 "sigmoid-output"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""

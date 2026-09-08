@@ -77,6 +77,7 @@ from dataset import paths
 from dataset.zre_target import TARGET_KINDS, build_target_cache
 from losses import AbsoluteLoss, H2Loss2d, RelativeLoss, WeightedLoss
 from modeling import ModelConfig, TrainerModel, build_model
+from learned_waveform_operator import waveform_parameter_groups
 
 
 # ------------------------------------------------------------------ config
@@ -352,8 +353,12 @@ def main() -> None:
     print(f"Model: {description} -> "
           f"{count_model_params(model.fno):,} parameters")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE,
-                                 weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.Adam(
+        waveform_parameter_groups(
+            model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
+            waveform_lr_ratio=MODEL_CONFIG.waveform_lr_ratio,
+        ), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
+    )
     if GRAD_CLIP_NORM > 0:
         # Same mechanism as fno_21cm_3d.py: the SIREN hypernetwork diverges
         # to NaN within the first epoch without clipping (its 3-D twin
