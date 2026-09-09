@@ -3,6 +3,7 @@
 #
 #   ARCH  ufno | fno_fno | fno_whno | wno_whno | whno_whno
 #         swhno_swhno | sfno_swhno | whno_swhno   (SIREN Walsh weights)
+#         cnn_whno | cnn_swhno | cnn_fno | cnn_sfno   (U-FNO shape, global slot swapped)
 #         lwf_lwf                              (learned orthonormal waveforms)
 #   LOSS  plain | expwall | hybrid | expwall_theta | bsd
 #
@@ -63,7 +64,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno|lwf_lwf}"
+ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno|cnn_whno|cnn_swhno|cnn_fno|cnn_sfno|lwf_lwf}"
 LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta|bsd}"
 
 # ---- architecture ------------------------------------------------------
@@ -90,6 +91,13 @@ case "$ARCH" in
   # the U-FNO's Fourier.
   cnn_whno)    export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=hadamard ;;
   cnn_swhno)   export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=siren_hadamard ;;
+  # Same shape with the Fourier global slots, closing the cnn row: cnn_fno is
+  # the closest thing in the matrix to a U-FNO built out of localop parts, and
+  # cnn_sfno swaps in the SIREN-generated Fourier kernel.
+  # NOTE: cnn_fno contains no SIREN, so SIREN_OMEGA is inert for it -- only
+  # LOCALFNO_BASE_WIDTH carries over from the bw48om60 recipe.
+  cnn_fno)     export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=fourier ;;
+  cnn_sfno)    export MODEL_KIND=localop LOCAL_OPERATOR=cnn GLOBAL_OPERATOR=siren_fourier ;;
   *) echo "unknown ARCH=$ARCH" >&2; exit 2 ;;
 esac
 
