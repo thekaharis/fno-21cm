@@ -301,18 +301,22 @@ blocks. Each takes any operator from the registry in `operators.py`:
 | `siren_fourier` | quadrants with SIREN-generated per-mode weights | `SIREN_*` |
 | `wavelet` | multilevel orthonormal Haar, all bands retained | `LOCALWNO_LEVELS` |
 | `hadamard` | truncated Walsh-Hadamard in sequency order | `WHNO_ORDERING`, mode counts |
-| `learned_waveform` | learned bin waveforms, real anti-aliasing, orthonormal QR | `WAVEFORM_LOCAL_BINS`, `WAVEFORM_GLOBAL_BINS`, `WAVEFORM_CONDITION_LIMIT`, `WAVEFORM_LR_RATIO`, mode counts |
+| `learned_waveform` | learned bin waveforms, orthonormal QR, real phase-group mixing | `WAVEFORM_INIT`, `WAVEFORM_LOCAL_BINS`, `WAVEFORM_GLOBAL_BINS`, `WAVEFORM_CONDITION_LIMIT`, `WAVEFORM_LR_RATIO`, mode counts |
 | `cnn` | classical U-Net convolution path | `CNN_DEPTH`, `CNN_KERNEL_SIZE`, `CNN_DROPOUT`, `CNN_NORM` |
 
-The learned waveform operator starts from random bin amplitudes and trains
-them from step one. Each encoder/decoder branch has its own per-axis bank;
+The learned waveform operator starts from `WAVEFORM_INIT=random` by default;
+`smooth_random`, `sine`, `triangle`, `square`, and `sawtooth` are also available.
+All starting profiles train from step one. Each encoder/decoder branch has its own per-axis bank;
 the two bottleneck blocks share one bank with independent mixing weights.
+Real coefficients mix across phase combinations within each dilation group,
+allowing Fourier phase rotations while synthesis still uses the orthonormal
+basis. Mode counts remain real-column counts, not rFFT cutoffs.
 See [the waveform implementation guide](notes/learned-waveforms.md) for mode
 semantics, reconstruction, diagnostics, and limitations.
 
 ```bash
 MODEL_KIND=localop LOCAL_OPERATOR=learned_waveform GLOBAL_OPERATOR=learned_waveform \
-  python fno_xhi2d.py
+  WAVEFORM_INIT=sine python fno_xhi2d.py
 # The same switches also work with fno_zre.py and fno_21cm_3d.py.
 ```
 

@@ -23,9 +23,25 @@ DC-only axis allocates no unused table. Banks are shared across channels and
 patches, not across different task models or local branches.
 
 The table consists of B equal bins on one normalized period, with continuous
-learnable amplitudes. Initialization uses seeded Gaussian values, rejecting
-draws with a very weak fundamental. Tables are trained from the first optimizer
-step. There is no freeze schedule, learnable frequency, or complex arithmetic.
+learnable amplitudes. `WAVEFORM_INIT` selects the initial shape for both local
+and global banks; its default is `random`. All tables remain trainable from the
+first optimizer step, including named starting shapes. There is no freeze
+schedule, learnable frequency, or complex arithmetic.
+
+| `WAVEFORM_INIT` | Starting profile |
+| --- | --- |
+| `random` | Independent Gaussian bin values per branch/axis; reject a very weak fundamental |
+| `smooth_random` | Random sine/cosine harmonic amplitudes decaying as 1/h²; reject a very weak fundamental |
+| `sine` | One sinusoidal period; the quarter-period copy supplies cosine |
+| `triangle` | Symmetric triangle, with weaker high harmonics than a square |
+| `square` | Positive/negative half-period plateaus (zero at a bin center exactly on the discontinuity) |
+| `sawtooth` | Linear ramp over one period, followed by a periodic jump |
+
+Named shapes are evaluated at bin centers and mean-centered. The existing
+anti-aliasing resampler filters them before QR; plotted effective modes can
+therefore differ from the sharp initial table. Seeded random starts are
+reproducible and independent between branch/axis tables. Named starts give the
+same initial profile at equal bin counts, but the tables train independently.
 
 On an axis of N cells the lowest nonconstant candidate period is N cells.
 Candidate dilation k has period N/k, with phase offsets 0 and 1/4 cycle. Physical
@@ -47,10 +63,14 @@ parameter budgets or retained subspace dimensions.
 | `WAVEFORM_GLOBAL_BINS` | 31 | Odd number >=3 of raw bins per global-axis table |
 | `WAVEFORM_CONDITION_LIMIT` | 10000 | Maximum normalized candidate singular-value ratio, also enforces minimum singular value >=1/limit |
 | `WAVEFORM_LR_RATIO` | 0.1 | Table learning rate divided by base/mixing learning rate |
+| `WAVEFORM_INIT` | random | Initial bin profile, chosen from the table above |
 
 Tables receive no weight decay. Other parameters retain the entry point's
 configured decay. These settings round-trip in `ModelConfig`/run metadata.
-Direct registry construction takes `bins` and `condition_limit` as hyperparameters.
+Direct registry construction takes `bins`, `condition_limit`, and `init` as
+hyperparameters. `ModelConfig.waveform_init` is recorded in checkpoint metadata
+and the training configuration summary. Older metadata defaults to `random`;
+loading a checkpoint always replaces the initial bin values with saved values.
 
 ## Sampling, transform, and reconstruction
 
@@ -67,8 +87,42 @@ consistent using the diagonal of R. U contains the orthonormal columns:
 
     U.T @ U = I
     coefficients = U.T @ input
-    mixed[b,o,k...] = sum_i weight[i,o,k...] * coefficients[b,i,k...]
+    mixed[b,o,g,q] = sum_i,p M[i,o,g,p,q] * coefficients[b,i,g,p]
     output = U @ mixed
+
+Here g identifies a tuple of candidate dilations and p/q index the available
+phase combinations. On each axis, DC is a singleton and columns (1,2), (3,4),
+etc. form pairs. Tensor products yield blocks of up to four phases in 2-D and
+eight in 3-D. Each block has a full real channel/phase matrix, including
+simultaneous phase changes on multiple axes. Different dilation tuples are not
+mixed. After QR these are groups of effective columns, not necessarily literal
+phase shifts of one waveform.
+
+The original `weight` tensor stores diagonal phase entries. `phase_weight`
+stores only valid off-diagonal entries; DC and unpaired terminal columns have
+no invented partners, and there are no unused padded parameters. If there is
+no complete pair on any axis, no `phase_weight` parameter is allocated. Cross
+entries start at zero, retaining the previous initial output scale, and can
+learn immediately. Diagonal initialization is unchanged. A full identity
+requires identity channel mixing on the diagonal and zero cross-phase entries.
+
+With sinusoidal tables and sufficient real columns, these blocks can express
+the real form of complex Fourier multipliers: [A,-B;B,A] acting on real and
+imaginary components (with the corresponding sine/cosine sign convention).
+Tests map the actual 2-D/3-D signed-quadrant Fourier layers into these blocks
+and compare outputs, input gradients, and Fourier-weight gradients. They
+include signed frequencies and the irFFT DC-plane Hermitian completion.
+Nyquist remains excluded by the waveform transform. Numeric mode counts are
+still real-column counts, **not FNO cutoffs**; choosing `sine` alone does not
+automatically match an FNO run's support or initialize its mixing weights.
+
+For the current quadrant FNO cutoffs (m_x,m_y[,m_z]) strictly below Nyquist,
+enough columns to cover all signed blocks and their real completion are
+(2*m_x+1, 2*m_y-1) in 2-D and
+(2*m_x+1, 2*m_y+1, 2*m_z-1) in 3-D. The extra signed-axis pair covers the
+negative boundary included by the existing asymmetric slices. This is a
+support inclusion rule, not a parameter-budget match; all counts must fit
+the waveform shape limits.
 
 Transforms are applied separately along each spatial axis. No dense product-grid
 matrix is constructed. QR changes the effective modes into linear combinations
@@ -81,6 +135,21 @@ grids with all columns retained). DC and in-span signals round-trip to numerical
 precision. No pseudoinverse, ridge bias, learned inverse, or orthogonality loss
 is needed. Learned channel mixing itself is unrestricted, and need not preserve
 norms or be invertible.
+
+## Checkpoint compatibility
+
+New model/optimizer checkpoints round-trip with phase weights intact. Loading
+an older diagonal-only model state automatically supplies zero phase weights,
+preserving its predictions exactly. This is a **weight-only warm start**:
+an old optimizer state cannot resume unchanged when new phase parameters are
+present. Start a fresh optimizer when migrating an old run. Visualization uses
+the unchanged diagonal weight shape and saved bank tables, so both formats
+remain readable without changing the plotting command.
+
+Full phase blocks increase the spectral mixing parameter count by up to 4×
+in 2-D and 8× in 3-D relative to diagonal mixing, with smaller factors when DC
+or unpaired columns are present. Check actual parameter counts and GPU memory
+when comparing old and new runs; this change does not enforce equal budgets.
 
 ## Execution and numerical safeguards
 
@@ -178,7 +247,7 @@ data/cache conventions, with both slots fixed to `learned_waveform`:
 | `train_zre_waveform.sbatch` | 200 epochs, batch 8, absolute L2, LR 1e-4 | 1 A100, 16 CPUs, 64G, 6h | `checkpoints/checkpoints_zre_local_lwf_lwf_l2` |
 | `train_3d_waveform.sbatch` | 20 epochs, fixed batch 1, `LOSS=plain`, LR 1e-4 | 1 A100, 24 CPUs, 200G, 96h | `checkpoints/checkpoints_3d_lwf_lwf_plain` |
 
-All set table LR ratio 0.1, bins 15/31, condition limit 10000, and gradient
+All set `WAVEFORM_INIT=random`, table LR ratio 0.1, bins 15/31, condition limit 10000, and gradient
 clipping 1.0. Waveform controls, epoch count, and checkpoint directory remain
 overridable via `--export`; 2-D batch sizes and LRs are overridable as in their
 base launchers. The 3-D trainer uses `LOCALFNO_LEARNING_RATE` and its fixed
@@ -191,6 +260,10 @@ sbatch --export=ALL,N_EPOCHS=50,WAVEFORM_LOCAL_BINS=31,WAVEFORM_LR_RATIO=0.05,CH
   slurm/train_2d_xhi_waveform.sbatch
 sbatch --export=ALL,LOSS=hybrid,N_EPOCHS=30 \
   slurm/train_3d_waveform.sbatch
+sbatch --export=ALL,WAVEFORM_INIT=sine,CHECKPOINT_DIR=checkpoints/lwf_sine \
+  slurm/train_2d_xhi_waveform.sbatch
+sbatch --export=ALL,WAVEFORM_INIT=smooth_random,CHECKPOINT_DIR=checkpoints/lwf_smooth_random \
+  slurm/train_zre_waveform.sbatch
 ```
 
 3-D delegates to `train_3d_matrix.sbatch`, so its `LOSS` presets, scratch

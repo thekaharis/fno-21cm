@@ -22,7 +22,7 @@ def _worker(rank, init_file):
     try:
         torch.manual_seed(29)
         model = LocalFNO2d(in_channels=2, base_width=4, spectral_rank=2,
-                           local_window=(4, 4), local_modes=(2, 2), global_modes=(2, 2),
+                           local_window=(4, 4), local_modes=(3, 3), global_modes=(3, 3),
                            local_operator="waveform", global_operator="waveform",
                            local_operator_kwargs={"bins": 7}, global_operator_kwargs={"bins": 9},
                            patch_chunk_size=1000).double()

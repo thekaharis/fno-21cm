@@ -1,6 +1,6 @@
 """Real, learned waveform transforms with orthonormal sampled columns.
 
-One random bin table per axis generates periodic, dilated, phase-shifted
+One trainable bin table per axis generates periodic, dilated, phase-shifted
 candidates. Real low-pass resampling precedes reduced QR on the deployment
 grid. Analysis uses U.T and synthesis U: identity mixing is an orthogonal
 projection, not an inverse of discarded modes. QR mixes the candidates, so
@@ -14,6 +14,39 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
+
+
+WAVEFORM_INITIALIZATIONS = ("random", "smooth_random", "sine", "triangle", "square", "sawtooth")
+
+
+def validate_waveform_init(init):
+    if init not in WAVEFORM_INITIALIZATIONS:
+        raise ValueError(f"waveform init must be one of {WAVEFORM_INITIALIZATIONS}, got {init!r}")
+
+
+def initial_waveform(bins, init):
+    """Bin-center samples of a periodic profile; all amplitudes remain learnable."""
+    validate_waveform_init(init)
+    # Compute named profiles accurately before converting to the parameter dtype.
+    phase = (torch.arange(bins, dtype=torch.float64) + .5) / bins
+    angle = 2 * math.pi * phase
+    if init == "random":
+        table = torch.randn(bins)
+    elif init == "smooth_random":
+        h = torch.arange(1, (bins + 1) // 2, dtype=torch.float64)
+        amplitudes = torch.randn(2, len(h), dtype=torch.float64) / h.square()
+        table = (torch.cos(angle[:, None] * h) @ amplitudes[0]
+                 + torch.sin(angle[:, None] * h) @ amplitudes[1])
+    elif init == "sine":
+        table = torch.sin(angle)
+    elif init == "triangle":
+        table = (2 / math.pi) * torch.asin(torch.sin(angle))
+    elif init == "square":
+        table = torch.where(phase < .5, 1., torch.where(phase > .5, -1., 0.))
+    else:  # sawtooth
+        table = 2 * phase - 1
+    table = table.to(dtype=torch.get_default_dtype())
+    return table - table.mean()
 
 
 def validate_waveform_shape(sizes, modes, *, context="waveform"):
@@ -34,12 +67,14 @@ class WaveformBank(nn.Module):
     """Learned bin amplitudes; only fixed resamplers are cached across steps."""
 
     def __init__(self, ndim: int, modes: Sequence[int], bins: int = 31,
-                 condition_limit: float = 1e4):
+                 condition_limit: float = 1e4, init: str = "random"):
         super().__init__()
         self.ndim = int(ndim)
         self.n_modes = tuple(int(m) for m in modes)
         self.bins = int(bins)
         self.condition_limit = float(condition_limit)
+        validate_waveform_init(init)
+        self.init = init
         if self.ndim not in (2, 3):
             raise ValueError("ndim must be 2 or 3")
         if len(self.n_modes) != self.ndim or any(m < 1 for m in self.n_modes):
@@ -58,11 +93,10 @@ class WaveformBank(nn.Module):
         for axis, count in enumerate(self.n_modes):
             if count == 1:
                 continue
-            # Random throughout; reject starts whose first harmonic is tiny.
+            # Reject random starts whose first harmonic is tiny.
             # A nonzero fundamental supplies independent real phase pairs.
             for _ in range(64):
-                table = torch.randn(self.bins)
-                table = table - table.mean()
+                table = initial_waveform(self.bins, self.init)
                 if (fundamental @ table).norm() > 0.15 * table.norm():
                     break
             else:
@@ -169,20 +203,81 @@ class WaveformBank(nn.Module):
 
 
 class LearnedWaveformOperator(nn.Module):
-    """Separable orthonormal transforms and real per-mode channel mixing."""
+    """Orthonormal transforms with real channel/phase mixing at each dilation.
+
+    DC is a singleton; columns (1, 2), (3, 4), ... are phase pairs. Their
+    tensor products form blocks of at most 2**ndim coefficients. Each block
+    has a full real channel/phase matrix. The diagonal retains the legacy
+    weight layout; only valid off-diagonal entries are stored in phase_weight.
+    """
 
     def __init__(self, channels: int, ndim: int, modes: Sequence[int],
-                 bins: int = 31, condition_limit: float = 1e4):
+                 bins: int = 31, condition_limit: float = 1e4, init: str = "random"):
         super().__init__()
         self.channels = int(channels)
         if self.channels <= 0:
             raise ValueError("channels must be positive")
-        self.bank = WaveformBank(ndim, modes, bins, condition_limit)
+        self.bank = WaveformBank(ndim, modes, bins, condition_limit, init=init)
         self.ndim = self.bank.ndim
         self.n_modes = self.bank.n_modes
         self.weight = nn.Parameter(
             torch.randn(self.channels, self.channels, *self.n_modes) / math.sqrt(self.channels)
         )
+        # Group by which axes change phase. Every source/destination pair
+        # occurs exactly once, with no padded/unused trainable entries.
+        grid = torch.stack(torch.meshgrid(
+            *(torch.arange(m) for m in self.n_modes), indexing="ij"
+        ), dim=-1).reshape(-1, self.ndim)
+        strides = [math.prod(self.n_modes[a + 1:]) for a in range(self.ndim)]
+        sources, destinations, self._phase_slices = [], [], []
+        offset = 0
+        for flip in range(1, 2 ** self.ndim):
+            target = grid.clone()
+            valid = torch.ones(len(grid), dtype=torch.bool)
+            for axis, count in enumerate(self.n_modes):
+                if flip & (1 << axis):
+                    index = grid[:, axis]
+                    partner = torch.where(index % 2 == 1, index + 1, index - 1)
+                    valid &= (index > 0) & (partner < count)
+                    target[:, axis] = partner
+            source = valid.nonzero().flatten()
+            if not source.numel():
+                continue
+            destination = (target[valid] * torch.tensor(strides)).sum(dim=1)
+            sources.append(source)
+            destinations.append(destination)
+            self._phase_slices.append((offset, offset + len(source)))
+            offset += len(source)
+        self.register_buffer("phase_source", torch.cat(sources) if sources else
+                             torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("phase_destination", torch.cat(destinations) if destinations else
+                             torch.empty(0, dtype=torch.long), persistent=False)
+        # Zero cross-phase weights preserve the initial branch scale. They
+        # receive task gradients immediately; waveform tables are not frozen.
+        self.phase_weight = (nn.Parameter(torch.zeros(self.channels, self.channels, offset))
+                             if offset else None)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Weight-only migration from the original diagonal operator is exact.
+        # Old optimizer states have a different parameter layout: start a new optimizer.
+        key = prefix + "phase_weight"
+        if self.phase_weight is not None and key not in state_dict and prefix + "weight" in state_dict:
+            state_dict[key] = torch.zeros_like(self.phase_weight)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def mix_coefficients(self, coefficients):
+        flat = coefficients.flatten(2)
+        mixed = torch.einsum("bik,iok->bok", flat, self.weight.to(flat.dtype).flatten(2))
+        if self.phase_weight is not None:
+            weights = self.phase_weight.to(flat.dtype)
+            # At most seven contractions; avoid expanding an entire 3-D
+            # coefficient batch by all eight phases at once.
+            for start, end in self._phase_slices:
+                values = torch.einsum("bie,ioe->boe",
+                                      flat.index_select(2, self.phase_source[start:end]),
+                                      weights[:, :, start:end])
+                mixed = mixed.index_add(2, self.phase_destination[start:end], values)
+        return mixed.reshape(coefficients.shape)
 
     def materialize_transform(self, spatial_shape, *, device, dtype):
         if self.bank is None:
@@ -211,10 +306,7 @@ class LearnedWaveformOperator(nn.Module):
         with torch.autocast(device_type=x.device.type, enabled=False):
             dtype = transform[0].dtype
             coefficients = self.contract(x.to(dtype), transform, analysis=True)
-            letters = "xyz"[:self.ndim]
-            mixed = torch.einsum(
-                f"bi{letters},io{letters}->bo{letters}", coefficients, self.weight.to(dtype)
-            )
+            mixed = self.mix_coefficients(coefficients)
             result = self.contract(mixed, transform, analysis=False)
         return result.to(x.dtype)
 

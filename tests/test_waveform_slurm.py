@@ -49,7 +49,7 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
     env.update({"MODEL_KIND": "localfno", "LOCAL_OPERATOR": "fourier", "GLOBAL_OPERATOR": "hadamard"})
     if overrides:
         env.update({"N_EPOCHS": "3", "WAVEFORM_LOCAL_BINS": "9", "WAVEFORM_LR_RATIO": "0.2",
-                    "CHECKPOINT_DIR": "checkpoints/custom run"})
+                    "CHECKPOINT_DIR": "checkpoints/custom run", "WAVEFORM_INIT": "sine"})
     result = subprocess.run(["bash", str(project / "slurm" / script)], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in Path(env["CAPTURE_PATH"]).read_text().splitlines()]
@@ -60,6 +60,7 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
     assert settings["LOCAL_OPERATOR"] == settings["GLOBAL_OPERATOR"] == "learned_waveform"
     assert settings["WAVEFORM_LOCAL_BINS"] == ("9" if overrides else "15")
     assert settings["WAVEFORM_GLOBAL_BINS"] == "31"
+    assert settings["WAVEFORM_INIT"] == ("sine" if overrides else "random")
     assert settings["WAVEFORM_LR_RATIO"] == ("0.2" if overrides else "0.1")
     assert settings["N_EPOCHS"] == ("3" if overrides else "200" if entry == "fno_zre.py" else "20")
     defaults = {"fno_21cm_3d.py": "checkpoints/checkpoints_3d_lwf_lwf_plain",

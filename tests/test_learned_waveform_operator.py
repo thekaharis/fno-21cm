@@ -24,6 +24,8 @@ from operators import build_operator, validate_operator
 def identity_mix(op):
     with torch.no_grad():
         op.weight.zero_()
+        if op.phase_weight is not None:
+            op.phase_weight.zero_()
         for channel in range(op.channels):
             op.weight[channel, channel] = 1
 
@@ -87,7 +89,7 @@ def test_all_real_first_step_learning_and_no_stale_graph_after_updates():
     assert all(not p.is_complex() for p in op.parameters())
     assert all(not value.requires_grad for value in op.bank.last_diagnostics.values())
     assert all(not value.requires_grad for value in op.bank._resampler_cache.values())
-    assert list(op.state_dict()) == ["weight", "bank.tables.0", "bank.tables.1"]
+    assert list(op.state_dict()) == ["weight", "phase_weight", "bank.tables.0", "bank.tables.1"]
 
 
 def test_resampler_filters_unresolved_harmonics_before_dilation():
@@ -134,9 +136,11 @@ def test_dc_only_axes_have_no_unused_parameters():
 @pytest.mark.parametrize("ndim", [2, 3])
 def test_patch_chunking_preserves_outputs_gradients_and_prepares_once(ndim):
     block_class = SpectralResidualBlock2d if ndim == 2 else SpectralResidualBlock3d
-    block = block_class(4, (2,) * ndim, 2, window_size=(4,) * ndim,
+    block = block_class(4, (3,) * ndim, 2, window_size=(4,) * ndim,
                         patch_chunk_size=1, operator="waveform",
                         operator_kwargs={"bins": 7}).double()
+    with torch.no_grad():
+        block.spectral.phase_weight.normal_(std=.1)
     other = copy.deepcopy(block)
     other.window_grid.chunk_size = 1000
     x = torch.randn((1, 4) + (5,) * ndim, dtype=torch.float64)
@@ -154,8 +158,8 @@ def test_patch_chunking_preserves_outputs_gradients_and_prepares_once(ndim):
 def small_model(ndim=2, *, output_sigmoid=True):
     cls = LocalFNO2d if ndim == 2 else LocalFNO3d
     return cls(in_channels=2, base_width=4, spectral_rank=2,
-               local_window=(4,) * ndim, local_modes=(2,) * ndim,
-               global_modes=(2,) * ndim, local_operator="waveform", global_operator="waveform",
+               local_window=(4,) * ndim, local_modes=(3,) * ndim,
+               global_modes=(3,) * ndim, local_operator="waveform", global_operator="waveform",
                local_operator_kwargs={"bins": 7}, global_operator_kwargs={"bins": 9},
                patch_chunk_size=1000, output_sigmoid=output_sigmoid)
 
@@ -195,13 +199,14 @@ def test_mixed_existing_and_learned_slots(local, global_):
 def test_configuration_environment_metadata_factory_and_optimizer():
     env = {"MODEL_KIND": "localop", "LOCAL_OPERATOR": "waveform", "GLOBAL_OPERATOR": "waveform",
            "WAVEFORM_LOCAL_BINS": "7", "WAVEFORM_GLOBAL_BINS": "9",
-           "WAVEFORM_CONDITION_LIMIT": "1000", "WAVEFORM_LR_RATIO": "0.25"}
+           "WAVEFORM_CONDITION_LIMIT": "1000", "WAVEFORM_LR_RATIO": "0.25",
+           "WAVEFORM_INIT": "sine"}
     with patch.dict(os.environ, env, clear=True):
         config = ModelConfig.from_env(ndim=2)
     assert ModelConfig.from_dict(config.to_dict()) == config
     assert config.checkpoint_tag == "local_lwf_lwf"
-    assert config.operator_slots()[0][1] == {"bins": 7, "condition_limit": 1000.}
-    assert config.operator_slots()[1][1] == {"bins": 9, "condition_limit": 1000.}
+    assert config.operator_slots()[0][1] == {"bins": 7, "condition_limit": 1000., "init": "sine"}
+    assert config.operator_slots()[1][1] == {"bins": 9, "condition_limit": 1000., "init": "sine"}
     model = TrainerModel(build_model(config, in_channels=2))
     groups = waveform_parameter_groups(model, lr=.01, weight_decay=.1,
                                       waveform_lr_ratio=config.waveform_lr_ratio)
@@ -311,4 +316,4 @@ def test_checkpoint_bank_plot_exports_actual_orthonormal_matrices(tmp_path):
     assert (tmp_path / "waveforms.png").stat().st_size > 1000
     with np.load(tmp_path / "waveforms.npz") as data:
         u = data["axis0_orthonormal"]
-        np.testing.assert_allclose(u.T @ u, np.eye(2), atol=1e-12)
+        np.testing.assert_allclose(u.T @ u, np.eye(3), atol=1e-12)
