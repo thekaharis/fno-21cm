@@ -43,7 +43,7 @@ Environment overrides (defaults in parentheses):
   LOSS_RELATIVE (0 = absolute norms, 1 = relative norms)
   GRAD_CLIP_NORM    max grad norm per step; 0 = off
                     (1.0 for sirenfno, 0.0 otherwise)
-  CHECKPOINT_DIR (checkpoints/checkpoints_zre[_<kind>]), EVAL_INTERVAL (5)
+  CHECKPOINT_DIR (checkpoints/checkpoints_zre[_<kind>]), EVAL_INTERVAL (1)
   RUN_SEED (0), DEVICE (auto: cuda > mps > cpu)
 """
 
@@ -119,7 +119,7 @@ GRAD_CLIP_NORM = float(os.environ.get(
     "GRAD_CLIP_NORM",
     "1.0" if MODEL_KIND in ("sirenfno", "localsirenfno") else "0.0",
 ))
-EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
+EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "1"))
 
 # Separate checkpoint directories per model kind so runs never overwrite
 # each other (same convention as the 3-D pipeline).

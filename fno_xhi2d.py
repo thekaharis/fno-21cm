@@ -81,7 +81,7 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
 LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "1e-4"))
 WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-5"))
 N_EPOCHS = int(os.environ.get("N_EPOCHS", "50"))
-EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "5"))
+EVAL_INTERVAL = int(os.environ.get("EVAL_INTERVAL", "1"))
 LOSS_L2_WEIGHT = float(os.environ.get("LOSS_L2_WEIGHT", "1.0"))
 LOSS_H1_WEIGHT = float(os.environ.get("LOSS_H1_WEIGHT", "0.0"))
 # BCE is a confidence regulariser on the [0, 1] x_HI target (see
