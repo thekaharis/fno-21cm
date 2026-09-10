@@ -314,6 +314,14 @@ basis. Mode counts remain real-column counts, not rFFT cutoffs.
 See [the waveform implementation guide](notes/learned-waveforms.md) for mode
 semantics, reconstruction, diagnostics, and limitations.
 
+To continue a trained LWF model, set `INIT_CHECKPOINT` and use
+`WAVEFORM_TRAINING_MODE=waveform_only` or `alternating`. Alternation defaults
+to one waveform epoch and five kernel epochs (`WAVEFORM_PHASE_EPOCHS` and
+`WAVEFORM_KERNEL_EPOCHS`); other network weights stay fixed unless
+`WAVEFORM_KERNEL_SCOPE=all`. `kernel_only` provides a control experiment, and
+`joint` remains the default. Actual starting tables and per-epoch phase/update
+diagnostics are saved. All waveform SLURM launchers accept these settings.
+
 ```bash
 MODEL_KIND=localop LOCAL_OPERATOR=learned_waveform GLOBAL_OPERATOR=learned_waveform \
   WAVEFORM_INIT=sine python fno_xhi2d.py

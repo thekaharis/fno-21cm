@@ -78,6 +78,7 @@ from dataset.zre_target import TARGET_KINDS, build_target_cache
 from losses import AbsoluteLoss, H2Loss2d, RelativeLoss, WeightedLoss
 from modeling import ModelConfig, TrainerModel, build_model
 from learned_waveform_operator import waveform_parameter_groups
+from waveform_training import WaveformTrainingConfig, WaveformTrainingController, warm_start
 
 
 # ------------------------------------------------------------------ config
@@ -96,6 +97,7 @@ Z_MIN, Z_MAX = 5.0, 25.0
 # Same switches, registry and metadata as the x_HI entry points; only the task
 # and ndim differ.
 MODEL_CONFIG = ModelConfig.from_env(ndim=2)
+WAVEFORM_TRAINING = WaveformTrainingConfig.from_env()
 MODEL_KIND = MODEL_CONFIG.kind
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "2"))
@@ -134,6 +136,7 @@ CHECKPOINT_DIR = Path(
 # dir (written every ``save_every`` epochs): restores model, optimizer,
 # scheduler, and the epoch counter via the neuralop Trainer.
 RESUME_DIR = os.environ.get("RESUME_DIR") or None
+INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT") or None
 
 SPLIT_SEED = 42
 RUN_SEED = int(os.environ.get("RUN_SEED", "0"))
@@ -350,6 +353,10 @@ def main() -> None:
     inner = build_model(MODEL_CONFIG, dataset.in_channels)
     description = MODEL_CONFIG.describe()
     model = TrainerModel(inner).to(DEVICE)
+    report = warm_start(model, INIT_CHECKPOINT, resume_dir=RESUME_DIR,
+                        strict=WAVEFORM_TRAINING.mode != "joint")
+    if report is not None:
+        print(f"Warm-started from {INIT_CHECKPOINT}: {report.matched}/{report.total} tensors matched")
     print(f"Model: {description} -> "
           f"{count_model_params(model.fno):,} parameters")
 
@@ -359,6 +366,7 @@ def main() -> None:
             waveform_lr_ratio=MODEL_CONFIG.waveform_lr_ratio,
         ), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
     )
+    waveform_training = WaveformTrainingController(model, optimizer, WAVEFORM_TRAINING)
     if GRAD_CLIP_NORM > 0:
         # Same mechanism as fno_21cm_3d.py: the SIREN hypernetwork diverges
         # to NaN within the first epoch without clipping (its 3-D twin
@@ -410,10 +418,13 @@ def main() -> None:
             "n_z_in": N_Z_IN,
             "run_seed": RUN_SEED,
             "resume_dir": RESUME_DIR,
+            "init_checkpoint": INIT_CHECKPOINT,
+            "waveform_training": WAVEFORM_TRAINING.to_dict(),
         },
     })
 
     trainer = MetricsTrainer(
+        waveform_training=waveform_training,
         model=model,
         n_epochs=N_EPOCHS,
         device=DEVICE,
@@ -445,9 +456,10 @@ def main() -> None:
         resume_from_dir=RESUME_DIR,
     )
 
-    model.save_checkpoint(CHECKPOINT_DIR, "final_model")
-    torch.save(optimizer.state_dict(), CHECKPOINT_DIR / "optimizer.pt")
-    torch.save(scheduler.state_dict(), CHECKPOINT_DIR / "scheduler.pt")
+    from neuralop.training.training_state import save_training_state
+    save_training_state(save_dir=CHECKPOINT_DIR, save_name="final_model",
+                        model=model, optimizer=optimizer, scheduler=scheduler,
+                        epoch=trainer.epoch)
 
     loaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     report = _final_report(model, loaders, dataset, DEVICE)

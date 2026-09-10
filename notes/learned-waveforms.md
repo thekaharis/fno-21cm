@@ -153,6 +153,97 @@ when comparing old and new runs; this change does not enforce equal budgets.
 
 ## Execution and numerical safeguards
 
+### Waveform-only and alternating training
+
+All three entry points and waveform SLURM launchers accept these settings.
+They are training settings, recorded under `training.waveform_training` in run
+metadata; the architecture configuration remains unchanged.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `WAVEFORM_TRAINING_MODE` | `joint` | `joint`, `waveform_only`, `kernel_only`, or `alternating` |
+| `WAVEFORM_PHASE_EPOCHS` | `1` | Consecutive waveform epochs in each alternating cycle |
+| `WAVEFORM_KERNEL_EPOCHS` | `5` | Consecutive kernel epochs in each alternating cycle |
+| `WAVEFORM_FIRST_PHASE` | `waveform` | First phase of each alternating cycle; alternatively `kernel` |
+| `WAVEFORM_KERNEL_SCOPE` | `spectral` | `spectral`: only LWF diagonal and cross-phase mixing weights; `all`: every trainable non-waveform parameter |
+| `INIT_CHECKPOINT` | unset | Weight-only start from a matching model; new optimizer and cycle starting at epoch zero |
+| `RESUME_DIR` | unset | Continue saved model, optimizer, scheduler, phase schedule and epoch count |
+
+`waveform_only` updates only the bin tables. With default `spectral` scope,
+`kernel_only` updates only mixing weights inside learned-waveform operators,
+and `alternating` switches between these two groups. Spatial convolutions,
+heads, normalization affine parameters, other operator families, and contrast
+parameters stay fixed in these modes. `all` broadens the kernel phase to all
+non-bin parameters; it has no effect during a waveform phase. Explicitly
+frozen parameters are never re-enabled. Joint mode preserves ordinary training.
+
+Non-joint modes put the model in evaluation mode during each training forward:
+BatchNorm running statistics stay fixed and dropout is disabled in both phases.
+Autograd remains enabled. Contrast refitting must be disabled because it would
+modify the frozen model outside the optimizer. Task-loss schedules, if enabled,
+still follow the overall epoch counter.
+
+The controller masks inactive gradients with `None` **before gradient clipping
+and the optimizer step**. Adam/AdamW therefore leave both inactive parameters
+and their moment/step state unchanged, even after prior joint training. It does
+not merely set their learning rate to zero. Gradients still traverse the whole
+network and DDP retains a fixed graph; this favors correct phase switching over
+reducing backward compute/memory. The existing cosine LR scheduler continues
+once per overall epoch, including inactive phases. `WAVEFORM_LR_RATIO` still
+controls the bin LR relative to the base LR.
+
+Example: continue an existing LWF checkpoint with waveform-only updates. Use
+the same architecture, input features, data split and preprocessing as its
+source run. Here the bin LR ratio is explicitly increased from 0.1 to 1.0 for
+the experiment; it is not a tuned recommendation.
+
+```bash
+sbatch --export=ALL,INIT_CHECKPOINT=checkpoints/source/final_model_state_dict.pt,WAVEFORM_TRAINING_MODE=waveform_only,WAVEFORM_LR_RATIO=1,N_EPOCHS=20,CHECKPOINT_DIR=checkpoints/source_waveform_only \
+  slurm/train_2d_xhi_waveform.sbatch
+
+sbatch --export=ALL,INIT_CHECKPOINT=checkpoints/source/final_model_state_dict.pt,WAVEFORM_TRAINING_MODE=alternating,WAVEFORM_PHASE_EPOCHS=1,WAVEFORM_KERNEL_EPOCHS=5,N_EPOCHS=60,CHECKPOINT_DIR=checkpoints/source_alternating \
+  slurm/train_2d_xhi_waveform.sbatch
+```
+
+Substitute `train_zre_waveform.sbatch` or `train_3d_waveform.sbatch` for the other
+tasks. For a kernel-only control, use `WAVEFORM_TRAINING_MODE=kernel_only`.
+Initialization profiles are overridden by saved checkpoint tables. These are
+continuations of existing LWF models; this feature does not convert a plain
+FNO checkpoint into an LWF architecture.
+
+Use `RESUME_DIR` instead of `INIT_CHECKPOINT` when continuing an interrupted
+run with the **same schedule**. `N_EPOCHS` is the total target epoch count, not
+the number of additional epochs. The two checkpoint settings are mutually
+exclusive. A changed training mode/schedule or a checkpoint from before this
+feature needs `INIT_CHECKPOINT` and a fresh optimizer. Legacy joint-mode
+resumption remains supported. Resumption follows the model filename in the
+training manifest, so final Adam state is not paired with an older best model.
+This restores training state; exact stochastic replay still requires the same
+data order/RNG state, which the existing checkpoint format does not save.
+
+Every waveform run using these entry points now saves its actual reference
+tables to `waveform_initial_tables.pt` beside the metrics file. This is a mapping
+from canonical parameter names to unnormalized bin tensors, captured after
+warm start and before optimization. They are also stored in optimizer metadata
+and preserved across resumption. For an old joint checkpoint without such
+metadata, the reference is the resumed model, not its unavailable original
+initialization. Do not substitute fresh random draws for these tensors.
+
+The metrics JSONL records `waveform_training_phase`, `waveform_training_cycle`
+(zero-based), `waveform_active_parameters`, `waveform_relative_update` (the
+aggregate bin change divided by its norm at epoch start),
+`waveform_distance_from_initial`, and `waveform_last_grad_norm`. The gradient
+norm is the final batch's bin gradient **before masking/clipping**, including
+the potential gradient in kernel-only phases; a zero parameter update in those
+phases is intentional. These are raw-bin diagnostics; subspace movement still
+requires examining the effective transforms.
+
+For custom loops, instantiate `WaveformTrainingController` immediately after
+the optimizer and before registering clipping hooks. Pass it to `MetricsTrainer`
+as `waveform_training=controller`, or call `begin_epoch(epoch)` and
+`prepare_batch()` yourself. Keep the optimizer and parameter groups stable
+between phases so their histories can resume.
+
 Prepare each branch's bases once per forward and reuse them across patch chunks.
 The shared bottleneck reuses the same bases in both residual blocks. Only fixed
 resampling matrices persist across calls; graph-bearing bases do not. All table

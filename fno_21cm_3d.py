@@ -60,8 +60,9 @@ from losses import (
     los_volume_weights,
 )
 from contrast import ContrastComposed
-from modeling import ModelConfig, TrainerModel, build_model, load_checkpoint
+from modeling import ModelConfig, TrainerModel, build_model
 from learned_waveform_operator import waveform_parameter_groups
+from waveform_training import WaveformTrainingConfig, WaveformTrainingController, warm_start
 from training import (
     ContrastRefit,
     MetricsTrainer,
@@ -92,6 +93,7 @@ N_Z = 256                           # LOS resolution after interpolation
 Z_MIN, Z_MAX = 5.0, 25.0
 
 MODEL_CONFIG = ModelConfig.from_env()
+WAVEFORM_TRAINING = WaveformTrainingConfig.from_env()
 INPUT_FEATURES = InputFeatures(
     os.environ.get("INPUT_FEATURES", "density_z_params").lower()
 )
@@ -284,6 +286,7 @@ SPECTRAL_HISTORY_PATH = f"{CHECKPOINT_DIR}/{HISTORY_FILENAME}"
 # optimizer or scheduler, which is useful after a short feasibility run whose
 # cosine schedule used a tiny N_EPOCHS (for example T_max=1).
 INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT")
+RESUME_DIR = os.environ.get("RESUME_DIR") or None
 
 # Learning-rate scaling rule for multi-GPU DDP runs.  "sqrt" is conservative
 # and rarely diverges; "linear" extracts more wall-clock speed but may need
@@ -461,8 +464,9 @@ def main():
     # would confuse count_model_params).
     n_params = count_model_params(fno)
     model = TrainerModel(fno).to(device)
-    if INIT_CHECKPOINT:
-        report = load_checkpoint(model, INIT_CHECKPOINT)
+    report = warm_start(model, INIT_CHECKPOINT, resume_dir=RESUME_DIR,
+                        strict=WAVEFORM_TRAINING.mode != "joint")
+    if report is not None:
         rprint(
             f"Warm-started from {INIT_CHECKPOINT}: "
             f"{report.matched}/{report.total} parameters matched "
@@ -507,6 +511,7 @@ def main():
             waveform_lr_ratio=MODEL_CONFIG.waveform_lr_ratio,
         ), lr=scaled_lr, weight_decay=WEIGHT_DECAY,
     )
+    waveform_training = WaveformTrainingController(model, optimizer, WAVEFORM_TRAINING)
     grad_clip_norm = {
         "fno": 0.0,
         "ufno": UFNO_GRAD_CLIP_NORM,
@@ -647,6 +652,7 @@ def main():
             spectral_history = None
 
     trainer = MetricsTrainer(
+        waveform_training=waveform_training,
         model=model,
         n_epochs=N_EPOCHS,
         device=device,
@@ -658,6 +664,7 @@ def main():
         use_distributed=False,
         verbose=is_rank_0,                 # silence non-rank-0 Trainer prints
         metrics_path=METRICS_PATH,
+        append=RESUME_DIR is not None,
         spectral_history=spectral_history,
         contrast=contrast,
         saturation_ndim=3,
@@ -752,6 +759,8 @@ def main():
             "run_seed": RUN_SEED,
             "deterministic": DETERMINISTIC_RUN,
             "init_checkpoint": INIT_CHECKPOINT,
+            "resume_dir": RESUME_DIR,
+            "waveform_training": WAVEFORM_TRAINING.to_dict(),
             "base_learning_rate": base_lr,
             "scaled_learning_rate": scaled_lr,
             "lr_scale_rule": LR_SCALE_RULE,
@@ -822,6 +831,7 @@ def main():
             eval_losses=eval_losses,
             save_best="val_l2",
             save_dir=CHECKPOINT_DIR,
+            resume_from_dir=RESUME_DIR,
         )
         if is_rank_0:
             save_training_state(

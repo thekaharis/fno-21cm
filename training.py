@@ -188,6 +188,7 @@ class MetricsTrainer(Trainer):
         contrast: ContrastRefit | None = None,
         spectral_history=None,
         saturation_ndim: int | None = None,
+        waveform_training=None,
         **kwargs,
     ):
         if kwargs.get("use_distributed", False):
@@ -202,6 +203,11 @@ class MetricsTrainer(Trainer):
         self.contrast = contrast
         self.spectral_history = spectral_history
         self.saturation_ndim = saturation_ndim
+        self.waveform_training = waveform_training
+        self._waveform_initial_saved = False
+        if (waveform_training is not None and waveform_training.config.mode != "joint"
+                and contrast is not None):
+            raise ValueError("disable contrast refitting for waveform-only/alternating training; it changes frozen parameters")
         self.metrics_path = Path(metrics_path) if metrics_path else None
         if self.metrics_path is not None and self._is_rank_0:
             self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +222,17 @@ class MetricsTrainer(Trainer):
 
     # -- training ---------------------------------------------------------
     def train_one_epoch(self, epoch, train_loader, training_loss):
+        if self.waveform_training is not None:
+            if self.waveform_training.optimizer is not self.optimizer:
+                raise ValueError("waveform controller and trainer must share the same optimizer")
+            self.waveform_training.begin_epoch(int(epoch))
+            if self.waveform_training.enabled:
+                if self.verbose:
+                    print(f"[waveform] epoch {epoch}: {self.waveform_training.phase}", flush=True)
+                if self._is_rank_0 and self.metrics_path is not None and not self._waveform_initial_saved:
+                    torch.save(self.waveform_training.initial_tables,
+                               self.metrics_path.parent / "waveform_initial_tables.pt")
+                    self._waveform_initial_saved = True
         sampler = getattr(train_loader, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             # Reshuffle consistently across ranks each epoch.
@@ -273,6 +290,8 @@ class MetricsTrainer(Trainer):
                 )
         grad_norm = getattr(self.optimizer, "_last_grad_norm", None)
         row.update(waveform_diagnostics(self.model))
+        if self.waveform_training is not None:
+            row.update(self.waveform_training.metrics(int(epoch)))
         if grad_norm is not None:
             row["last_grad_norm"] = float(grad_norm)
         if device.type == "cuda":
@@ -286,6 +305,13 @@ class MetricsTrainer(Trainer):
         if self.eval_interval and epoch % self.eval_interval != 0:
             self._flush_row({})
         return out
+
+    def train_one_batch(self, idx, sample, training_loss):
+        # The parent calls model.train() after on_epoch_start, so enforce the
+        # frozen module behavior here, immediately before each forward pass.
+        if self.waveform_training is not None:
+            self.waveform_training.prepare_batch()
+        return super().train_one_batch(idx, sample, training_loss)
 
     def _refit_contrast(self, epoch: int, train_loader) -> None:
         from util import contrast_refit as refit
@@ -375,11 +401,35 @@ class MetricsTrainer(Trainer):
         return metrics
 
     def resume_state_from_dir(self, save_dir):
-        super().resume_state_from_dir(save_dir)
-        # neuralop manifests store the epoch that just completed.
-        self.start_epoch += 1
+        save_dir = Path(save_dir)
+        manifest_path = save_dir / "manifest.pt"
+        if not manifest_path.exists():
+            if self.waveform_training is not None and self.waveform_training.config.mode != "joint":
+                raise ValueError("waveform resume requires a complete training manifest; use INIT_CHECKPOINT for a warm start")
+            super().resume_state_from_dir(save_dir)
+            self.start_epoch += 1
+        else:
+            # Read the model named by the manifest. Preferencing best_model
+            # would pair old weights with final optimizer/scheduler state.
+            manifest = torch.load(manifest_path, map_location="cpu", weights_only=True)
+            root = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+            root.load_state_dict(torch.load(save_dir / manifest["model"], map_location="cpu", weights_only=True))
+            for key in ("optimizer", "scheduler", "regularizer"):
+                target = getattr(self, key, None)
+                path = save_dir / manifest.get(key, f"{key}.pt")
+                if target is not None:
+                    if not path.exists():
+                        raise FileNotFoundError(f"incomplete training state: missing {path}; use INIT_CHECKPOINT for weights only")
+                    target.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+            self.start_epoch = int(manifest.get("epoch", -1)) + 1
+        if self.waveform_training is not None:
+            self.waveform_training.validate_resume(self.start_epoch - 1)
         if self.verbose:
             print(f"Continuing with epoch {self.start_epoch}")
+
+    def checkpoint(self, save_dir):
+        if self._is_rank_0:
+            super().checkpoint(save_dir)
 
     def _flush_row(self, eval_metrics: dict) -> None:
         if not self._is_rank_0 or self.metrics_path is None:

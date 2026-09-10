@@ -62,6 +62,7 @@ from losses import (
 from contrast import ContrastComposed
 from modeling import ModelConfig, TrainerModel, build_model
 from learned_waveform_operator import waveform_parameter_groups
+from waveform_training import WaveformTrainingConfig, WaveformTrainingController, warm_start
 from training import ContrastRefit, MetricsTrainer
 from util import seed_everything
 from util.run_metadata import write_run_metadata
@@ -75,6 +76,7 @@ INPUT_FEATURES = os.environ.get("INPUT_FEATURES", "density_z_params").lower()
 # points -- only ndim differs. MODEL_KIND=localop pairs the operator slots
 # freely; see modeling.ModelConfig.
 MODEL_CONFIG = ModelConfig.from_env(ndim=2)
+WAVEFORM_TRAINING = WaveformTrainingConfig.from_env()
 MODEL_KIND = MODEL_CONFIG.kind
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
@@ -166,6 +168,7 @@ CHECKPOINT_DIR = Path(os.environ.get(
     f"checkpoints/checkpoints_2d_xhi_{MODEL_CONFIG.checkpoint_tag}",
 ))
 RESUME_DIR = os.environ.get("RESUME_DIR") or None
+INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT") or None
 DEVICE = os.environ.get(
     "DEVICE",
     "cuda" if torch.cuda.is_available()
@@ -408,6 +411,10 @@ def main() -> None:
         description = (f"{description} + contrast[{CONTRAST_MODE}"
                        f"{'' if detail is None else ': ' + detail}]")
     model = TrainerModel(inner).to(DEVICE)
+    report = warm_start(model, INIT_CHECKPOINT, resume_dir=RESUME_DIR,
+                        strict=WAVEFORM_TRAINING.mode != "joint")
+    if report is not None:
+        print(f"Warm-started from {INIT_CHECKPOINT}: {report.matched}/{report.total} tensors matched")
     print(f"Model: {description} -> {count_model_params(model.fno):,} parameters")
 
     if GRAD_CLIP_NORM > 0:
@@ -421,6 +428,7 @@ def main() -> None:
             waveform_lr_ratio=MODEL_CONFIG.waveform_lr_ratio,
         ), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
     )
+    waveform_training = WaveformTrainingController(model, optimizer, WAVEFORM_TRAINING)
     if GRAD_CLIP_NORM > 0:
         optimizer.register_step_pre_hook(_clip_before_step)
         print(f"Gradient clipping: max_norm={GRAD_CLIP_NORM}")
@@ -508,11 +516,14 @@ def main() -> None:
             "contrast_bins": CONTRAST_BINS,
             "run_seed": RUN_SEED,
             "resume_dir": RESUME_DIR,
+            "init_checkpoint": INIT_CHECKPOINT,
+            "waveform_training": WAVEFORM_TRAINING.to_dict(),
         },
     }
     write_run_metadata(CHECKPOINT_DIR, metadata)
 
     trainer = MetricsTrainer(
+        waveform_training=waveform_training,
         model=model,
         n_epochs=N_EPOCHS,
         device=DEVICE,
@@ -562,9 +573,10 @@ def main() -> None:
 
     # Periodic resumable state may lag the final epoch. Preserve the exact
     # model evaluated below before running the comparatively expensive report.
-    model.save_checkpoint(CHECKPOINT_DIR, "final_model")
-    torch.save(optimizer.state_dict(), CHECKPOINT_DIR / "optimizer.pt")
-    torch.save(scheduler.state_dict(), CHECKPOINT_DIR / "scheduler.pt")
+    from neuralop.training.training_state import save_training_state
+    save_training_state(save_dir=CHECKPOINT_DIR, save_name="final_model",
+                        model=model, optimizer=optimizer, scheduler=scheduler,
+                        epoch=trainer.epoch)
 
     loaders = {"train": train_loader, "val": val_loader, "test": test_loader}
     report = final_report(model, loaders, DEVICE)
