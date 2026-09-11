@@ -68,6 +68,7 @@ def operator_env_settings() -> dict:
         "waveform_condition_limit": float(os.environ.get("WAVEFORM_CONDITION_LIMIT", "1e4")),
         "waveform_lr_ratio": float(os.environ.get("WAVEFORM_LR_RATIO", "0.1")),
         "waveform_init": os.environ.get("WAVEFORM_INIT", "random").strip().lower(),
+        "waveform_transform": os.environ.get("WAVEFORM_TRANSFORM", "tied").strip().lower(),
         "whno_ordering": os.environ.get("WHNO_ORDERING", "sequency").lower(),
         "cnn_depth": int(os.environ.get("CNN_DEPTH", "3")),
         "cnn_kernel_size": int(os.environ.get("CNN_KERNEL_SIZE", "3")),
@@ -88,7 +89,8 @@ def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
     if operator == "learned_waveform":
         return {"bins": int(settings.get("waveform_bins", 31)),
                 "condition_limit": float(settings.get("waveform_condition_limit", 1e4)),
-                "init": str(settings.get("waveform_init", "random"))}
+                "init": str(settings.get("waveform_init", "random")),
+                "transform": str(settings.get("waveform_transform", "tied"))}
     if operator == "wavelet":
         return {"levels": int(settings["localwno_levels"])}
     if operator == "hadamard":
@@ -165,6 +167,7 @@ class ModelConfig:
     waveform_condition_limit: float = 1e4
     waveform_lr_ratio: float = 0.1
     waveform_init: str = "random"
+    waveform_transform: str = "tied"
     whno_ordering: str = "sequency"
     cnn_depth: int = 3
     cnn_kernel_size: int = 3
@@ -262,8 +265,9 @@ class ModelConfig:
             raise ValueError("waveform_condition_limit must be finite and greater than 1")
         if not math.isfinite(self.waveform_lr_ratio) or self.waveform_lr_ratio <= 0:
             raise ValueError("waveform_lr_ratio must be finite and positive")
-        from learned_waveform_operator import validate_waveform_init
+        from learned_waveform_operator import validate_waveform_init, validate_waveform_transform
         validate_waveform_init(self.waveform_init)
+        validate_waveform_transform(self.waveform_transform)
         if self.cnn_depth <= 0:
             raise ValueError("cnn_depth must be positive")
         if self.cnn_kernel_size <= 0 or not self.cnn_kernel_size % 2:
@@ -315,6 +319,7 @@ class ModelConfig:
                 "waveform_bins": self.waveform_local_bins if local else self.waveform_global_bins,
                 "waveform_condition_limit": self.waveform_condition_limit,
                 "waveform_init": self.waveform_init,
+                "waveform_transform": self.waveform_transform,
                 "localwno_levels": self.localwno_levels,
                 "whno_ordering": self.whno_ordering,
                 "cnn_depth": self.cnn_depth,
@@ -475,6 +480,7 @@ class ModelConfig:
             "waveform_condition_limit": self.waveform_condition_limit,
             "waveform_lr_ratio": self.waveform_lr_ratio,
             "waveform_init": self.waveform_init,
+            "waveform_transform": self.waveform_transform,
             "whno_ordering": self.whno_ordering,
             "cnn_depth": self.cnn_depth,
             "cnn_kernel_size": self.cnn_kernel_size,
@@ -489,6 +495,8 @@ class ModelConfig:
             return (
                 f"local_{OPERATOR_TAGS[self.local_operator]}"
                 f"_{OPERATOR_TAGS[self.global_operator]}"
+                + ("_separate" if self.waveform_transform == "separate"
+                   and "learned_waveform" in {self.local_operator, self.global_operator} else "")
             )
         return self.kind
 
@@ -574,7 +582,7 @@ class ModelConfig:
             waveform = (
                 f" waveform=orthonormal-qr bins={self.waveform_local_bins}/{self.waveform_global_bins}"
                 f" waveform-lr={self.waveform_lr_ratio:g}"
-                f" waveform-init={self.waveform_init} mixing=real-phase-blocks"
+                f" waveform-init={self.waveform_init} transform={self.waveform_transform} mixing=real-phase-blocks"
                 if "learned_waveform" in slots else ""
             )
             # Only operators that truncate modes report them.

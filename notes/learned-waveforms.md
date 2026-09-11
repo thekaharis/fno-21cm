@@ -25,8 +25,9 @@ patches, not across different task models or local branches.
 The table consists of B equal bins on one normalized period, with continuous
 learnable amplitudes. `WAVEFORM_INIT` selects the initial shape for both local
 and global banks; its default is `random`. All tables remain trainable from the
-first optimizer step, including named starting shapes. There is no freeze
-schedule, learnable frequency, or complex arithmetic.
+first optimizer step in the default joint schedule, including named starting
+shapes. Optional freezing schedules are described below. Frequencies remain
+fixed and all coefficients are real.
 
 | `WAVEFORM_INIT` | Starting profile |
 | --- | --- |
@@ -64,15 +65,76 @@ parameter budgets or retained subspace dimensions.
 | `WAVEFORM_CONDITION_LIMIT` | 10000 | Maximum normalized candidate singular-value ratio, also enforces minimum singular value >=1/limit |
 | `WAVEFORM_LR_RATIO` | 0.1 | Table learning rate divided by base/mixing learning rate |
 | `WAVEFORM_INIT` | random | Initial bin profile, chosen from the table above |
+| `WAVEFORM_TRANSFORM` | tied | `tied`: one analysis/synthesis bank; `separate`: independently learned input/output banks |
 
 Tables receive no weight decay. Other parameters retain the entry point's
 configured decay. These settings round-trip in `ModelConfig`/run metadata.
-Direct registry construction takes `bins`, `condition_limit`, and `init` as
+Direct registry construction takes `bins`, `condition_limit`, `init`, and `transform` as
 hyperparameters. `ModelConfig.waveform_init` is recorded in checkpoint metadata
 and the training configuration summary. Older metadata defaults to `random`;
 loading a checkpoint always replaces the initial bin values with saved values.
 
+## Separate analysis and synthesis learning
+
+Set `WAVEFORM_TRANSFORM=separate` to learn distinct encoder/decoder transforms
+inside every learned-waveform operator, in either local/global slot and in
+2-D or 3-D. These are the input/output transforms of each operator, independent
+of the U-Net's encoder/decoder branch names. For each spatial axis:
+
+    Q_in.T @ Q_in = I
+    Q_out.T @ Q_out = I
+    coefficients = Q_in.T @ input
+    output = Q_out @ mix(coefficients)
+
+The two banks are orthonormal independently. There is no constraint that
+`Q_out @ Q_in.T` reconstruct the input: with identity mixing it maps the retained
+input coordinates into the output basis. This is a learned low-rank operator,
+not a forward transform followed by its inverse. All existing real phase-block
+mixing, anti-aliasing, and conditioning checks apply to both banks.
+
+The synthesis tables start as exact copies of the analysis tables, including
+random initialization. They are distinct parameters with independent gradients.
+Copying consumes no extra random draws, so otherwise identical seeded tied and
+separate models have exactly the same initial weights and predictions. Only the
+waveform table count doubles; the mixing tensors and retained mode counts stay
+unchanged. Each bank requires its own QR. Both banks are reused across patches
+and shared between the two bottleneck blocks, but remain independent across
+branches and axes.
+
+`ModelConfig.waveform_transform` records the architecture; missing metadata
+defaults to `tied`. The analysis bank keeps the checkpoint path `spectral.bank`,
+and synthesis uses `spectral.synthesis_bank`. A tied checkpoint can be loaded
+into separate mode with `INIT_CHECKPOINT`: the saved analysis tables are copied
+to synthesis, preserving the original predictions. This is a weight-only warm
+start with a fresh optimizer/schedule, not a cross-architecture resume. Use
+`RESUME_DIR` only with the same transform architecture and training schedule.
+Loading a separate checkpoint into tied mode is rejected rather than silently
+discarding its learned synthesis tables.
+
+All waveform training modes include both banks: `waveform_only` updates both
+while freezing the kernel, and `kernel_only` or the frozen portion of
+`joint_then_kernel` freezes both. They use the same waveform LR ratio and zero
+table weight decay. Initial-table snapshots and per-bank conditioning metrics
+include both roles. The standard visualization command exports analysis and
+synthesis as separately labeled rows and files, including their effective
+post-QR modes:
+
+```bash
+sbatch --export=ALL,WAVEFORM_TRANSFORM=separate,WAVEFORM_INIT=square,WAVEFORM_LR_RATIO=1,N_EPOCHS=100,CHECKPOINT_DIR=checkpoints/xhi2d_square_separate \
+  slurm/train_2d_xhi_waveform.sbatch
+
+python -m viz.learned_waveforms --checkpoint-dir checkpoints/xhi2d_square_separate
+```
+
+All three waveform SLURM launchers support this switch and give separate mode
+a `_separate` default checkpoint-directory suffix. Explicit directory overrides
+are preserved; use a distinct directory for every condition and seed. Keep
+architecture, data split, optimizer, learning-rate schedule, and training seed
+matched when comparing tied and separate learning.
+
 ## Sampling, transform, and reconstruction
+
+The formulas in this section describe the default tied mode.
 
 The raw table describes a periodic step function. Its cosine/sine integrals
 are computed analytically as a fixed real matrix. Before dilation k is sampled,

@@ -29,14 +29,15 @@ WAVEFORM_NAMES = {"learned_waveform", "waveform", "orthogonal_waveform"}
 
 
 def branch_name(bank_name):
-    match = re.search(r"(?:^|\.)(encoder0|encoder1|bottleneck\.0|decoder1|decoder0)\.spectral\.bank$", bank_name)
+    match = re.search(r"(?:^|\.)(encoder0|encoder1|bottleneck\.0|decoder1|decoder0)\.spectral\.(?:bank|synthesis_bank)$", bank_name)
     if match is None:
         raise ValueError(f"cannot identify U-Net branch for {bank_name!r}; use --bank/--shape")
     return match.group(1)
 
 
 def bank_names(state, metadata=None):
-    names = {key.split(".tables.")[0] for key in state if ".bank.tables." in key}
+    names = {key.split(".tables.")[0] for key in state
+             if ".bank.tables." in key or ".synthesis_bank.tables." in key}
     # A fully DC-only bank has no tables. Metadata distinguishes its real
     # mixing weight from a Walsh operator with the same weight shape.
     config = (metadata or {}).get("model_config", {})
@@ -53,11 +54,13 @@ def bank_names(state, metadata=None):
         slot = "global_operator" if branch == "bottleneck.0" else "local_operator"
         if config.get(slot) in WAVEFORM_NAMES:
             names.add(name)
+            if config.get("waveform_transform", "tied") == "separate":
+                names.add(name.removesuffix(".bank") + ".synthesis_bank")
     return sorted(names)
 
 
 def load_bank(state, name, *, condition_limit=1e4):
-    weight_key = name.removesuffix(".bank") + ".weight"
+    weight_key = name.rsplit(".", 1)[0] + ".weight"
     if weight_key not in state:
         raise ValueError(f"unknown bank {name!r}; available: {bank_names(state)}")
     modes = tuple(state[weight_key].shape[2:])
@@ -131,13 +134,13 @@ def bank_geometry(state, metadata, *, input_shape=None):
         raise ValueError("no learned waveform banks in checkpoint")
     saved_shape = metadata.get("input_features", {}).get("spatial_shape")
     shape = input_shape if input_shape is not None else saved_shape
-    ndim = len(state[names[0].removesuffix(".bank") + ".weight"].shape) - 2
+    ndim = len(state[names[0].rsplit(".", 1)[0] + ".weight"].shape) - 2
     if shape is not None:
         shape = tuple(int(n) for n in shape)
         if len(shape) != ndim or any(n < 4 for n in shape):
             raise ValueError(f"input shape must contain {ndim} dimensions >=4 for this two-level U-Net")
     result = []
-    for name in sorted(names, key=lambda n: BRANCHES.index(branch_name(n))):
+    for name in sorted(names, key=lambda n: (BRANCHES.index(branch_name(n)), n)):
         branch = branch_name(name)
         local = branch != "bottleneck.0"
         windowed = local and config.get("local_windowed") is not False
@@ -150,7 +153,9 @@ def bank_geometry(state, metadata, *, input_shape=None):
             if shape is None:
                 raise ValueError("metadata has no input spatial_shape; supply --input-shape from the training run")
             grid = tuple(n // DOWNSAMPLE[branch] for n in shape)
-        result.append({"bank": name, "branch": branch, "shape": grid,
+        paired = name.rsplit(".", 1)[0] + ".synthesis_bank" in names
+        role = "synthesis" if name.endswith(".synthesis_bank") else "analysis" if paired else "tied"
+        result.append({"bank": name, "branch": branch, "role": role, "shape": grid,
                        "downsample": DOWNSAMPLE[branch], "windowed": windowed,
                        "shared_blocks": ["bottleneck.0", "bottleneck.1"] if not local else [branch]})
     return result
@@ -180,6 +185,8 @@ def render_all(state, metadata, output_dir, *, input_shape=None, max_modes=6, ch
                             squeeze=False, layout="constrained") for _ in range(2)]
     for r, (bank, entry, us) in enumerate(zip(banks, geometry, bases)):
         label = "Bottleneck (blocks 0 + 1 share bank)" if entry["branch"] == "bottleneck.0" else entry["branch"]
+        if entry["role"] != "tied":
+            label += " · " + entry["role"]
         for a, (n, u) in enumerate(zip(entry["shape"], us)):
             raw_panel, mode_panel = [axes[r, a] for _, axes in figures]
             if str(a) in bank.tables:
@@ -201,6 +208,8 @@ def render_all(state, metadata, output_dir, *, input_shape=None, max_modes=6, ch
                 panel.grid(alpha=.15)
                 panel.tick_params(labelsize=8)
         stem = entry["branch"].replace(".", "_")
+        if entry["role"] != "tied":
+            stem += "_" + entry["role"]
         entry["figure"] = f"{stem}.png"
         entry["arrays"] = f"{stem}.npz"
         render_bank(bank, entry["shape"], output_dir / entry["figure"], title=label, max_modes=max_modes)

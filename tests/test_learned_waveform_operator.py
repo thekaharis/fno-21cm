@@ -134,11 +134,12 @@ def test_dc_only_axes_have_no_unused_parameters():
 
 
 @pytest.mark.parametrize("ndim", [2, 3])
-def test_patch_chunking_preserves_outputs_gradients_and_prepares_once(ndim):
+@pytest.mark.parametrize("transform", ["tied", "separate"])
+def test_patch_chunking_preserves_outputs_gradients_and_prepares_once(ndim, transform):
     block_class = SpectralResidualBlock2d if ndim == 2 else SpectralResidualBlock3d
     block = block_class(4, (3,) * ndim, 2, window_size=(4,) * ndim,
                         patch_chunk_size=1, operator="waveform",
-                        operator_kwargs={"bins": 7}).double()
+                        operator_kwargs={"bins": 7, "transform": transform}).double()
     with torch.no_grad():
         block.spectral.phase_weight.normal_(std=.1)
     other = copy.deepcopy(block)
@@ -155,20 +156,23 @@ def test_patch_chunking_preserves_outputs_gradients_and_prepares_once(ndim):
         torch.testing.assert_close(p.grad, q.grad, atol=1e-10, rtol=1e-10)
 
 
-def small_model(ndim=2, *, output_sigmoid=True):
+def small_model(ndim=2, *, output_sigmoid=True, transform="tied"):
     cls = LocalFNO2d if ndim == 2 else LocalFNO3d
     return cls(in_channels=2, base_width=4, spectral_rank=2,
                local_window=(4,) * ndim, local_modes=(3,) * ndim,
                global_modes=(3,) * ndim, local_operator="waveform", global_operator="waveform",
-               local_operator_kwargs={"bins": 7}, global_operator_kwargs={"bins": 9},
+               local_operator_kwargs={"bins": 7, "transform": transform},
+               global_operator_kwargs={"bins": 9, "transform": transform},
                patch_chunk_size=1000, output_sigmoid=output_sigmoid)
 
 
 @pytest.mark.parametrize("ndim,output_sigmoid", [(2, True), (2, False), (3, True)])
-def test_unet_branches_shared_bottleneck_and_task_heads(ndim, output_sigmoid):
-    model = small_model(ndim, output_sigmoid=output_sigmoid)
+@pytest.mark.parametrize("transform", ["tied", "separate"])
+def test_unet_branches_shared_bottleneck_and_task_heads(ndim, output_sigmoid, transform):
+    model = small_model(ndim, output_sigmoid=output_sigmoid, transform=transform)
     banks = [m for m in model.modules() if isinstance(m, WaveformBank)]
-    assert len(banks) == 5
+    assert len(banks) == (10 if transform == "separate" else 5)
+    assert model.bottleneck[1].spectral.synthesis_bank is None
     assert model.bottleneck[1].spectral.bank is None
     assert model.bottleneck[0].spectral.weight is not model.bottleneck[1].spectral.weight
     x = torch.randn((1, 2) + (12,) * ndim)
@@ -205,8 +209,8 @@ def test_configuration_environment_metadata_factory_and_optimizer():
         config = ModelConfig.from_env(ndim=2)
     assert ModelConfig.from_dict(config.to_dict()) == config
     assert config.checkpoint_tag == "local_lwf_lwf"
-    assert config.operator_slots()[0][1] == {"bins": 7, "condition_limit": 1000., "init": "sine"}
-    assert config.operator_slots()[1][1] == {"bins": 9, "condition_limit": 1000., "init": "sine"}
+    assert config.operator_slots()[0][1] == {"bins": 7, "condition_limit": 1000., "init": "sine", "transform": "tied"}
+    assert config.operator_slots()[1][1] == {"bins": 9, "condition_limit": 1000., "init": "sine", "transform": "tied"}
     model = TrainerModel(build_model(config, in_channels=2))
     groups = waveform_parameter_groups(model, lr=.01, weight_decay=.1,
                                       waveform_lr_ratio=config.waveform_lr_ratio)

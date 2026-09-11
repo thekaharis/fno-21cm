@@ -13,12 +13,12 @@ from modeling import ModelConfig, TrainerModel, build_model
 from viz.learned_waveforms import bank_geometry, bank_names, render_all
 
 
-def fixture_run(ndim=2, *, windowed=True, modes=2, local="learned_waveform", global_="learned_waveform"):
+def fixture_run(ndim=2, *, windowed=True, modes=2, local="learned_waveform", global_="learned_waveform", transform="tied"):
     config = ModelConfig(kind="localop", ndim=ndim, local_operator=local, global_operator=global_,
                          localfno_base_width=4, localfno_spectral_rank=2,
                          localfno_window=(4,) * ndim, localfno_modes=(modes,) * ndim,
                          modes=(modes,) * ndim, local_windowed=windowed,
-                         waveform_local_bins=7, waveform_global_bins=9)
+                         waveform_local_bins=7, waveform_global_bins=9, waveform_transform=transform)
     torch.manual_seed(23)
     state = TrainerModel(build_model(config, 2)).state_dict()
     metadata = {"task": "3d" if ndim == 3 else "zre", "model_config": config.to_dict(),
@@ -100,3 +100,20 @@ def test_dc_only_report(tmp_path):
     state, metadata = fixture_run(modes=1)
     manifest = render_all(state, metadata, tmp_path, max_modes=2)
     assert len(manifest["banks"]) == 5
+
+
+@pytest.mark.parametrize("modes", [1, 3])
+def test_separate_banks_export_both_roles_without_overwriting(tmp_path, modes):
+    state, metadata = fixture_run(modes=modes, transform="separate")
+    manifest = render_all(state, metadata, tmp_path, max_modes=2)
+    assert len(manifest["banks"]) == 10
+    assert len({entry["figure"] for entry in manifest["banks"]}) == 10
+    assert len({entry["arrays"] for entry in manifest["banks"]}) == 10
+    for entry in manifest["banks"]:
+        assert entry["role"] in {"analysis", "synthesis"}
+        assert entry["role"] in entry["figure"]
+        assert (tmp_path / entry["figure"]).stat().st_size > 1000
+        with np.load(tmp_path / entry["arrays"]) as arrays:
+            for axis in range(2):
+                u = arrays[f"axis{axis}_orthonormal"]
+                np.testing.assert_allclose(u.T @ u, np.eye(modes), atol=1e-12)

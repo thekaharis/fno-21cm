@@ -16,7 +16,10 @@
 set -eo pipefail
 PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export MODEL_KIND=localop LOCAL_OPERATOR=learned_waveform GLOBAL_OPERATOR=learned_waveform
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_zre_local_lwf_lwf_l2}"
+export WAVEFORM_TRANSFORM="${WAVEFORM_TRANSFORM:-tied}"
+waveform_suffix=""
+if [[ "$WAVEFORM_TRANSFORM" == "separate" ]]; then waveform_suffix="_separate"; fi
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_zre_local_lwf_lwf_l2${waveform_suffix}}"
 export WAVEFORM_LOCAL_BINS="${WAVEFORM_LOCAL_BINS:-15}"
 export WAVEFORM_GLOBAL_BINS="${WAVEFORM_GLOBAL_BINS:-31}"
 export WAVEFORM_CONDITION_LIMIT="${WAVEFORM_CONDITION_LIMIT:-10000}"

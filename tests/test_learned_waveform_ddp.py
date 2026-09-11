@@ -15,7 +15,7 @@ from models_zre_2d import LocalFNO2d
 from waveform_training import WaveformTrainingConfig, WaveformTrainingController
 
 
-def _worker(rank, init_file, mode):
+def _worker(rank, init_file, mode, transform):
     torch.set_num_threads(1)
     loopback = next(name for _, name in socket.if_nameindex() if name in {"lo", "lo0"})
     os.environ.setdefault("GLOO_SOCKET_IFNAME", loopback)
@@ -26,7 +26,8 @@ def _worker(rank, init_file, mode):
         model = LocalFNO2d(in_channels=2, base_width=4, spectral_rank=2,
                            local_window=(4, 4), local_modes=(3, 3), global_modes=(3, 3),
                            local_operator="waveform", global_operator="waveform",
-                           local_operator_kwargs={"bins": 7}, global_operator_kwargs={"bins": 9},
+                           local_operator_kwargs={"bins": 7, "transform": transform},
+                           global_operator_kwargs={"bins": 9, "transform": transform},
                            patch_chunk_size=1000).double()
         reference = copy.deepcopy(model)
         wrapped = torch.nn.parallel.DistributedDataParallel(model)
@@ -58,5 +59,6 @@ def _worker(rank, init_file, mode):
 
 
 @pytest.mark.parametrize("mode", ["joint", "waveform_only", "alternating", "joint_then_kernel"])
-def test_two_rank_gradients_match_full_batch_with_shared_bottleneck(tmp_path, mode):
-    mp.spawn(_worker, args=(str(tmp_path / "rendezvous"), mode), nprocs=2, join=True)
+@pytest.mark.parametrize("transform", ["tied", "separate"])
+def test_two_rank_gradients_match_full_batch_with_shared_bottleneck(tmp_path, mode, transform):
+    mp.spawn(_worker, args=(str(tmp_path / "rendezvous"), mode, transform), nprocs=2, join=True)

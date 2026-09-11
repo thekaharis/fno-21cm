@@ -584,9 +584,10 @@ def _build_learned_waveform(channels, ndim, modes, hyperparameters):
 
 
 def _validate_learned_waveform(sizes, modes, hyperparameters, *, context):
-    from learned_waveform_operator import validate_waveform_shape, validate_waveform_init
+    from learned_waveform_operator import validate_waveform_shape, validate_waveform_init, validate_waveform_transform
 
     validate_waveform_init(hyperparameters["init"])
+    validate_waveform_transform(hyperparameters["transform"])
     bins = int(hyperparameters["bins"])
     limit = float(hyperparameters["condition_limit"])
     if bins < 3 or bins % 2 != 1:
@@ -652,7 +653,7 @@ OPERATORS: dict[str, OperatorSpec] = {
     "learned_waveform": OperatorSpec(
         name="learned_waveform",
         build=_build_learned_waveform,
-        defaults={"bins": 31, "condition_limit": 1e4, "init": "random"},
+        defaults={"bins": 31, "condition_limit": 1e4, "init": "random", "transform": "tied"},
         uses_modes=True,
         validate=_validate_learned_waveform,
     ),

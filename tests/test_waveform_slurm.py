@@ -50,7 +50,7 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
     if overrides:
         env.update({"N_EPOCHS": "3", "WAVEFORM_LOCAL_BINS": "9", "WAVEFORM_LR_RATIO": "0.2",
                     "CHECKPOINT_DIR": "checkpoints/custom run", "WAVEFORM_INIT": "sine", "WAVEFORM_TRAINING_MODE": "joint_then_kernel",
-                    "WAVEFORM_ADAPT_EPOCHS": "10",
+                    "WAVEFORM_ADAPT_EPOCHS": "10", "WAVEFORM_TRANSFORM": "separate",
                     "WAVEFORM_PHASE_EPOCHS": "2", "WAVEFORM_KERNEL_EPOCHS": "4",
                     "WAVEFORM_FIRST_PHASE": "kernel", "WAVEFORM_KERNEL_SCOPE": "all",
                     "INIT_CHECKPOINT": "checkpoints/source run/final_model_state_dict.pt"})
@@ -66,6 +66,7 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
     assert settings["WAVEFORM_GLOBAL_BINS"] == "31"
     assert settings["WAVEFORM_INIT"] == ("sine" if overrides else "random")
     assert settings["WAVEFORM_TRAINING_MODE"] == ("joint_then_kernel" if overrides else "joint")
+    assert settings["WAVEFORM_TRANSFORM"] == ("separate" if overrides else "tied")
     assert settings["WAVEFORM_ADAPT_EPOCHS"] == ("10" if overrides else "25")
     assert settings["WAVEFORM_PHASE_EPOCHS"] == ("2" if overrides else "1")
     assert settings["WAVEFORM_KERNEL_EPOCHS"] == ("4" if overrides else "5")
@@ -94,6 +95,16 @@ def test_visualization_launcher_preserves_argument_boundaries(cluster_stubs):
     assert args == ["-m", "viz.learned_waveforms", "--checkpoint-dir", str(checkpoint_dir),
                     "--checkpoint-kind", "final", "--max-modes", "6",
                     "--input-shape", "140", "140", "256", "--out-dir", "figures/my waveforms"]
+
+
+@pytest.mark.parametrize("script", ["train_2d_xhi_waveform.sbatch", "train_3d_waveform.sbatch", "train_zre_waveform.sbatch"])
+def test_separate_default_checkpoint_directory_avoids_tied_runs(cluster_stubs, script):
+    project, env = cluster_stubs
+    env["WAVEFORM_TRANSFORM"] = "separate"
+    result = subprocess.run(["bash", str(project / "slurm" / script)], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in Path(env["CAPTURE_PATH"]).read_text().splitlines()]
+    assert calls[-1]["env"]["CHECKPOINT_DIR"].endswith("_separate")
 
 
 def test_shell_syntax_and_no_trailing_sbatch_comments():

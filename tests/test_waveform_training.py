@@ -18,9 +18,9 @@ from waveform_training import WaveformTrainingConfig, WaveformTrainingController
 
 
 class SmallModel(nn.Module):
-    def __init__(self):
+    def __init__(self, transform="tied"):
         super().__init__()
-        self.spectral = LearnedWaveformOperator(2, 2, (3, 3), bins=7, init="sine")
+        self.spectral = LearnedWaveformOperator(2, 2, (3, 3), bins=7, init="sine", transform=transform)
         self.skip = nn.Conv2d(2, 2, 1)
         self.norm = nn.BatchNorm2d(2)
         self.dropout = nn.Dropout(.5)
@@ -52,9 +52,10 @@ def assert_state_equal(a, b):
 @pytest.mark.parametrize("mode,scope", [("waveform_only", "spectral"), ("kernel_only", "spectral"),
                                        ("alternating", "spectral"), ("alternating", "all"),
                                        ("joint_then_kernel", "spectral"), ("joint_then_kernel", "all")])
-def test_inactive_parameters_and_adam_moments_are_bitwise_frozen(mode, scope):
+@pytest.mark.parametrize("transform", ["tied", "separate"])
+def test_inactive_parameters_and_adam_moments_are_bitwise_frozen(mode, scope, transform):
     torch.manual_seed(31)
-    model = SmallModel().double()
+    model = SmallModel(transform).double()
     optimizer = torch.optim.AdamW(waveform_parameter_groups(model, lr=.01, weight_decay=.2))
     x, y = torch.randn(2, 2, 9, 9, dtype=torch.float64), torch.randn(2, 1, 9, 9, dtype=torch.float64)
     # Populate momentum for EVERY parameter before freezing. Starting with
@@ -85,7 +86,7 @@ def test_inactive_parameters_and_adam_moments_are_bitwise_frozen(mode, scope):
         optimizer.step()
         changed = []
         for name, p in model.named_parameters():
-            is_table = ".bank.tables." in name
+            is_table = ".tables." in name
             is_mixing = name in {"spectral.weight", "spectral.phase_weight"}
             active = (True if controller.phase == "joint" else is_table if controller.phase == "waveform"
                       else (not is_table if scope == "all" else is_mixing))
@@ -169,8 +170,8 @@ def test_existing_checkpoint_config_remains_compatible(mode):
     controller.begin_epoch(1)
 
 
-def setup_run(config, epochs, metrics_path):
-    model = TrainerModel(SmallModel()).double()
+def setup_run(config, epochs, metrics_path, transform="tied"):
+    model = TrainerModel(SmallModel(transform)).double()
     opt = torch.optim.AdamW(waveform_parameter_groups(model, lr=.001, weight_decay=.1))
     controller = WaveformTrainingController(model, opt, config)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=6)
@@ -236,20 +237,21 @@ def test_checkpoint_warm_start_requires_compatible_model_and_starts_fresh(tmp_pa
 
 
 @pytest.mark.parametrize("completed_epoch", [1, 2, 3])
-def test_adaptation_resume_before_at_and_after_freeze(tmp_path, completed_epoch):
+@pytest.mark.parametrize("transform", ["tied", "separate"])
+def test_adaptation_resume_before_at_and_after_freeze(tmp_path, completed_epoch, transform):
     torch.manual_seed(44)
     loader = DataLoader([{"x": torch.randn(2, 9, 9, dtype=torch.float64),
                           "y": torch.randn(1, 9, 9, dtype=torch.float64)} for _ in range(2)], batch_size=2)
     config = WaveformTrainingConfig("joint_then_kernel", adapt_epochs=3, kernel_scope="all")
     torch.manual_seed(8)
-    full = setup_run(config, 6, tmp_path / "full/metrics.jsonl")
+    full = setup_run(config, 6, tmp_path / "full/metrics.jsonl", transform)
     train(full, loader)
     torch.manual_seed(8)
-    partial = setup_run(config, completed_epoch + 1, tmp_path / "partial/metrics.jsonl")
+    partial = setup_run(config, completed_epoch + 1, tmp_path / "partial/metrics.jsonl", transform)
     train(partial, loader)
     save_dir = tmp_path / "checkpoint"
     save_training_state(save_dir, "final_model", partial[0], partial[1], partial[2], epoch=completed_epoch)
-    resumed = setup_run(config, 6, tmp_path / "resumed/metrics.jsonl")
+    resumed = setup_run(config, 6, tmp_path / "resumed/metrics.jsonl", transform)
     train(resumed, loader, resume=save_dir)
     for a, b in zip(full[:3], resumed[:3]):
         assert_state_equal(a.state_dict(), b.state_dict())
@@ -262,7 +264,7 @@ def test_adaptation_resume_before_at_and_after_freeze(tmp_path, completed_epoch)
     for p in resumed[0].parameters():
         assert resumed[1].state[p]["step"] == (3 if id(p) in controller.table_ids else 6)
     assert resumed[2].last_epoch == 6
-    incompatible = setup_run(WaveformTrainingConfig("joint_then_kernel", adapt_epochs=4, kernel_scope="all"), 6, None)
+    incompatible = setup_run(WaveformTrainingConfig("joint_then_kernel", adapt_epochs=4, kernel_scope="all"), 6, None, transform)
     with pytest.raises(ValueError, match="schedule differs"):
         train(incompatible, loader, resume=save_dir)
 

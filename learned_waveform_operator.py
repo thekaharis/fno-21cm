@@ -2,21 +2,36 @@
 
 One trainable bin table per axis generates periodic, dilated, phase-shifted
 candidates. Real low-pass resampling precedes reduced QR on the deployment
-grid. Analysis uses U.T and synthesis U: identity mixing is an orthogonal
-projection, not an inverse of discarded modes. QR mixes the candidates, so
-effective columns are not necessarily literal dilations of the mother table.
+grid. Tied analysis uses U.T and synthesis U: identity mixing is an orthogonal
+projection, not an inverse of discarded modes. Separate mode learns U_in and
+U_out independently, applying U_out W U_in.T without an inverse constraint.
+QR mixes candidates, so effective columns need not be literal dilations.
 """
 
 from __future__ import annotations
 
 import math
+import copy
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import torch
 from torch import nn
 
 
 WAVEFORM_INITIALIZATIONS = ("random", "smooth_random", "sine", "triangle", "square", "sawtooth")
+
+
+def validate_waveform_transform(transform):
+    if transform not in {"tied", "separate"}:
+        raise ValueError("waveform transform must be tied or separate")
+
+
+class WaveformTransform(NamedTuple):
+    """Separately orthonormal analysis/synthesis columns, not mutual inverses."""
+
+    analysis: tuple[torch.Tensor, ...]
+    synthesis: tuple[torch.Tensor, ...]
 
 
 def validate_waveform_init(init):
@@ -212,12 +227,18 @@ class LearnedWaveformOperator(nn.Module):
     """
 
     def __init__(self, channels: int, ndim: int, modes: Sequence[int],
-                 bins: int = 31, condition_limit: float = 1e4, init: str = "random"):
+                 bins: int = 31, condition_limit: float = 1e4, init: str = "random",
+                 transform: str = "tied"):
         super().__init__()
+        validate_waveform_transform(transform)
+        self.transform_kind = transform
         self.channels = int(channels)
         if self.channels <= 0:
             raise ValueError("channels must be positive")
         self.bank = WaveformBank(ndim, modes, bins, condition_limit, init=init)
+        # Keep the legacy analysis-bank path. Copy without consuming RNG so
+        # paired tied/separate runs also start with identical kernel weights.
+        self.synthesis_bank = copy.deepcopy(self.bank) if transform == "separate" else None
         self.ndim = self.bank.ndim
         self.n_modes = self.bank.n_modes
         self.weight = nn.Parameter(
@@ -258,6 +279,19 @@ class LearnedWaveformOperator(nn.Module):
                              if offset else None)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        decoder_prefix = prefix + "synthesis_bank.tables."
+        has_decoder = any(key.startswith(decoder_prefix) for key in state_dict)
+        if self.transform_kind == "tied" and has_decoder:
+            raise RuntimeError("separate waveform checkpoint requires WAVEFORM_TRANSFORM=separate")
+        if self.synthesis_bank is not None and not any(
+            "synthesis_bank.tables." in key for key in state_dict
+        ):
+            # A tied weight-only warm start preserves the exact old operator.
+            # Never fill individual missing tables in a partially saved decoder bank.
+            for axis in self.synthesis_bank.tables:
+                source = prefix + "bank.tables." + axis
+                if source in state_dict:
+                    state_dict[decoder_prefix + axis] = state_dict[source].clone()
         # Weight-only migration from the original diagonal operator is exact.
         # Old optimizer states have a different parameter layout: start a new optimizer.
         key = prefix + "phase_weight"
@@ -282,7 +316,11 @@ class LearnedWaveformOperator(nn.Module):
     def materialize_transform(self, spatial_shape, *, device, dtype):
         if self.bank is None:
             raise RuntimeError("shared waveform operator requires its branch transform")
-        return self.bank.materialize_transform(spatial_shape, device=device, dtype=dtype)
+        analysis = self.bank.materialize_transform(spatial_shape, device=device, dtype=dtype)
+        if self.synthesis_bank is None:
+            return analysis
+        synthesis = self.synthesis_bank.materialize_transform(spatial_shape, device=device, dtype=dtype)
+        return WaveformTransform(analysis, synthesis)
 
     @staticmethod
     def contract(x, bases, *, analysis):
@@ -299,29 +337,39 @@ class LearnedWaveformOperator(nn.Module):
             raise ValueError("waveform operator requires real floating-point inputs")
         if transform is None:
             transform = self.materialize_transform(x.shape[2:], device=x.device, dtype=x.dtype)
-        if len(transform) != self.ndim or any(
-            tuple(u.shape) != (n, m) for u, n, m in zip(transform, x.shape[2:], self.n_modes)
-        ):
-            raise ValueError("waveform transform does not match input shape/modes")
+        if self.transform_kind == "separate":
+            if not isinstance(transform, WaveformTransform):
+                raise ValueError("separate waveform operator requires analysis and synthesis transforms")
+            analysis, synthesis = transform
+        else:
+            if isinstance(transform, WaveformTransform):
+                raise ValueError("tied waveform operator requires a single transform")
+            analysis = synthesis = transform
+        for bases in (analysis, synthesis):
+            if len(bases) != self.ndim or any(
+                tuple(u.shape) != (n, m) for u, n, m in zip(bases, x.shape[2:], self.n_modes)
+            ):
+                raise ValueError("waveform transform does not match input shape/modes")
         with torch.autocast(device_type=x.device.type, enabled=False):
-            dtype = transform[0].dtype
-            coefficients = self.contract(x.to(dtype), transform, analysis=True)
+            dtype = analysis[0].dtype
+            coefficients = self.contract(x.to(dtype), analysis, analysis=True)
             mixed = self.mix_coefficients(coefficients)
-            result = self.contract(mixed, transform, analysis=False)
+            result = self.contract(mixed, synthesis, analysis=False)
         return result.to(x.dtype)
 
 
 class SharedWaveformBottleneck(nn.Sequential):
-    """One bank owned by block zero, distinct mixing in every residual block.
+    """Banks owned by block zero, distinct mixing in every residual block.
 
     Preserve sequential state-dict paths and reuse a graph-local transform.
-    The other operators keep bank=None rather than registering aliases.
+    Other operators keep both banks=None rather than registering aliases.
     """
 
     def __init__(self, *blocks):
         super().__init__(*blocks)
         for block in blocks[1:]:
             block.spectral.bank = None
+            block.spectral.synthesis_bank = None
 
     def forward(self, x):
         transform = self[0].spectral.materialize_transform(
