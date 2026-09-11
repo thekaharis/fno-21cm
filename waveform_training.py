@@ -20,10 +20,13 @@ class WaveformTrainingConfig:
     kernel_epochs: int = 5
     first_phase: str = "waveform"
     kernel_scope: str = "spectral"
+    adapt_epochs: int = 25
 
     def __post_init__(self):
-        if self.mode not in {"joint", "waveform_only", "kernel_only", "alternating"}:
-            raise ValueError("WAVEFORM_TRAINING_MODE must be joint, waveform_only, kernel_only, or alternating")
+        if self.mode not in {"joint", "waveform_only", "kernel_only", "alternating", "joint_then_kernel"}:
+            raise ValueError("WAVEFORM_TRAINING_MODE must be joint, waveform_only, kernel_only, alternating, or joint_then_kernel")
+        if self.adapt_epochs < 0:
+            raise ValueError("WAVEFORM_ADAPT_EPOCHS must be nonnegative")
         if self.waveform_epochs < 1 or self.kernel_epochs < 1:
             raise ValueError("waveform/kernel phase epoch counts must be positive")
         if self.first_phase not in {"waveform", "kernel"}:
@@ -39,14 +42,22 @@ class WaveformTrainingConfig:
             kernel_epochs=int(os.environ.get("WAVEFORM_KERNEL_EPOCHS", "5")),
             first_phase=os.environ.get("WAVEFORM_FIRST_PHASE", "waveform").strip().lower(),
             kernel_scope=os.environ.get("WAVEFORM_KERNEL_SCOPE", "spectral").strip().lower(),
+            adapt_epochs=int(os.environ.get("WAVEFORM_ADAPT_EPOCHS", "25")),
         )
 
     def to_dict(self):
-        return asdict(self)
+        config = asdict(self)
+        # Older optimizer checkpoints compare this dictionary exactly. An
+        # unused new field must not invalidate existing phase schedules.
+        if self.mode != "joint_then_kernel":
+            config.pop("adapt_epochs")
+        return config
 
     def phase_at(self, epoch):
         if epoch < 0:
             raise ValueError("epoch must be nonnegative")
+        if self.mode == "joint_then_kernel":
+            return "joint" if epoch < self.adapt_epochs else "kernel"
         if self.mode != "alternating":
             return {"joint": "joint", "waveform_only": "waveform", "kernel_only": "kernel"}[self.mode]
         position = epoch % (self.waveform_epochs + self.kernel_epochs)
@@ -87,7 +98,7 @@ class WaveformTrainingController:
                            {id(p) for p in self.parameters if p.requires_grad} - self.table_ids)
         if self.config.mode != "joint" and not self.tables:
             raise ValueError("waveform training requires at least one trainable waveform bank")
-        if self.config.mode in {"alternating", "kernel_only"} and not self.kernel_ids:
+        if self.config.mode in {"alternating", "kernel_only", "joint_then_kernel"} and not self.kernel_ids:
             raise ValueError("kernel phase has no trainable mixing weights")
         self.enabled = bool(self.tables)
         self.phase = None

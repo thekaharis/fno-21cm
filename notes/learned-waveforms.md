@@ -153,7 +153,7 @@ when comparing old and new runs; this change does not enforce equal budgets.
 
 ## Execution and numerical safeguards
 
-### Waveform-only and alternating training
+### Waveform-only, alternating, and adaptation-freeze training
 
 All three entry points and waveform SLURM launchers accept these settings.
 They are training settings, recorded under `training.waveform_training` in run
@@ -161,7 +161,8 @@ metadata; the architecture configuration remains unchanged.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `WAVEFORM_TRAINING_MODE` | `joint` | `joint`, `waveform_only`, `kernel_only`, or `alternating` |
+| `WAVEFORM_TRAINING_MODE` | `joint` | `joint`, `waveform_only`, `kernel_only`, `alternating`, or `joint_then_kernel` |
+| `WAVEFORM_ADAPT_EPOCHS` | `25` | Initial joint-training epochs before a permanent kernel phase in `joint_then_kernel`; `0` freezes waveforms from the start |
 | `WAVEFORM_PHASE_EPOCHS` | `1` | Consecutive waveform epochs in each alternating cycle |
 | `WAVEFORM_KERNEL_EPOCHS` | `5` | Consecutive kernel epochs in each alternating cycle |
 | `WAVEFORM_FIRST_PHASE` | `waveform` | First phase of each alternating cycle; alternatively `kernel` |
@@ -177,8 +178,22 @@ parameters stay fixed in these modes. `all` broadens the kernel phase to all
 non-bin parameters; it has no effect during a waveform phase. Explicitly
 frozen parameters are never re-enabled. Joint mode preserves ordinary training.
 
+`joint_then_kernel` trains all eligible parameters for the first
+`WAVEFORM_ADAPT_EPOCHS` epochs, then permanently freezes the waveform tables.
+Set `WAVEFORM_KERNEL_SCOPE=all` to continue training every non-waveform parameter.
+The default `spectral` scope instead continues only LWF mixing weights after
+adaptation. The transition uses the existing optimizer and scheduler: kernel
+Adam moments and step counts continue, while waveform values and Adam state
+stop changing. No warm start, optimizer recreation, or LR restart occurs.
+With `WAVEFORM_ADAPT_EPOCHS=25`, zero-based epochs 0–24 are joint and epoch 25
+onward is kernel-only (the 26th training epoch). A duration equal to or longer
+than the run leaves the whole run in the adaptation phase.
+
 Non-joint modes put the model in evaluation mode during each training forward:
 BatchNorm running statistics stay fixed and dropout is disabled in both phases.
+This includes both phases of `joint_then_kernel`, so the transition does not
+also switch normalization/dropout behavior. For comparisons to ordinary joint
+training, account for this policy if the architecture uses BatchNorm or dropout.
 Autograd remains enabled. Contrast refitting must be disabled because it would
 modify the frozen model outside the optimizer. Task-loss schedules, if enabled,
 still follow the overall epoch counter.
@@ -211,6 +226,19 @@ Initialization profiles are overridden by saved checkpoint tables. These are
 continuations of existing LWF models; this feature does not convert a plain
 FNO checkpoint into an LWF architecture.
 
+Example: adapt a square-start basis for 25 epochs, then freeze only the bins
+while fitting the rest of the network for the remaining 75 epochs:
+
+```bash
+sbatch --export=ALL,WAVEFORM_INIT=square,WAVEFORM_TRAINING_MODE=joint_then_kernel,WAVEFORM_ADAPT_EPOCHS=25,WAVEFORM_KERNEL_SCOPE=all,WAVEFORM_LR_RATIO=1,N_EPOCHS=100,CHECKPOINT_DIR=checkpoints/xhi2d_square_adapt25 \
+  slurm/train_2d_xhi_waveform.sbatch
+```
+
+Use `WAVEFORM_INIT=sawtooth` and/or `WAVEFORM_ADAPT_EPOCHS=10` for the other
+proposed controls, with a distinct checkpoint directory for each run. This
+example uses the launcher's normal architecture/data defaults; retain the same
+overrides as your comparison runs (including batch size, widths, and base LR).
+
 Use `RESUME_DIR` instead of `INIT_CHECKPOINT` when continuing an interrupted
 run with the **same schedule**. `N_EPOCHS` is the total target epoch count, not
 the number of additional epochs. The two checkpoint settings are mutually
@@ -220,6 +248,11 @@ resumption remains supported. Resumption follows the model filename in the
 training manifest, so final Adam state is not paired with an older best model.
 This restores training state; exact stochastic replay still requires the same
 data order/RNG state, which the existing checkpoint format does not save.
+Adaptation duration is counted from the original run's epoch zero and is
+preserved across resume; changing it requires an explicit fresh warm start.
+The new `adapt_epochs` metadata key is written only for `joint_then_kernel`,
+so existing joint, waveform-only, kernel-only and alternating schedules retain
+their previous checkpoint schema.
 
 Every waveform run using these entry points now saves its actual reference
 tables to `waveform_initial_tables.pt` beside the metrics file. This is a mapping

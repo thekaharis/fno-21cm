@@ -49,7 +49,8 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
     env.update({"MODEL_KIND": "localfno", "LOCAL_OPERATOR": "fourier", "GLOBAL_OPERATOR": "hadamard"})
     if overrides:
         env.update({"N_EPOCHS": "3", "WAVEFORM_LOCAL_BINS": "9", "WAVEFORM_LR_RATIO": "0.2",
-                    "CHECKPOINT_DIR": "checkpoints/custom run", "WAVEFORM_INIT": "sine", "WAVEFORM_TRAINING_MODE": "alternating",
+                    "CHECKPOINT_DIR": "checkpoints/custom run", "WAVEFORM_INIT": "sine", "WAVEFORM_TRAINING_MODE": "joint_then_kernel",
+                    "WAVEFORM_ADAPT_EPOCHS": "10",
                     "WAVEFORM_PHASE_EPOCHS": "2", "WAVEFORM_KERNEL_EPOCHS": "4",
                     "WAVEFORM_FIRST_PHASE": "kernel", "WAVEFORM_KERNEL_SCOPE": "all",
                     "INIT_CHECKPOINT": "checkpoints/source run/final_model_state_dict.pt"})
@@ -64,7 +65,8 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
     assert settings["WAVEFORM_LOCAL_BINS"] == ("9" if overrides else "15")
     assert settings["WAVEFORM_GLOBAL_BINS"] == "31"
     assert settings["WAVEFORM_INIT"] == ("sine" if overrides else "random")
-    assert settings["WAVEFORM_TRAINING_MODE"] == ("alternating" if overrides else "joint")
+    assert settings["WAVEFORM_TRAINING_MODE"] == ("joint_then_kernel" if overrides else "joint")
+    assert settings["WAVEFORM_ADAPT_EPOCHS"] == ("10" if overrides else "25")
     assert settings["WAVEFORM_PHASE_EPOCHS"] == ("2" if overrides else "1")
     assert settings["WAVEFORM_KERNEL_EPOCHS"] == ("4" if overrides else "5")
     assert settings["WAVEFORM_FIRST_PHASE"] == ("kernel" if overrides else "waveform")

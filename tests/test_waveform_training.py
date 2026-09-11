@@ -50,7 +50,8 @@ def assert_state_equal(a, b):
 
 
 @pytest.mark.parametrize("mode,scope", [("waveform_only", "spectral"), ("kernel_only", "spectral"),
-                                       ("alternating", "spectral"), ("alternating", "all")])
+                                       ("alternating", "spectral"), ("alternating", "all"),
+                                       ("joint_then_kernel", "spectral"), ("joint_then_kernel", "all")])
 def test_inactive_parameters_and_adam_moments_are_bitwise_frozen(mode, scope):
     torch.manual_seed(31)
     model = SmallModel().double()
@@ -62,7 +63,8 @@ def test_inactive_parameters_and_adam_moments_are_bitwise_frozen(mode, scope):
         optimizer.zero_grad(set_to_none=True)
         mse(model(x), y).backward()
         optimizer.step()
-    config = WaveformTrainingConfig(mode, waveform_epochs=1, kernel_epochs=1, kernel_scope=scope)
+    config = WaveformTrainingConfig(mode, waveform_epochs=1, kernel_epochs=1, kernel_scope=scope,
+                                    adapt_epochs=2)
     controller = WaveformTrainingController(model, optimizer, config)
     seen_active_norms = []
 
@@ -85,7 +87,8 @@ def test_inactive_parameters_and_adam_moments_are_bitwise_frozen(mode, scope):
         for name, p in model.named_parameters():
             is_table = ".bank.tables." in name
             is_mixing = name in {"spectral.weight", "spectral.phase_weight"}
-            active = is_table if controller.phase == "waveform" else (not is_table if scope == "all" else is_mixing)
+            active = (True if controller.phase == "joint" else is_table if controller.phase == "waveform"
+                      else (not is_table if scope == "all" else is_mixing))
             if not active:
                 torch.testing.assert_close(p, before[name], atol=0, rtol=0)
                 assert_state_equal(optimizer.state[p], state_before[name])
@@ -134,6 +137,36 @@ def test_configuration_and_schedule(monkeypatch):
                    {"first_phase": "bad"}, {"kernel_scope": "bad"}):
         with pytest.raises(ValueError):
             WaveformTrainingConfig(**kwargs)
+
+
+def test_adaptation_schedule_and_environment(monkeypatch):
+    monkeypatch.setenv("WAVEFORM_TRAINING_MODE", "joint_then_kernel")
+    monkeypatch.setenv("WAVEFORM_ADAPT_EPOCHS", "2")
+    config = WaveformTrainingConfig.from_env()
+    assert config.adapt_epochs == 2
+    assert config.to_dict()["adapt_epochs"] == 2
+    assert WaveformTrainingConfig(**config.to_dict()) == config
+    assert [config.phase_at(e) for e in range(5)] == ["joint", "joint", "kernel", "kernel", "kernel"]
+    assert WaveformTrainingConfig("joint_then_kernel", adapt_epochs=0).phase_at(0) == "kernel"
+    assert config.phase_at(1000) == "kernel"
+    with pytest.raises(ValueError, match="ADAPT_EPOCHS"):
+        WaveformTrainingConfig("joint_then_kernel", adapt_epochs=-1)
+
+
+@pytest.mark.parametrize("mode", ["joint", "waveform_only", "kernel_only", "alternating"])
+def test_existing_checkpoint_config_remains_compatible(mode):
+    config = WaveformTrainingConfig(mode)
+    # Literal schema written before adapt_epochs existed.
+    legacy = dict(mode=mode, waveform_epochs=1, kernel_epochs=5,
+                  first_phase="waveform", kernel_scope="spectral")
+    assert config.to_dict() == legacy
+    model = SmallModel()
+    optimizer = torch.optim.Adam(model.parameters())
+    controller = WaveformTrainingController(model, optimizer, config)
+    controller.begin_epoch(0)
+    optimizer.param_groups[0][controller.state_key]["config"] = legacy
+    controller.validate_resume(0)
+    controller.begin_epoch(1)
 
 
 def setup_run(config, epochs, metrics_path):
@@ -200,6 +233,38 @@ def test_checkpoint_warm_start_requires_compatible_model_and_starts_fresh(tmp_pa
     torch.save(incomplete, path)
     with pytest.raises(ValueError, match="matching architecture"):
         warm_start(destination, path, strict=True)
+
+
+@pytest.mark.parametrize("completed_epoch", [1, 2, 3])
+def test_adaptation_resume_before_at_and_after_freeze(tmp_path, completed_epoch):
+    torch.manual_seed(44)
+    loader = DataLoader([{"x": torch.randn(2, 9, 9, dtype=torch.float64),
+                          "y": torch.randn(1, 9, 9, dtype=torch.float64)} for _ in range(2)], batch_size=2)
+    config = WaveformTrainingConfig("joint_then_kernel", adapt_epochs=3, kernel_scope="all")
+    torch.manual_seed(8)
+    full = setup_run(config, 6, tmp_path / "full/metrics.jsonl")
+    train(full, loader)
+    torch.manual_seed(8)
+    partial = setup_run(config, completed_epoch + 1, tmp_path / "partial/metrics.jsonl")
+    train(partial, loader)
+    save_dir = tmp_path / "checkpoint"
+    save_training_state(save_dir, "final_model", partial[0], partial[1], partial[2], epoch=completed_epoch)
+    resumed = setup_run(config, 6, tmp_path / "resumed/metrics.jsonl")
+    train(resumed, loader, resume=save_dir)
+    for a, b in zip(full[:3], resumed[:3]):
+        assert_state_equal(a.state_dict(), b.state_dict())
+    rows = [json.loads(line) for line in (tmp_path / "resumed/metrics.jsonl").read_text().splitlines()]
+    assert [r["waveform_training_phase"] for r in rows] == [config.phase_at(e) for e in range(completed_epoch+1, 6)]
+    assert all(r["waveform_relative_update"] == 0 for r in rows if r["epoch"] >= 3)
+    controller = resumed[3].waveform_training
+    # One batch per epoch. Frozen tables retain three Adam updates; every
+    # other parameter retains six. The scheduler finishes its original cycle.
+    for p in resumed[0].parameters():
+        assert resumed[1].state[p]["step"] == (3 if id(p) in controller.table_ids else 6)
+    assert resumed[2].last_epoch == 6
+    incompatible = setup_run(WaveformTrainingConfig("joint_then_kernel", adapt_epochs=4, kernel_scope="all"), 6, None)
+    with pytest.raises(ValueError, match="schedule differs"):
+        train(incompatible, loader, resume=save_dir)
 
 
 def test_no_waveforms_and_contrast_refit_are_rejected():

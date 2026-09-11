@@ -32,7 +32,7 @@ def _worker(rank, init_file, mode):
         wrapped = torch.nn.parallel.DistributedDataParallel(model)
         optim = torch.optim.Adam(waveform_parameter_groups(wrapped, lr=.001, weight_decay=0.))
         ref_optim = torch.optim.Adam(waveform_parameter_groups(reference, lr=.001, weight_decay=0.))
-        config = WaveformTrainingConfig(mode, waveform_epochs=1, kernel_epochs=1)
+        config = WaveformTrainingConfig(mode, waveform_epochs=1, kernel_epochs=1, adapt_epochs=2)
         controller = WaveformTrainingController(wrapped, optim, config)
         ref_controller = WaveformTrainingController(reference, ref_optim, config)
         x = torch.randn(2, 2, 12, 12, dtype=torch.float64)
@@ -57,6 +57,6 @@ def _worker(rank, init_file, mode):
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("mode", ["joint", "waveform_only", "alternating"])
+@pytest.mark.parametrize("mode", ["joint", "waveform_only", "alternating", "joint_then_kernel"])
 def test_two_rank_gradients_match_full_batch_with_shared_bottleneck(tmp_path, mode):
     mp.spawn(_worker, args=(str(tmp_path / "rendezvous"), mode), nprocs=2, join=True)
