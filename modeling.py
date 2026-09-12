@@ -33,6 +33,7 @@ OPERATOR_TAGS = {
     "hadamard": "whno",
     "siren_hadamard": "swhno",
     "cnn": "cnn",
+    "identity": "id",
 }
 # Every operator in the registry needs a tag here. checkpoint_tag looks each
 # slot up unconditionally, so a registered-but-untagged operator raises
@@ -69,6 +70,7 @@ def operator_env_settings() -> dict:
         "waveform_lr_ratio": float(os.environ.get("WAVEFORM_LR_RATIO", "0.1")),
         "waveform_init": os.environ.get("WAVEFORM_INIT", "random").strip().lower(),
         "waveform_transform": os.environ.get("WAVEFORM_TRANSFORM", "tied").strip().lower(),
+        "grid_embedding": _env_bool("GRID_EMBEDDING", False),
         "whno_ordering": os.environ.get("WHNO_ORDERING", "sequency").lower(),
         "cnn_depth": int(os.environ.get("CNN_DEPTH", "3")),
         "cnn_kernel_size": int(os.environ.get("CNN_KERNEL_SIZE", "3")),
@@ -168,6 +170,7 @@ class ModelConfig:
     waveform_lr_ratio: float = 0.1
     waveform_init: str = "random"
     waveform_transform: str = "tied"
+    grid_embedding: bool = False
     whno_ordering: str = "sequency"
     cnn_depth: int = 3
     cnn_kernel_size: int = 3
@@ -481,6 +484,7 @@ class ModelConfig:
             "waveform_lr_ratio": self.waveform_lr_ratio,
             "waveform_init": self.waveform_init,
             "waveform_transform": self.waveform_transform,
+            "grid_embedding": self.grid_embedding,
             "whno_ordering": self.whno_ordering,
             "cnn_depth": self.cnn_depth,
             "cnn_kernel_size": self.cnn_kernel_size,
@@ -527,7 +531,7 @@ class ModelConfig:
         """Architecture folder name: operator pair for localop, else the kind."""
         tags = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
                 "siren_hadamard": "swhno", "siren_fourier": "sfno",
-                "cnn": "cnn", "learned_waveform": "lwf"}
+                "cnn": "cnn", "learned_waveform": "lwf", "identity": "id"}
         if self.kind == "localop" and self.local_operator and self.global_operator:
             return (f"{tags.get(self.local_operator, self.local_operator)}_"
                     f"{tags.get(self.global_operator, self.global_operator)}")
@@ -751,6 +755,7 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
             local_operator_kwargs=local_kwargs,
             global_operator_kwargs=global_kwargs,
             local_windowed=config.local_windowed,
+            grid_embedding=config.grid_embedding,
             wavelet_levels=config.localwno_levels,
         )
     if config.kind == "fno" and two_d:

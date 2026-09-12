@@ -593,6 +593,7 @@ class LocalFNO3d(nn.Module):
         local_operator_kwargs: Mapping | None = None,
         global_operator_kwargs: Mapping | None = None,
         local_windowed: bool | None = None,
+        grid_embedding: bool = False,
         wavelet_levels: int = 2,
     ):
         super().__init__()
@@ -673,7 +674,10 @@ class LocalFNO3d(nn.Module):
             operator_kwargs=global_kwargs,
         )
 
-        self.lifting = nn.Conv3d(self.in_channels, width0, kernel_size=1)
+        self.grid_embedding = bool(grid_embedding)
+        self._grid_cache: dict = {}
+        lifting_in = self.in_channels + (3 if self.grid_embedding else 0)
+        self.lifting = nn.Conv3d(lifting_in, width0, kernel_size=1)
         self.encoder0 = SpectralResidualBlock3d(
             width0, local_modes, spectral_rank,
             window_size=window, offset=(0, 0, 0), **local_block,
@@ -727,7 +731,30 @@ class LocalFNO3d(nn.Module):
             align_corners=False,
         )
 
+    def _grid_channels(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalized coordinate channels appended to the input, FNO-style.
+
+        neuralop's FNO appends the sampling coordinates before lifting, so the
+        network knows where on the grid each cell sits; this shell historically
+        did not, which made a like-for-like comparison with a plain FNO
+        impossible. Coordinates run over [0, 1] per axis and are cached per
+        (shape, device, dtype) because they are fixed for a given grid.
+        """
+        key = (tuple(x.shape[2:]), x.device, x.dtype)
+        cached = self._grid_cache.get(key)
+        if cached is None:
+            axes = [torch.linspace(0.0, 1.0, int(n), device=x.device, dtype=x.dtype)
+                    for n in x.shape[2:]]
+            grid = torch.meshgrid(*axes, indexing="ij")
+            cached = torch.stack(grid).unsqueeze(0)
+            if len(self._grid_cache) >= 8:      # bounded: resolutions, not data
+                self._grid_cache.clear()
+            self._grid_cache[key] = cached
+        return cached.expand(x.shape[0], -1, *x.shape[2:])
+
     def forward(self, x: torch.Tensor, **_) -> torch.Tensor:
+        if self.grid_embedding:
+            x = torch.cat((x, self._grid_channels(x)), dim=1)
         skip0 = self.encoder0(self.lifting(x))
         skip1 = self.encoder1(self.down0(skip0))
         x = self.bottleneck(self.down1(skip1))

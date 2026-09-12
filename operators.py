@@ -566,6 +566,39 @@ def _build_siren_hadamard(channels, ndim, modes, hyperparameters):
     )
 
 
+class IdentityOperator(nn.Module):
+    """Pass the field through untouched: a slot that performs no mixing.
+
+    Purpose is ablation. The local/global shell always applies both slots in
+    sequence, so there is otherwise no way to ask what one basis contributes on
+    its own -- the windowed local branch sits in front of the global transform
+    and can compensate for whatever the basis gets wrong. Putting this in the
+    local slot leaves the U-Net skeleton (lifting, down/up sampling, skips,
+    projection) intact while removing all local spatial mixing, so
+    ``identity/<basis>`` isolates the basis itself.
+
+    It holds no parameters and ignores the mode counts, so the comparison
+    between two such models differs only in the other slot.
+    """
+
+    def __init__(self, channels: int, ndim: int):
+        super().__init__()
+        self.channels = int(channels)
+        self.ndim = int(ndim)
+
+    def forward(self, x, **_):
+        if x.ndim != self.ndim + 2 or x.shape[1] != self.channels:
+            raise ValueError(
+                f"expected (B, {self.channels}, *{self.ndim} spatial axes), "
+                f"got {tuple(x.shape)}"
+            )
+        return x
+
+
+def _build_identity(channels, ndim, modes, hyperparameters):
+    return IdentityOperator(channels, ndim)
+
+
 def _build_cnn(channels, ndim, modes, hyperparameters):
     return ConvUNetOperator(
         channels,
@@ -650,6 +683,16 @@ def _validate_cnn(sizes, modes, hyperparameters, *, context):
 
 
 OPERATORS: dict[str, OperatorSpec] = {
+    "identity": OperatorSpec(
+        name="identity",
+        build=_build_identity,
+        # No modes, no rank projection and no windowing: every one of those
+        # would add parameters or cost to a slot whose whole point is to add
+        # nothing. windowed=False also skips the patch loop entirely.
+        uses_modes=False,
+        rank_projected=False,
+        windowed=False,
+    ),
     "learned_waveform": OperatorSpec(
         name="learned_waveform",
         build=_build_learned_waveform,
@@ -728,6 +771,9 @@ OPERATORS: dict[str, OperatorSpec] = {
 
 #: Friendly spellings accepted wherever an operator name is read.
 OPERATOR_ALIASES = {
+    "none": "identity",
+    "skip": "identity",
+    "passthrough": "identity",
     "waveform": "learned_waveform",
     "orthogonal_waveform": "learned_waveform",
     "fno": "fourier",
