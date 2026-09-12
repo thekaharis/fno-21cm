@@ -160,7 +160,7 @@ def main(argv=None) -> None:
     ap.add_argument("--checkpoints", nargs="+", metavar="NAME=PATH")
     ap.add_argument("--split", default="test", choices=("train", "val", "test"))
     ap.add_argument("--n-cones", type=int, default=200)
-    ap.add_argument("--out", type=Path, default=Path("figures/rmse_r2"))
+    ap.add_argument("--out", type=Path, default=Path("figures/shared/eval/rmse_r2"))
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
 

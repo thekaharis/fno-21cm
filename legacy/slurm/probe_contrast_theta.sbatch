@@ -30,7 +30,7 @@ conda activate fno-env
 export PYTHONUNBUFFERED=1
 
 python legacy/probes/probe_contrast_theta.py \
-    --run "${RUN:-checkpoints/xhi2d_whno_glob_lr3e4}" \
+    --run "${RUN:-checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4}" \
     ${CACHE:+--cache "$CACHE"} \
     ${BINS:+--bins "$BINS"} \
     ${XHI_MAX:+--xhi-max "$XHI_MAX"} \

@@ -34,7 +34,7 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 export MODEL_KIND=localsirenfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_localsirenfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno}"
 export N_EPOCHS="${N_EPOCHS:-70}"
 
 # Whole-volume bottleneck modes at 35x35x64.

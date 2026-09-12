@@ -11,9 +11,9 @@ operator, this one measures whole trained cubes, and they disagree about the
 U-FNO because its cost is dominated by a dense U-Net path that a matched-width
 slice probe does not reproduce.
 
-Both read `figures/final_eval/matrix/speed/inference_speed.csv`
+Both read `figures/shared/eval/final_eval/matrix/speed/inference_speed.csv`
 (`viz.inference_speed_eval`) and, for the accuracy view,
-`figures/final_eval/matrix/rmse/rmse_r2.csv`.
+`figures/shared/eval/final_eval/matrix/rmse/rmse_r2.csv`.
 
 Colour encodes the LOCAL operator throughout the campaign's figures; kept here.
 """
@@ -32,11 +32,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 CKPT_ROOT = Path("checkpoints")
-SPEED_CSV = Path("figures/final_eval/matrix/speed/inference_speed.csv")
-SPEED_JSON = Path("figures/final_eval/matrix/speed/inference_speed.json")
-RMSE_CSV = Path("figures/final_eval/matrix/rmse/rmse_r2.csv")
-OUT = {"accuracy": Path("figures/inference_speed_vs_rmse.png"),
-       "size": Path("figures/inference_speed_vs_size.png")}
+SPEED_CSV = Path("figures/shared/eval/final_eval/matrix/speed/inference_speed.csv")
+SPEED_JSON = Path("figures/shared/eval/final_eval/matrix/speed/inference_speed.json")
+RMSE_CSV = Path("figures/shared/eval/final_eval/matrix/rmse/rmse_r2.csv")
+OUT = {"accuracy": Path("figures/summary/inference_speed_vs_rmse.png"),
+       "size": Path("figures/summary/inference_speed_vs_size.png")}
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -102,8 +102,8 @@ def load() -> tuple[list[dict], dict]:
     if not SPEED_CSV.exists():
         raise SystemExit(f"missing {SPEED_CSV} -- run the speed suite first:\n"
                          f"  sbatch --export=ALL,SUITE=speed,"
-                         f"SPECS_FILE=figures/final_eval/specs_matrix.txt,"
-                         f"OUT_ROOT=figures/final_eval/matrix "
+                         f"SPECS_FILE=figures/shared/eval/final_eval/specs_matrix.txt,"
+                         f"OUT_ROOT=figures/shared/eval/final_eval/matrix "
                          f"slurm/final_eval_suite.sbatch")
     speed = {r["model"]: r for r in csv.DictReader(open(SPEED_CSV))}
     rmse = {r["model"]: r for r in csv.DictReader(open(RMSE_CSV))}

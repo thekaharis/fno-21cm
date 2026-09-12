@@ -1,4 +1,4 @@
-"""Draw the SIREN weight-network schematic (figures/diagrams/siren_mechanism.svg).
+"""Draw the SIREN weight-network schematic (figures/shared/diagnostics/diagrams/siren_mechanism.svg).
 
 Styled after the standard FNO architecture figure so the two can sit side by
 side in the thesis: top row = the trunk of ``siren.SirenWeightNetwork``,

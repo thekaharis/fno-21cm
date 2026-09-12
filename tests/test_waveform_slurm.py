@@ -76,9 +76,9 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
         assert settings["INIT_CHECKPOINT"] == "checkpoints/source run/final_model_state_dict.pt"
     assert settings["WAVEFORM_LR_RATIO"] == ("0.2" if overrides else "0.1")
     assert settings["N_EPOCHS"] == ("3" if overrides else "200" if entry == "fno_zre.py" else "20")
-    defaults = {"fno_21cm_3d.py": "checkpoints/checkpoints_3d_lwf_lwf_plain",
-                "fno_xhi2d.py": "checkpoints/checkpoints_2d_xhi_local_lwf_lwf",
-                "fno_zre.py": "checkpoints/checkpoints_zre_local_lwf_lwf_l2"}
+    defaults = {"fno_21cm_3d.py": "checkpoints/3d_xhi/lwf_lwf/checkpoints_3d_lwf_lwf_plain",
+                "fno_xhi2d.py": "checkpoints/2d_xhi/lwf_lwf/checkpoints_2d_xhi_local_lwf_lwf",
+                "fno_zre.py": "checkpoints/zre/lwf_lwf/checkpoints_zre_local_lwf_lwf_l2"}
     assert settings["CHECKPOINT_DIR"] == ("checkpoints/custom run" if overrides else defaults[entry])
 
 
@@ -104,7 +104,12 @@ def test_separate_default_checkpoint_directory_avoids_tied_runs(cluster_stubs, s
     result = subprocess.run(["bash", str(project / "slurm" / script)], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in Path(env["CAPTURE_PATH"]).read_text().splitlines()]
-    assert calls[-1]["env"]["CHECKPOINT_DIR"].endswith("_separate")
+    expected = {
+        "train_2d_xhi_waveform.sbatch": "checkpoints/2d_xhi/lwf_lwf/checkpoints_2d_xhi_local_lwf_lwf_separate",
+        "train_3d_waveform.sbatch": "checkpoints/3d_xhi/lwf_lwf/checkpoints_3d_lwf_lwf_plain_separate",
+        "train_zre_waveform.sbatch": "checkpoints/zre/lwf_lwf/checkpoints_zre_local_lwf_lwf_l2_separate",
+    }
+    assert calls[-1]["env"]["CHECKPOINT_DIR"] == expected[script]
 
 
 def test_shell_syntax_and_no_trailing_sbatch_comments():
@@ -114,3 +119,16 @@ def test_shell_syntax_and_no_trailing_sbatch_comments():
         for line in script.read_text().splitlines():
             if line.startswith("#SBATCH"):
                 assert "#" not in line[1:]
+
+
+@pytest.mark.parametrize("architecture", ["ufno", "fno_fno", "fno_whno", "lwf_lwf"])
+def test_matrix_defaults_follow_architecture_folder(cluster_stubs, architecture):
+    project, env = cluster_stubs
+    env.update({"ARCH": architecture, "LOSS": "hybrid"})
+    result = subprocess.run(["bash", str(project / "slurm/train_3d_matrix.sbatch")],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in Path(env["CAPTURE_PATH"]).read_text().splitlines()]
+    assert calls[-1]["env"]["CHECKPOINT_DIR"] == (
+        f"checkpoints/3d_xhi/{architecture}/checkpoints_3d_{architecture}_hybrid"
+    )

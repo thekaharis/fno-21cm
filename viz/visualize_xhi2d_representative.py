@@ -91,7 +91,7 @@ def main() -> None:
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument(
         "--output", type=Path,
-        default=Path("figures/xhi2d_representative"),
+        default=Path("figures/2d_xhi/eval/xhi2d_representative"),
     )
     parser.add_argument(
         "--quantiles", type=float, nargs="+", default=DEFAULT_QUANTILES,

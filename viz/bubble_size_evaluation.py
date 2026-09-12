@@ -31,14 +31,14 @@ Examples
 Cluster checkpoint comparison::
 
     python -m viz.bubble_size_evaluation --checkpoints \
-      ufno=checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt \
-      localsirenfno=checkpoints/checkpoints_3d_localsirenfno/best_model_state_dict.pt \
-      --split test --n-cones 200 --out figures/bubble_size_out
+      ufno=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt \
+      localsirenfno=checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno/best_model_state_dict.pt \
+      --split test --n-cones 200 --out figures/3d_xhi/eval/bubble_size_out
 
 Offline saved-cube comparison::
 
     python -m viz.bubble_size_evaluation --manifest cubes/manifest.json \
-      --out figures/bubble_size_out
+      --out figures/3d_xhi/eval/bubble_size_out
 
 Synthetic verification::
 
@@ -792,7 +792,7 @@ def main(argv=None):
     source.add_argument("--selftest", action="store_true")
     source.add_argument("--manifest", type=Path)
     source.add_argument("--checkpoints", nargs="+", metavar="name=path")
-    parser.add_argument("--out", type=Path, default=Path("figures/bubble_size_out"))
+    parser.add_argument("--out", type=Path, default=Path("figures/3d_xhi/eval/bubble_size_out"))
     parser.add_argument("--n-cones", type=int, default=200)
     parser.add_argument("--split", choices=["train", "val", "test"], default="test")
     parser.add_argument("--save-cubes", type=Path, default=None)

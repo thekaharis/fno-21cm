@@ -362,7 +362,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", type=Path,
-        default=Path("figures/xhi2d_wno_sweep_comparison"),
+        default=Path("figures/2d_xhi/eval/xhi2d_wno_sweep_comparison"),
     )
     parser.add_argument(
         "--quantiles", type=float, nargs="+", default=[0.25, 0.5, 0.75, 0.9],

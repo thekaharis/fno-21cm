@@ -354,7 +354,7 @@ def main(argv=None):
     ap.add_argument("--envelope-pct", type=float, default=90.0,
                     help="percentile across cones for the envelope warp "
                          "(covers early/late reionizers, not just the mean)")
-    ap.add_argument("--out", type=Path, default=Path("figures/grid_eval_out"))
+    ap.add_argument("--out", type=Path, default=Path("figures/shared/eval/grid_eval_out"))
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
 

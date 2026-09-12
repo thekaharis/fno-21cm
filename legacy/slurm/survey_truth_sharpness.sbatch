@@ -23,7 +23,7 @@ else
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 fi
 cd "$PROJECT_ROOT"
-mkdir -p logs figures/truth_survey
+mkdir -p logs figures/shared/diagnostics/truth_survey
 
 module load devel/miniforge
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -36,4 +36,4 @@ SHARD="${SLURM_ARRAY_TASK_ID:-0}"
 python -m legacy.xhi2d.survey_truth_sharpness \
     --shard "$SHARD" \
     --num-shards "$NUM_SHARDS" \
-    --out figures/truth_survey
+    --out figures/shared/diagnostics/truth_survey

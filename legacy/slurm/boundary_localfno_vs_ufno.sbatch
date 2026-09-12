@@ -12,7 +12,7 @@
 # Compare against another U-FNO checkpoint:
 #
 #   sbatch --export=ALL,\
-# UFNO_CHECKPOINT=checkpoints/checkpoints_3d_ufno_v3_anisoz/best_model_state_dict.pt \
+# UFNO_CHECKPOINT=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz/best_model_state_dict.pt \
 #     slurm/boundary_localfno_vs_ufno.sbatch
 #
 # Short feasibility run:
@@ -53,8 +53,8 @@ export PYTHONUNBUFFERED=1
 # ---------------------------------------------------------------- checkpoints
 # Both checkpoint directories must contain run_metadata.json. This lets the
 # diagnostic safely reconstruct different model architectures in one process.
-UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt}"
-LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt}"
+UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt}"
+LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/3d_xhi/localfno/checkpoints_3d_localfno/best_model_state_dict.pt}"
 
 for checkpoint in "$UFNO_CHECKPOINT" "$LOCALFNO_CHECKPOINT"; do
     if [ ! -f "$checkpoint" ]; then

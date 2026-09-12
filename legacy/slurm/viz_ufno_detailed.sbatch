@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # SLURM batch script -- detailed viz (16 cones, active-z slices) for the
-# U-FNO checkpoint in ./checkpoints/checkpoints_3d_ufno/.
+# U-FNO checkpoint in ./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/.
 #
 # Submit from the project root:
 #
@@ -11,11 +11,11 @@
 #   * Runs viz/visualize_3d_detailed.py instead of viz/visualize_3d.py
 #   * 16 cones per split (vs 4); active-z slice picker per cone.
 #   * Output goes to a per-run subfolder under figures/ (e.g.
-#     figures/ufno-detailed_20260606-143022_job12345/).
+#     figures/archive/ufno-detailed_20260606-143022_job12345/).
 #   * Walltime bumped to 60 min.
 #
 # Differences vs slurm/viz_detailed.sbatch:
-#   * MODEL_KIND=ufno -> loads checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt and
+#   * MODEL_KIND=ufno -> loads checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt and
 #     reconstructs the U-FNO architecture in load_model().
 #
 # This is one of two viz workflows -- the 4-cone summary is via

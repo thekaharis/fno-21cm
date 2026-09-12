@@ -22,7 +22,7 @@ Panels: r(k) curves, the power ratio P_pred/P_true, and the summary plane
 
 Run:
     python -m viz.ps_coherence_highk --runs lwf/lwf=checkpoints/... whno=... \
-        --n-slices 400 --out figures/ps_coherence_highk.png
+        --n-slices 400 --out figures/summary/ps_coherence_highk.png
 """
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ import torch
 from dataset.slices import SliceCache
 from dataset.dataset_3d import ParameterNormalization
 from losses import HighKPowerRatio
-from modeling import load_checkpoint
-from viz.compare_xhi2d_models import build_model, load_run, parse_run
+from modeling import ModelConfig, TrainerModel, build_model as build_from_config, load_checkpoint
+from viz.compare_xhi2d_models import load_run, parse_run
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -54,12 +54,20 @@ PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#9d4edd", "#d4a017", "#00a6a6",
            "#c2255c", "#495057"]
 
 
-def radial_bins(n: int, n_bins: int):
+def radial_bins(n: int, n_bins: int, k_max: float = 0.5):
+    """Radial bins up to the per-axis Nyquist limit.
+
+    Modes beyond k = 0.5 exist only in the corners of the 2-D spectrum, so
+    their bins average very few modes and are not isotropic; the DC mode is
+    removed by mean subtraction and would only add zeros. Both are dropped
+    (index -1).
+    """
     ky = np.fft.fftfreq(n)
     kx = np.fft.rfftfreq(n)
     radius = np.sqrt(ky[:, None] ** 2 + kx[None, :] ** 2)
-    edges = np.linspace(0.0, radius.max(), n_bins + 1)
-    index = np.clip(np.digitize(radius, edges) - 1, 0, n_bins - 1)
+    edges = np.linspace(0.0, k_max, n_bins + 1)
+    index = np.digitize(radius, edges) - 1
+    index[(radius >= k_max) | (radius == 0) | (index < 0)] = -1
     centers = 0.5 * (edges[:-1] + edges[1:])
     return index, centers
 
@@ -74,12 +82,13 @@ def spectra(pred: np.ndarray, truth: np.ndarray, n_bins: int = 24):
     tt = (ft * ft.conj()).real
     pt = (fp * ft.conj()).real
     flat = index.ravel()
+    keep = flat >= 0
     out = []
     for field in (pp, tt, pt):
         acc = np.zeros(n_bins)
         f = field.reshape(field.shape[0], -1).sum(axis=0)
-        np.add.at(acc, flat, f)
-        counts = np.bincount(flat, minlength=n_bins).astype(float)
+        np.add.at(acc, flat[keep], f[keep])
+        counts = np.bincount(flat[keep], minlength=n_bins).astype(float)
         out.append(acc / np.maximum(counts, 1.0))
     pp_b, tt_b, pt_b = out
     coherence = pt_b / np.sqrt(np.maximum(pp_b * tt_b, 1e-30))
@@ -100,13 +109,53 @@ def coherence_scale(centers, coherence, threshold=0.9):
     return float(x0 + (threshold - y0) * (x1 - x0) / (y1 - y0)) if y1 != y0 else float(x1)
 
 
+def rebuild(metadata):
+    """Build from run metadata, tolerating both metadata shapes.
+
+    `viz.compare_xhi2d_models.build_model` reads `model_config["in_channels"]`,
+    which newer runs no longer record -- they carry it under `input_features`
+    instead. Reading only the old location raises KeyError on every run since
+    that change, so try both.
+    """
+    config = metadata["model_config"]
+    channels = (config.get("in_channels")
+                or metadata.get("input_features", {}).get("in_channels"))
+    if channels is None:
+        raise KeyError("in_channels missing from model_config and input_features")
+    inner = build_from_config(ModelConfig.from_dict(config), int(channels))
+    # Mirror viz.compare_xhi2d_models.build_model from here on: optional contrast
+    # wrapper, then TrainerModel. Checkpoints are saved from the TrainerModel, so
+    # their keys carry an `fno.` prefix that the bare model would not match.
+    if str(config.get("contrast_mode", "off")) != "off":
+        from contrast import ContrastComposed
+        inner = ContrastComposed(
+            inner, str(config["contrast_mode"]),
+            schedule=config.get("contrast_schedule"),
+            freeze=bool(config.get("contrast_freeze", False)),
+            schedule_kind=str(config.get("contrast_schedule_kind", "sigmoid")),
+            n_bins=int(config.get("contrast_bins", 14)))
+    return TrainerModel(inner)
+
+
 @torch.inference_mode()
 def predict_all(run, inputs, device, batch=64):
-    model = build_model(run.metadata["model_config"])
+    model = rebuild(run.metadata)
     result = load_checkpoint(model, run.checkpoint)
-    if result.matched != result.total:
+    # Waveform checkpoints from before phase mixing lack `phase_weight`. The
+    # tensor is zero-initialized, so a zero-filled cross-phase block reproduces
+    # the architecture they were trained as exactly. Tolerate that and only that.
+    missing = [k for k in (result.missing or []) if not k.endswith("phase_weight")]
+    if missing or result.unexpected:
         raise RuntimeError(f"incomplete load for {run.label}: "
-                           f"{result.matched}/{result.total}")
+                           f"{result.matched}/{result.total}, missing={missing}, "
+                           f"unexpected={result.unexpected}")
+    if result.missing:
+        stale = [name for name, p in model.named_parameters()
+                 if name.endswith("phase_weight") and p.detach().abs().max() > 0]
+        if stale:
+            raise RuntimeError(f"{run.label}: absent phase_weight is nonzero: {stale}")
+        print(f"[ps] {run.label}: pre-phase-mixing checkpoint, "
+              f"{len(result.missing)} phase_weight tensors zero-filled", flush=True)
     model = model.to(device).eval()
     chunks = [model(inputs[i:i + batch].to(device)).cpu().numpy()[:, 0]
               for i in range(0, len(inputs), batch)]
@@ -124,7 +173,7 @@ def main(argv=None) -> None:
     ap.add_argument("--n-bins", type=int, default=24)
     ap.add_argument("--k-min", type=float, default=0.2,
                     help="highk cutoff in cycles/px, matching losses.HighKPowerRatio")
-    ap.add_argument("--out", type=Path, default=Path("figures/ps_coherence_highk.png"))
+    ap.add_argument("--out", type=Path, default=Path("figures/summary/ps_coherence_highk.png"))
     args = ap.parse_args(argv)
 
     runs = [r for r in (load_run(label, path) for label, path in args.runs) if r]
@@ -137,8 +186,19 @@ def main(argv=None) -> None:
                        parameter_normalization=ParameterNormalization.from_dict(
                            ref["parameter_normalization"])
                        if ref.get("parameter_normalization") else None)
-    test_idx = np.asarray(ref["split"]["test"])[:args.n_slices]
+    # The 2-D split is recorded by CONE id, not slice row: a cone contributes
+    # many slices, so selecting rows directly would leak cones across splits.
+    test_cones = np.asarray(ref["split"]["test_cone_ids"], dtype=np.int64)
+    test_idx = np.flatnonzero(np.isin(cache.cone_id, test_cones))
+    if args.n_slices < len(test_idx):
+        # Evenly spaced rather than the first N, which would be one end of the
+        # redshift range and unrepresentative of the reionization history.
+        test_idx = test_idx[np.linspace(0, len(test_idx) - 1, args.n_slices).astype(int)]
     items = [cache[int(i)] for i in test_idx]
+    # Fully neutral / fully ionized slices have ~zero true small-scale power, so
+    # a per-slice log power ratio diverges on them and dominates the mean.
+    xhi_mean = np.asarray(cache.xHI_mean)[test_idx]
+    active = torch.from_numpy((xhi_mean > 0.001) & (xhi_mean < 0.999))
     inputs = torch.stack([it["x"] for it in items])
     truth = np.stack([it["y"].numpy()[0] for it in items])
     print(f"[ps] {len(items)} test slices, shape {truth.shape[-2:]}")
@@ -154,19 +214,26 @@ def main(argv=None) -> None:
     for i, run in enumerate(runs):
         pred = predict_all(run, inputs, device)
         centers, coh, ratio = spectra(pred, truth, args.n_bins)
-        hk = float(highk(torch.from_numpy(pred).unsqueeze(1),
-                         torch.from_numpy(truth).unsqueeze(1)))
+        p_t = torch.from_numpy(pred).unsqueeze(1)
+        t_t = torch.from_numpy(truth).unsqueeze(1)
+        hk_all = float(highk(p_t, t_t))
+        hk = float(highk(p_t[active], t_t[active]))
         scale = coherence_scale(centers, coh)
+        band = centers >= args.k_min
+        coh_hk = float(coh[band].mean())
         colour = PALETTE[i % len(PALETTE)]
         axes[0].plot(centers, coh, "-", color=colour, lw=1.8, label=run.label)
         axes[1].plot(centers, ratio, "-", color=colour, lw=1.8, label=run.label)
-        axes[2].plot(scale, hk, "o", ms=11, color=colour, mec=SURFACE, mew=2)
-        axes[2].annotate(run.label, (scale, hk), textcoords="offset points",
+        axes[2].plot(coh_hk, hk, "o", ms=11, color=colour, mec=SURFACE, mew=2)
+        axes[2].annotate(run.label, (coh_hk, hk), textcoords="offset points",
                          xytext=(0, 13 if i % 2 == 0 else -19), ha="center",
                          fontsize=8.5, color=INK_2)
-        rows.append({"model": run.label, "coherence_k_r0.9": scale,
-                     "highk": hk, "n_slices": len(items)})
-        print(f"[ps] {run.label:24s} k(r<0.9)={scale:.4f}  highk={hk:.4f}", flush=True)
+        rows.append({"model": run.label, "coherence_mean_k_ge_kmin": coh_hk,
+                     "coherence_k_r0.9": scale, "highk_active": hk,
+                     "highk_all_slices": hk_all, "n_slices": len(items),
+                     "n_active": int(active.sum())})
+        print(f"[ps] {run.label:24s} r(k>={args.k_min})={coh_hk:.4f}  "
+              f"highk active={hk:.4f} all={hk_all:.4f}  k(r<0.9)={scale:.4f}", flush=True)
 
     axes[0].axhline(0.9, color=INK_MUTED, lw=1.0, ls="--")
     axes[0].set_ylabel("coherence  $r(k)$", fontsize=10, color=INK_2)
@@ -182,10 +249,10 @@ def main(argv=None) -> None:
     for ax in axes[:2]:
         ax.set_xlabel("$k$  (cycles / pixel)", fontsize=10, color=INK_2)
         ax.legend(frameon=False, fontsize=8.5, loc="best")
-    axes[2].set_xlabel("coherence scale: $k$ where $r<0.9$  (higher better)",
+    axes[2].set_xlabel(f"mean coherence $r(k)$ for $k \\geq {args.k_min}$  (higher better)",
                        fontsize=10, color=INK_2)
-    axes[2].set_ylabel("highk  (lower better)", fontsize=10, color=INK_2)
-    axes[2].set_title("The plane: no model wins both in 3-D", fontsize=11,
+    axes[2].set_ylabel("highk on active slices  (lower better)", fontsize=10, color=INK_2)
+    axes[2].set_title("Placement vs amount of small-scale structure", fontsize=11,
                       color=INK, loc="left")
 
     for ax in axes:

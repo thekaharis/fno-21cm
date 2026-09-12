@@ -16,8 +16,8 @@
 #
 # Default is 20 epochs for a first pass. To continue a finished run:
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=plain,N_EPOCHS=30,\
-#     CONTINUE_FROM=checkpoints/checkpoints_3d_fno_whno_plain/final_model_state_dict.pt,\
-#     CHECKPOINT_DIR=checkpoints/checkpoints_3d_fno_whno_plain_cont \
+#     CONTINUE_FROM=checkpoints/3d_xhi/fno_whno/checkpoints_3d_fno_whno_plain/final_model_state_dict.pt,\
+#     CHECKPOINT_DIR=checkpoints/3d_xhi/fno_whno/checkpoints_3d_fno_whno_plain_cont \
 #     slurm/train_3d_matrix.sbatch
 # That warm-starts the weights via INIT_CHECKPOINT. Note it restarts the epoch
 # counter and the cosine LR schedule, so it is a fresh anneal from the loaded
@@ -160,7 +160,7 @@ case "$LOSS" in
   *) echo "unknown LOSS=$LOSS" >&2; exit 2 ;;
 esac
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_3d_${ARCH}_${LOSS}}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/3d_xhi/${ARCH}/checkpoints_3d_${ARCH}_${LOSS}}"
 # Continuation: warm-start from a previous run's weights.
 if [ -n "${CONTINUE_FROM:-}" ]; then
     if [ ! -f "$CONTINUE_FROM" ]; then

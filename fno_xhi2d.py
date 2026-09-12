@@ -12,7 +12,7 @@ Environment overrides (defaults in parentheses):
   LOSS_L2_WEIGHT (1.0), LOSS_H1_WEIGHT (0.0), LOSS_BCE_WEIGHT (0.0)
   LOSS_SWD_WEIGHT (0.0), LOSS_HIGHK_WEIGHT (0.0),
   LOSS_EDGE_WARMUP_EPOCHS (5), SWD_DIRECTIONS (48), HIGHK_MIN (0.2)
-  CHECKPOINT_DIR (checkpoints/checkpoints_2d_xhi_<kind>)
+  CHECKPOINT_DIR (checkpoints/2d_xhi/<architecture>/checkpoints_2d_xhi_<kind>)
   LOCALFNO_BASE_WIDTH (32), LOCALFNO_WINDOW_X/Y (16),
   LOCALFNO_GLOBAL_MODES_X/Y (16), LOCALFNO_SPECTRAL_RANK (16),
   LOCALWNO_LEVELS (2)
@@ -165,7 +165,8 @@ TEST_FRACTION = float(os.environ.get("TEST_FRACTION", "0.1"))
 
 CHECKPOINT_DIR = Path(os.environ.get(
     "CHECKPOINT_DIR",
-    f"checkpoints/checkpoints_2d_xhi_{MODEL_CONFIG.checkpoint_tag}",
+    f"checkpoints/2d_xhi/{MODEL_CONFIG.family_tag}/"
+    f"checkpoints_2d_xhi_{MODEL_CONFIG.checkpoint_tag}",
 ))
 RESUME_DIR = os.environ.get("RESUME_DIR") or None
 INIT_CHECKPOINT = os.environ.get("INIT_CHECKPOINT") or None

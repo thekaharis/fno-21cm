@@ -26,7 +26,7 @@ export WAVEFORM_LR_RATIO="${WAVEFORM_LR_RATIO:-0.1}"
 export WAVEFORM_INIT="${WAVEFORM_INIT:-random}"
 export WAVEFORM_TRANSFORM="${WAVEFORM_TRANSFORM:-tied}"
 if [[ "$WAVEFORM_TRANSFORM" == "separate" ]]; then
-  export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_3d_${ARCH}_${LOSS}_separate}"
+  export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/3d_xhi/${ARCH}/checkpoints_3d_${ARCH}_${LOSS}_separate}"
 fi
 export WAVEFORM_TRAINING_MODE="${WAVEFORM_TRAINING_MODE:-joint}"
 export WAVEFORM_ADAPT_EPOCHS="${WAVEFORM_ADAPT_EPOCHS:-25}"

@@ -7,7 +7,7 @@ inference on a chosen subset -- so they live here once.
 Typical use::
 
     from legacy.xhi2d.slice_eval import gather, cone_split
-    s = gather("checkpoints/xhi2d_whno_glob_lr3e4", split="test", max_slices=512)
+    s = gather("checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4", split="test", max_slices=512)
     fit, held = cone_split(s.cone, seed=1)
 """
 

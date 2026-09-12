@@ -103,7 +103,7 @@ def parse_log(path: Path) -> dict | None:
     ft = FEATURES_RE.search(text)
     if ft:
         tr["input_features"] = ft.group(1)
-    dirs = re.findall(r"(checkpoints/checkpoints_zre\S*?)/", text) or \
+    dirs = re.findall(r"(checkpoints/zre/fno/checkpoints_zre\S*?)/", text) or \
            re.findall(r"saved training state to (\S+)", text)
     return {"model_config": mc, "training": tr, "params": m.group(3),
             "dirs": dirs}

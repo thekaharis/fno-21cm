@@ -23,7 +23,7 @@
 # anisotropic-Z effect from the v2 changes -- but the cleaner ablation is
 # v1 -> v3-anisoz comparison, holding everything except UFNO_UNET_VARIANT.
 #
-# Distinct CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno_v3_anisoz) so this run
+# Distinct CHECKPOINT_DIR (./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz) so this run
 # doesn't collide with v1, v2, or the other Tier 2 variants.
 # =============================================================================
 
@@ -73,7 +73,7 @@ export LOSS_L2_WEIGHT=0.3
 export LOSS_H1_WEIGHT=0.7
 export LOSS_BCE_WEIGHT=0.0
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno_v3_anisoz}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz}"
 
 # --- Data paths + NVMe staging ---------------------------------------------
 export LIGHTCONE_DIR=/pfs/10/work/hd_id260-fno_training/data/data

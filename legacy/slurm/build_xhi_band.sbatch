@@ -27,7 +27,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-RUN="${RUN:-checkpoints/xhi2d_whno_glob_lr3e4}"
+RUN="${RUN:-checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4}"
 
 python -m dataset.build_xhi_band \
     --lo "${BAND_LO:-0.0}" --hi "${BAND_HI:-0.36}" \

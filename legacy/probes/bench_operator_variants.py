@@ -133,7 +133,7 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--repeats", type=int, default=30)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--json", default="figures/operator_variant_benchmark.json")
+    ap.add_argument("--json", default="figures/summary/operator_variant_benchmark.json")
     args = ap.parse_args()
 
     if args.device == "cuda":

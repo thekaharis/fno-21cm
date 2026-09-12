@@ -13,7 +13,7 @@
 set -eo pipefail
 
 export MODEL_KIND="${MODEL_KIND:-localwno}"
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_zre_localwno_bw32_l2_lr3e4}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/zre/localwno/checkpoints_zre_localwno_bw32_l2_lr3e4}"
 export LOCALFNO_BASE_WIDTH="${LOCALFNO_BASE_WIDTH:-32}"
 export LOCALFNO_WINDOW_X="${LOCALFNO_WINDOW_X:-16}"
 export LOCALFNO_WINDOW_Y="${LOCALFNO_WINDOW_Y:-16}"

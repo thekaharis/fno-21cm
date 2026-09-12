@@ -5,7 +5,7 @@
 # Renders 16 stratified cones per held-out split from a trained fno_zre.py
 # checkpoint: per-cone map triptychs + scatters, a per-split summary grid,
 # power spectra, and metrics.json.  Figures land in a unique
-# figures/zre-<MODEL_KIND>-detailed_<timestamp>_job<id>/ folder.
+# figures/zre/detailed_viz/zre-<MODEL_KIND>-detailed_<timestamp>_job<id>/ folder.
 #
 # Submit from the project root, exporting the SAME experiment switches the
 # training run used (defaults match slurm/train_zre.sbatch):

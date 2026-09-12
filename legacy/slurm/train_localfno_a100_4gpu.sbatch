@@ -6,7 +6,7 @@
 #
 # Notes:
 #   - This mirrors train_localfno_h200_4gpu.sbatch, but requests A100s.
-#   - CHECKPOINT_DIR intentionally defaults to ./checkpoints/checkpoints_3d_localfno so
+#   - CHECKPOINT_DIR intentionally defaults to ./checkpoints/3d_xhi/localfno/checkpoints_3d_localfno so
 #     the job can continue the same run when H200s are busy.
 #   - LOCALFNO_PATCH_CHUNK_SIZE defaults to 64 instead of 128 to leave more
 #     HBM headroom on 40/80 GB A100 nodes, especially for higher local modes.
@@ -42,7 +42,7 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 export MODEL_KIND=localfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_localfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/localfno/checkpoints_3d_localfno}"
 export N_EPOCHS="${N_EPOCHS:-70}"
 
 # Whole-volume bottleneck modes at 35x35x64.

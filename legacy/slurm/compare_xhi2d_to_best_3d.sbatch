@@ -29,11 +29,11 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
-WNO_RUN="${WNO_RUN:-checkpoints/xhi2d_localwno_lr2e4_e30}"
+WNO_RUN="${WNO_RUN:-checkpoints/2d_xhi/localwno/xhi2d_localwno_lr2e4_e30}"
 UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-checkpoint-archive/checkpoints_3d_ufno_16modes_weights_viz/best_model_state_dict.pt}"
-LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-checkpoints/checkpoints_3d_localfno_1gpu/best_model_state_dict.pt}"
+LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-checkpoints/3d_xhi/localfno/checkpoints_3d_localfno_1gpu/best_model_state_dict.pt}"
 CUBE_CACHE="${CUBE_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
-VIZ_OUTPUT="${VIZ_OUTPUT:-figures/xhi2d_localwno_vs_best_3d_100slices}"
+VIZ_OUTPUT="${VIZ_OUTPUT:-figures/3d_xhi/eval/xhi2d_localwno_vs_best_3d_100slices}"
 SLICES_PER_STAGE="${SLICES_PER_STAGE:-20}"
 # train (in-sample for all three) | test | heldout (val+test)
 CONE_SPLIT="${CONE_SPLIT:-train}"

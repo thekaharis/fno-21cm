@@ -6,7 +6,7 @@
 #   RUN_DIR   checkpoint directory of the 2-D run
 #   TAG       short name used for the figure directories
 #
-#   sbatch --export=ALL,RUN_DIR=checkpoints/xhi2d_whno_glob_expwall16,TAG=expwall16 \
+#   sbatch --export=ALL,RUN_DIR=checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_expwall16,TAG=expwall16 \
 #          slurm/viz_xhi2d_detailed.sbatch
 #
 # CONE_SPLIT defaults to test. Note the cap: selection needs globally distinct
@@ -45,7 +45,7 @@ RUN_DIR="${RUN_DIR:?set RUN_DIR to the 2-D run checkpoint directory}"
 TAG="${TAG:-$(basename "$RUN_DIR")}"
 CUBE_CACHE="${CUBE_CACHE:-$DATA_DIR/cubes_3d.h5}"
 UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-checkpoint-archive/checkpoints_3d_ufno_16modes_weights_viz/best_model_state_dict.pt}"
-LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-checkpoints/checkpoints_3d_localfno_1gpu/best_model_state_dict.pt}"
+LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-checkpoints/3d_xhi/localfno/checkpoints_3d_localfno_1gpu/best_model_state_dict.pt}"
 CONE_SPLIT="${CONE_SPLIT:-test}"
 SLICES_PER_STAGE="${SLICES_PER_STAGE:-9}"
 

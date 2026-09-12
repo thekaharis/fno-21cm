@@ -25,7 +25,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 export MODEL_KIND=localfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_localfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/localfno/checkpoints_3d_localfno}"
 export CHECKPOINT_KIND="${CHECKPOINT_KIND:-best}"
 export VIZ_TAG="${VIZ_TAG:-localfno}"
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-64}"

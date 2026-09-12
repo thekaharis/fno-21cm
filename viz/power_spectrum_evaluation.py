@@ -49,13 +49,13 @@ Typical use
 Cluster (predicts cubes from checkpoints, writes figures + CSV + NPZ)::
 
     python -m viz.power_spectrum_evaluation --checkpoints \
-        ufno=checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt \
-        localfno=checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt \
-        --n-cones 200 --split test --out figures/ps_out/
+        ufno=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt \
+        localfno=checkpoints/3d_xhi/localfno/checkpoints_3d_localfno/best_model_state_dict.pt \
+        --n-cones 200 --split test --out figures/3d_xhi/eval/ps_out/
 
 Offline (re-use cubes saved by this script or boundary_band_diagnostic)::
 
-    python -m viz.power_spectrum_evaluation --manifest ps_manifest.json --out figures/ps_out/
+    python -m viz.power_spectrum_evaluation --manifest ps_manifest.json --out figures/3d_xhi/eval/ps_out/
 
 Self-test (no data needed)::
 
@@ -942,7 +942,7 @@ def main(argv=None):
     src.add_argument("--replot", type=Path, metavar="NPZ",
                      help="re-render all figures from a saved ps_results.npz "
                           "(no GPU/data needed; for plot-style iterations)")
-    ap.add_argument("--out", type=Path, default=Path("figures/ps_out"))
+    ap.add_argument("--out", type=Path, default=Path("figures/3d_xhi/eval/ps_out"))
     ap.add_argument("--n-cones", type=int, default=200)
     ap.add_argument("--split", choices=["train", "val", "test"], default="test")
     ap.add_argument("--save-cubes", type=Path, default=None)

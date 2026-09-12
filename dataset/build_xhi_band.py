@@ -14,7 +14,7 @@ glob), so ``--cones`` can restrict the build to a run's val/test cones and the
 result stays clear of anything the model trained on.
 
     python -m dataset.build_xhi_band --lo 0.0 --hi 0.36 --k 12 \
-        --split-from checkpoints/xhi2d_whno_glob_lr3e4 --splits val,test \
+        --split-from checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4 --splits val,test \
         --out xhi_band_000_036.h5
 """
 

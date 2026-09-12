@@ -80,7 +80,7 @@ export LOSS_EXPWALL_WEIGHT="${LOSS_EXPWALL_WEIGHT:-1.0}"
 export EXPWALL_SCALE="${EXPWALL_SCALE:-16.0}"
 export WALL_CAP="${WALL_CAP:-32}"
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_3d_localop_whno_expwall16}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/3d_xhi/fno_whno/checkpoints_3d_localop_whno_expwall16}"
 
 export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/data}"
 PROJECT_CUBES="${PROJECT_CUBES:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"

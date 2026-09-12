@@ -36,7 +36,7 @@ ENV_NAME="fno-env"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_zre_localfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/zre/localfno/checkpoints_zre_localfno}"
 export MODEL_KIND=localfno
 export MPLBACKEND=Agg
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-${SLURM_JOB_ID:-local}"

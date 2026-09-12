@@ -40,7 +40,7 @@ export PYTHONUNBUFFERED=1
 # Run metadata reconstructs the exact trained architecture. These values also
 # provide the correct fallback contract for legacy checkpoints without metadata.
 export MODEL_KIND=sirenfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_sirenfno_m64_stable}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno_m64_stable}"
 export CHECKPOINT_KIND="${CHECKPOINT_KIND:-best}"
 export VIZ_TAG="${VIZ_TAG:-sirenfno}"
 

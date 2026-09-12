@@ -21,7 +21,7 @@ from viz.compare_xhi2d_models import build_model
 from modeling import load_checkpoint
 from contrast import apply_contrast
 
-RUN = "checkpoints/xhi2d_whno_glob_lr3e4"
+RUN = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 N = 256
 meta = json.load(open(f"{RUN}/run_metadata.json"))
 model = build_model(meta["model_config"])

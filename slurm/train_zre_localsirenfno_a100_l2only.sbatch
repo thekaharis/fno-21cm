@@ -68,7 +68,7 @@ export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 # Model and loss ablation. CHECKPOINT_DIR is explicit so the run never
 # collides with the default per-kind directory or the L1+H2 companion run.
 export MODEL_KIND="${MODEL_KIND:-localsirenfno}"
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/checkpoints_zre_localsirenfno_l2only}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/zre/localsirenfno/checkpoints_zre_localsirenfno_l2only}"
 export TARGET_KIND="${TARGET_KIND:-gompertz}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_params}"
 export N_Z_IN="${N_Z_IN:-64}"

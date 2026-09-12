@@ -612,7 +612,8 @@ def main(argv: list[str] | None = None) -> Path:
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = args.output_dir or (
-        Path("figures") / f"localfno-mode-weights-{args.task}_{timestamp}"
+        Path("figures") / ("3d_xhi" if args.task == "3d" else "zre") / "diagnostics"
+        / f"localfno-mode-weights-{args.task}_{timestamp}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     plot_profiles(branches, output_dir / "mode_weight_profiles.png")

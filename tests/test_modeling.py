@@ -220,21 +220,33 @@ def test_pre_unification_metadata_still_rebuilds() -> None:
     assert zre.ndim == 2 and zre.modes == (16, 16)
 
 
-def test_checkpoint_directories_are_unchanged_by_the_unification() -> None:
-    """Renaming a checkpoint dir would orphan every run already on disk."""
+def test_checkpoint_directories_use_task_and_architecture_folders() -> None:
+    """Checkpoint defaults follow the reorganized task/architecture/run layout."""
     expected = {
-        "fno": "checkpoints/checkpoints_3d",
-        "ufno": "checkpoints/checkpoints_3d_ufno",
-        "localfno": "checkpoints/checkpoints_3d_localfno",
-        "localwno": "checkpoints/checkpoints_3d_localwno",
-        "localwhno": "checkpoints/checkpoints_3d_localwhno",
-        "localsirenfno": "checkpoints/checkpoints_3d_localsirenfno",
-        "sirenfno": "checkpoints/checkpoints_3d_sirenfno",
+        "fno": "checkpoints/3d_xhi/fno/checkpoints_3d",
+        "ufno": "checkpoints/3d_xhi/ufno/checkpoints_3d_ufno",
+        "localfno": "checkpoints/3d_xhi/localfno/checkpoints_3d_localfno",
+        "localwno": "checkpoints/3d_xhi/localwno/checkpoints_3d_localwno",
+        "localwhno": "checkpoints/3d_xhi/localwhno/checkpoints_3d_localwhno",
+        "localsirenfno": "checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno",
+        "sirenfno": "checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno",
     }
     for kind, path in expected.items():
         assert str(ModelConfig(kind=kind).default_checkpoint_dir) == path
     pair = ModelConfig(kind="localop", local_operator="hadamard",
                        global_operator="cnn")
     assert str(pair.default_checkpoint_dir) == (
-        "checkpoints/checkpoints_3d_local_whno_cnn"
+        "checkpoints/3d_xhi/whno_cnn/checkpoints_3d_local_whno_cnn"
     )
+
+
+def test_separate_waveforms_share_family_but_have_distinct_run_directories() -> None:
+    for transform in ("tied", "separate"):
+        config = ModelConfig(kind="localop", local_operator="learned_waveform",
+                             global_operator="learned_waveform", waveform_transform=transform)
+        suffix = "_separate" if transform == "separate" else ""
+        assert config.family_tag == "lwf_lwf"
+        assert config.checkpoint_tag == f"local_lwf_lwf{suffix}"
+        assert str(config.default_checkpoint_dir) == (
+            f"checkpoints/3d_xhi/lwf_lwf/checkpoints_3d_local_lwf_lwf{suffix}"
+        )
