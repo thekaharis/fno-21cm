@@ -19,7 +19,7 @@ from viz.compare_xhi2d_models import build_model
 from modeling import load_checkpoint
 from contrast import ContrastHead, apply_contrast
 
-RUN = "checkpoints/xhi2d_whno_glob_lr3e4"
+RUN = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 N_TRAIN, N_EVAL, EPOCHS = 3000, 600, 400
 torch.manual_seed(0)
 

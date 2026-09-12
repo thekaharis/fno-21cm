@@ -32,9 +32,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-SRC = Path("figures/truth_survey")
-OUT_MD = "figures/truth_survey/REPORT.md"
-OUT_FIG = "figures/truth_survey/truth_sharpness_survey.png"
+SRC = Path("figures/shared/diagnostics/truth_survey")
+OUT_MD = "figures/shared/diagnostics/truth_survey/REPORT.md"
+OUT_FIG = "figures/shared/diagnostics/truth_survey/truth_sharpness_survey.png"
 
 SURFACE = "#fcfcfb"
 INK, INK_2, INK_MUTED, GRID = "#0b0b0b", "#52514e", "#8a8880", "#e4e3de"
@@ -191,7 +191,7 @@ def main() -> None:
                "n_planes": int(a["n_planes_total"]),
                "frac_ionized": frac_ion, "frac_neutral": frac_neu,
                "frac_partial": frac_mid},
-              open("figures/truth_survey/summary.json", "w"), indent=2)
+              open("figures/shared/diagnostics/truth_survey/summary.json", "w"), indent=2)
     print(f"\nwrote {OUT_MD}, {OUT_FIG}")
 
 

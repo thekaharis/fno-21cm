@@ -43,7 +43,7 @@ def param_counts() -> dict[str, str]:
 def zre_rows():
     params = param_counts()
     rows = []
-    for d in sorted(glob.glob(str(ROOT / "checkpoints/checkpoints_zre*"))):
+    for d in sorted(glob.glob(str(ROOT / "checkpoints/zre/fno/checkpoints_zre*"))):
         rep = Path(d) / "final_report.json"
         if not rep.exists():
             continue
@@ -76,10 +76,10 @@ def zre_rows():
 
 
 def xhi2d_rows():
-    """2-D x_HI slice runs (checkpoints/xhi2d_*), from final_report.json."""
+    """2-D x_HI slice runs (checkpoints/2d_xhi/fno/xhi2d_*), from final_report.json."""
     params = param_counts()
     rows = []
-    for d in sorted(glob.glob(str(ROOT / "checkpoints/xhi2d_*"))):
+    for d in sorted(glob.glob(str(ROOT / "checkpoints/2d_xhi/fno/xhi2d_*"))):
         rep = Path(d) / "final_report.json"
         if not rep.exists():
             continue
@@ -118,7 +118,7 @@ def xhi2d_rows():
 
 def three_d_rows():
     rows = []
-    patterns = ["checkpoints/checkpoints_3d_*", "checkpoints_3d_*",
+    patterns = ["checkpoints/3d_xhi/fno/checkpoints_3d_*", "checkpoints_3d_*",
                 "checkpoint-archive/checkpoints_3d_*",
                 "checkpoint-archive/checkpoints_ufno*"]
     for pattern in patterns:
@@ -315,7 +315,7 @@ def main() -> None:
       "above k_perp ~ 1 Mpc^-1 (the front-smoothing signature). LocalFNO "
       "additionally *gains* spurious low-k power at early epochs, growing "
       "with redshift — consistent with a window-grid artifact. Figures: "
-      "`figures/ps_out/localfno-vs-ufno-contrastz7/`.")
+      "`figures/3d_xhi/eval/ps_out/localfno-vs-ufno-contrastz7/`.")
     A("- **Boundary band.** Truth front width is 3.6 Mpc; both models "
       "predict 12-14 Mpc, i.e. fronts ~3.5x too smooth, despite the "
       "H1-dominated loss.\n")

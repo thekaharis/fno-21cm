@@ -41,7 +41,7 @@ from contrast import apply_contrast
 from legacy.xhi2d.field_metrics import lowpass, rmse, width_px
 from legacy.xhi2d.slice_eval import gather
 
-RUN = "checkpoints/xhi2d_whno_glob_lr3e4"
+RUN = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 N_SLICES = 512
 DEV = "cuda"
 THETAS = torch.tensor(np.geomspace(0.03, 5.0, 40), dtype=torch.float32)

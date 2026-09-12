@@ -32,6 +32,6 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
 echo "device: $(nvidia-smi --query-gpu=name --format=csv,noheader || echo unknown)"
 python legacy/probes/bench_operator_variants.py \
-    --json "${JSON_OUT:-figures/operator_variant_benchmark.json}" \
+    --json "${JSON_OUT:-figures/summary/operator_variant_benchmark.json}" \
     ${BENCH_ARGS:-}
 echo "benchmark complete"

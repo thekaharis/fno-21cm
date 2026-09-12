@@ -111,7 +111,7 @@ def main() -> None:
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=33)
     ap.add_argument("--max-cones", type=int, default=None)
-    ap.add_argument("--out", type=Path, default=Path("figures/truth_survey"))
+    ap.add_argument("--out", type=Path, default=Path("figures/shared/diagnostics/truth_survey"))
     args = ap.parse_args()
 
     files = sorted(Path(args.data).glob("21cmfast_11d_sample*.h5"))

@@ -369,7 +369,7 @@ def main() -> None:
     history = load_history(args.history)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = args.output_dir or (
-        Path("figures") / f"spectral-weights_{timestamp}"
+        Path("figures") / "shared" / "diagnostics" / f"spectral-weights_{timestamp}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

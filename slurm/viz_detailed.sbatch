@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # SLURM batch script -- detailed viz (16 cones, active-z slices) for the
-# plain-FNO checkpoint in ./checkpoints/checkpoints_3d/.
+# plain-FNO checkpoint in ./checkpoints/3d_xhi/fno/checkpoints_3d/.
 #
 # Submit from the project root:
 #
@@ -14,7 +14,7 @@
 #     -> per-cone active-z slice picker (skips fully-neutral / fully-
 #        ionized LOS stretches that carry no info about model fidelity)
 #   * Output goes to a per-run subfolder under figures/ (e.g.
-#     figures/fno-detailed_20260606-143022_job12345/) so successive viz
+#     figures/3d_xhi/detailed_viz/fno-detailed_20260606-143022_job12345/) so successive viz
 #     runs never overwrite each other
 #   * Walltime bumped from 30 min -> 60 min: 16 forward passes per split +
 #     4 PNGs per cone + summary grid is ~30-40 min on an A30

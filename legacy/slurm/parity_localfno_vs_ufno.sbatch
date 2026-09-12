@@ -53,8 +53,8 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 # ---------------------------------------------------------------- checkpoints
-UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt}"
-LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt}"
+UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt}"
+LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/3d_xhi/localfno/checkpoints_3d_localfno/best_model_state_dict.pt}"
 
 for checkpoint in "$UFNO_CHECKPOINT" "$LOCALFNO_CHECKPOINT"; do
     if [ ! -f "$checkpoint" ]; then

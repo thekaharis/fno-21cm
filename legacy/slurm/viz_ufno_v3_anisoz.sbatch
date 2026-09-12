@@ -18,11 +18,11 @@
 #     loudly (0 matched keys), which is the right behavior -- it's safer
 #     than silently loading a partial checkpoint.
 #
-#   * CHECKPOINT points at ./checkpoints/checkpoints_3d_ufno_v3_anisoz/, not the v1
-#     ./checkpoints/checkpoints_3d_ufno/.
+#   * CHECKPOINT points at ./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz/, not the v1
+#     ./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/.
 #
 #   * VIZ_TAG=ufno-v3-anisoz so the per-run figure folder name encodes
-#     the variant (e.g. figures/ufno-v3-anisoz_20260607-..._jobNNN/),
+#     the variant (e.g. figures/archive/ufno-v3-anisoz_20260607-..._jobNNN/),
 #     making it obvious in the figures/ listing which architectural
 #     variant produced which images.  Without this, every U-FNO render
 #     would just be "ufno_<timestamp>" and you'd have to open run_info.txt
@@ -78,7 +78,7 @@ export N_MODES_Z=32
 export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
-export CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v3_anisoz
+export CHECKPOINT_DIR=./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz
 export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-anisoz
 

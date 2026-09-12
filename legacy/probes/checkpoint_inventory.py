@@ -30,8 +30,8 @@ import os
 from pathlib import Path
 
 ROOTS = ("checkpoints", "checkpoint-archive")
-OUT_MD = "figures/checkpoint_inventory.md"
-OUT_CSV = "figures/checkpoint_inventory.csv"
+OUT_MD = "figures/summary/checkpoint_inventory.md"
+OUT_CSV = "figures/summary/checkpoint_inventory.csv"
 
 OP_TAG = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
           "siren_fourier": "sirenfno", "cnn": "cnn"}

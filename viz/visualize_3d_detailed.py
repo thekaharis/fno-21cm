@@ -229,7 +229,7 @@ def main():
     # detailed variant is visibly different from the standard 4-cone run
     # in the figures/ listing.  VIZ_TAG defaults to MODEL_KIND for v1/v2
     # ("fno", "ufno"); v3 sbatches set it to e.g. "ufno-v3-anisoz" so the
-    # render lands in ``figures/ufno-v3-anisoz-detailed_<timestamp>_job.../``.
+    # render lands in ``figures/archive/ufno-v3-anisoz-detailed_<timestamp>_job.../``.
     figures_dir = make_run_folder(FIGURES_BASE, tag=f"{VIZ_TAG}-detailed")
     print(f"Writing figures to: {figures_dir}")
 

@@ -40,9 +40,9 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
 MODEL_A_NAME="${MODEL_A_NAME:-localsirenfno-l2h1}"
-MODEL_A_CHECKPOINT="${MODEL_A_CHECKPOINT:-./checkpoints/checkpoints_3d_localsirenfno/best_model_state_dict.pt}"
+MODEL_A_CHECKPOINT="${MODEL_A_CHECKPOINT:-./checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno/best_model_state_dict.pt}"
 MODEL_B_NAME="${MODEL_B_NAME:-localsirenfno-l2only}"
-MODEL_B_CHECKPOINT="${MODEL_B_CHECKPOINT:-./checkpoints/checkpoints_3d_localsirenfno_l2only/best_model_state_dict.pt}"
+MODEL_B_CHECKPOINT="${MODEL_B_CHECKPOINT:-./checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno_l2only/best_model_state_dict.pt}"
 
 # Optional third model: the granulometry experiment needs plain / hybrid / bsd
 # side by side, and comparing them pairwise would recompute the truth BSD twice
@@ -70,7 +70,7 @@ N_BINS="${N_BINS:-24}"
 THRESHOLD="${THRESHOLD:-0.5}"
 BOX_MPC="${BOX_MPC:-200.0}"
 MAX_DISTANCE_MPC="${MAX_DISTANCE_MPC:-200.0}"
-OUT_DIR="${OUT_DIR:-figures/bubble_size_out/job${SLURM_JOB_ID:-local}}"
+OUT_DIR="${OUT_DIR:-figures/3d_xhi/eval/bubble_size_out/job${SLURM_JOB_ID:-local}}"
 SAVE_CUBES="${SAVE_CUBES:-no}"
 SAVED_CUBES_DIR="${SAVED_CUBES_DIR:-${OUT_DIR}/cubes}"
 

@@ -260,12 +260,12 @@ UFNO_GLOBAL_RESIDUAL = MODEL_CONFIG.ufno_global_residual
 # successive viz runs never overwrite each other -- useful for comparing
 # checkpoints at different training epochs, model variants, or simply
 # keeping an archive of every render.
-FIGURES_BASE = Path("figures")
+FIGURES_BASE = Path("figures") / "3d_xhi" / "detailed_viz"
 
 # Tag used for the per-run figures folder + run_info breadcrumb.  Defaults
 # to MODEL_KIND for backward compatibility with older sbatches.
 # For v3 (D/E/F) variants, the matching viz sbatch sets VIZ_TAG explicitly
-# so figures land in e.g. ``figures/ufno-v3-anisoz_<timestamp>_job...`` --
+# so figures land in e.g. ``figures/archive/ufno-v3-anisoz_<timestamp>_job...`` --
 # essential when several variants' renders pile up in figures/ side by
 # side, otherwise every U-FNO render is just "ufno_<timestamp>" with no
 # way to tell which variant produced it without opening run_info.txt.
@@ -333,8 +333,8 @@ def make_run_folder(base: Path = FIGURES_BASE, tag: str = "") -> Path:
     and want to remember which model / checkpoint produced them.
 
     Example folder names:
-      ``figures/ufno_20260606-143022_job3965704/``
-      ``figures/fno-detailed_20260606-145501/``        (no SLURM)
+      ``figures/archive/ufno_20260606-143022_job3965704/``
+      ``figures/3d_xhi/detailed_viz/fno-detailed_20260606-145501/`` (no SLURM)
     """
     from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

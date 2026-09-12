@@ -24,9 +24,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 CKPT_ROOT = Path("checkpoints")
-RMSE_CSV = Path("figures/final_eval/matrix/rmse/rmse_r2.csv")
-OUT_BY_METRIC = {"r2": Path("figures/params_vs_accuracy.png"),
-                 "rmse": Path("figures/params_vs_rmse.png")}
+RMSE_CSV = Path("figures/shared/eval/final_eval/matrix/rmse/rmse_r2.csv")
+OUT_BY_METRIC = {"r2": Path("figures/summary/params_vs_accuracy.png"),
+                 "rmse": Path("figures/summary/params_vs_rmse.png")}
 # (axis label, lower_is_better)
 METRICS = {"r2": ("Test $R^2$  (200 cones, all voxels)", False),
            "rmse": ("Test RMSE  (200 cones, all voxels)", True)}

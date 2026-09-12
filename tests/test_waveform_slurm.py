@@ -75,9 +75,9 @@ def test_training_launchers_select_waveforms_preserve_overrides_and_delegate(clu
         assert settings["INIT_CHECKPOINT"] == "checkpoints/source run/final_model_state_dict.pt"
     assert settings["WAVEFORM_LR_RATIO"] == ("0.2" if overrides else "0.1")
     assert settings["N_EPOCHS"] == ("3" if overrides else "200" if entry == "fno_zre.py" else "20")
-    defaults = {"fno_21cm_3d.py": "checkpoints/checkpoints_3d_lwf_lwf_plain",
-                "fno_xhi2d.py": "checkpoints/checkpoints_2d_xhi_local_lwf_lwf",
-                "fno_zre.py": "checkpoints/checkpoints_zre_local_lwf_lwf_l2"}
+    defaults = {"fno_21cm_3d.py": "checkpoints/3d_xhi/lwf_lwf/checkpoints_3d_lwf_lwf_plain",
+                "fno_xhi2d.py": "checkpoints/2d_xhi/fno/checkpoints_2d_xhi_local_lwf_lwf",
+                "fno_zre.py": "checkpoints/zre/fno/checkpoints_zre_local_lwf_lwf_l2"}
     assert settings["CHECKPOINT_DIR"] == ("checkpoints/custom run" if overrides else defaults[entry])
 
 

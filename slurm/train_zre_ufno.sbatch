@@ -77,7 +77,7 @@ export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 # `sbatch --export=ALL,...` without editing files.  MODEL_KIND picks the
 # architecture (fno | ufno | localfno); CHECKPOINT_DIR is deliberately NOT
 # set here -- fno_zre.py derives a per-kind default
-# (checkpoints/checkpoints_zre[_<kind>]) so runs never overwrite each other.
+# (checkpoints/zre/fno/checkpoints_zre[_<kind>]) so runs never overwrite each other.
 export MODEL_KIND="${MODEL_KIND:-ufno}"
 export TARGET_KIND="${TARGET_KIND:-gompertz}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_params}"

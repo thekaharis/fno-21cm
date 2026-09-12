@@ -10,7 +10,7 @@ from dataset.dataset_3d import ParameterNormalization
 from losses import HighKPowerRatio, SlicedWassersteinEdges
 from viz.compare_xhi2d_models import build_model
 
-run = "checkpoints/xhi2d_whno_glob_lr3e4"
+run = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 meta = json.load(open(f"{run}/run_metadata.json"))
 model = build_model(meta["model_config"]).cuda().train()
 norm = meta.get("parameter_normalization")

@@ -515,9 +515,21 @@ class ModelConfig:
         return operator_spec(self.local_operator).uses_modes
 
     @property
+    def family_tag(self) -> str:
+        """Architecture folder name: operator pair for localop, else the kind."""
+        tags = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
+                "siren_hadamard": "swhno", "siren_fourier": "sfno",
+                "cnn": "cnn", "learned_waveform": "lwf"}
+        if self.kind == "localop" and self.local_operator and self.global_operator:
+            return (f"{tags.get(self.local_operator, self.local_operator)}_"
+                    f"{tags.get(self.global_operator, self.global_operator)}")
+        return self.kind
+
+    @property
     def default_checkpoint_dir(self) -> Path:
         suffix = "" if self.kind == "fno" else f"_{self.checkpoint_tag}"
-        return Path("checkpoints") / f"checkpoints_3d{suffix}"
+        return (Path("checkpoints") / "3d_xhi" / self.family_tag
+                / f"checkpoints_3d{suffix}")
 
     def describe(self) -> str:
         if self.kind == "fno":

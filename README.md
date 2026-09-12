@@ -103,7 +103,7 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `dataset/build_xhi_band.py` | Slice cache saturating a chosen x_HI band, for regime-specific analysis. |
 | `dataset/paths.py` | Canonical dataset locations. Import from here; never hard-code a path. |
 | `viz/visualize_xhi2d.py` | Loads a 2-D checkpoint and plots true vs predicted `x_HI` + scatter into `figures/`. |
-| `figures/comparison_*.png`, `figures/scatter_*.png` | Example outputs from the v2 run. |
+| `figures/3d_xhi/detailed_viz/*/comparison_*.png`, `.../scatter_*.png` | Example outputs from the v2 run. |
 
 ### 3-D pipeline (v3)
 | File | Purpose |
@@ -122,14 +122,14 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `legacy/slurm/train.sbatch` | Single-GPU training (H200 default; change `--gres` for A30/A100). |
 | `legacy/slurm/train_h200_4gpu.sbatch` | 4-GPU DDP training on the H200 node (4 × H200 NVL, NVLink). |
 | `legacy/slurm/train_localfno_a100_4gpu.sbatch` | 4-GPU A100 DDP training for the windowed Local-FNO U-Net; defaults to smaller patch chunks for A100 HBM headroom while keeping the same checkpoint directory as the H200 LocalFNO run. |
-| `legacy/slurm/train_sirenfno_h200_4gpu.sbatch` | Stability-tuned 4-GPU H200 SirenFNO training at `(64,64,64)`, writing to `checkpoints/checkpoints_3d_sirenfno_m64_stable/` by default. |
+| `legacy/slurm/train_sirenfno_h200_4gpu.sbatch` | Stability-tuned 4-GPU H200 SirenFNO training at `(64,64,64)`, writing to `checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno_m64_stable/` by default. |
 | `slurm/train_ufno_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v1** (3 FNO + 3 U-Fourier blocks; BatchNorm + SyncBN; modes (16,16,16); 0.5/0.5 L²/H¹). |
-| `legacy/slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints/checkpoints_3d_ufno_v2/`. |
-| `legacy/slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints/checkpoints_3d_ufno_v3_anisoz/`. |
-| `legacy/slurm/train_ufno_v3_globalres_h200_4gpu.sbatch` | **U-FNO v3 / option E** — global-pooling residual added to each U-Net path (gives cone-level context to the local-feature path). Composable with v3-anisoz or v3-los1d via env-var. Writes to `./checkpoints/checkpoints_3d_ufno_v3_globalres/`. |
-| `legacy/slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints/checkpoints_3d_ufno_v3_los1d/`. |
-| `legacy/slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints/checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
-| `legacy/slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints/checkpoints_3d_ufno/`. |
+| `legacy/slurm/train_ufno_v2_h200_4gpu.sbatch` | 4-GPU DDP training of the **U-FNO v2** "A+B+C bundle" — asymmetric Z modes (16,16,32), GroupNorm in the U-Net path, H¹-weighted loss `0.3·L² + 0.7·H¹`. Writes to `./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v2/`. |
+| `legacy/slurm/train_ufno_v3_anisoz_h200_4gpu.sbatch` | **U-FNO v3 / option D** — anisotropic Z U-Net: stride=(2,2,4) on the outermost stage, doubling LOS receptive field. Inherits v2 overrides. Writes to `./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz/`. |
+| `legacy/slurm/train_ufno_v3_globalres_h200_4gpu.sbatch` | **U-FNO v3 / option E** — global-pooling residual added to each U-Net path (gives cone-level context to the local-feature path). Composable with v3-anisoz or v3-los1d via env-var. Writes to `./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_globalres/`. |
+| `legacy/slurm/train_ufno_v3_los1d_h200_4gpu.sbatch` | **U-FNO v3 / option F** — replaces the 3-D U-Net with a stack of 1-D LOS-only Conv3d layers (kernel `(1,1,7)`, 4 layers; 25-cell receptive field). Spectral path keeps doing the transverse work. Writes to `./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_los1d/`. |
+| `legacy/slurm/viz.sbatch` | Render PNGs from the latest plain-FNO checkpoint in `./checkpoints/3d_xhi/fno/checkpoints_3d/` (4 cones per split, evenly-spaced z; 1 GPU, 30 min). |
+| `legacy/slurm/viz_ufno.sbatch` | Same, for the U-FNO checkpoint in `./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/`. |
 | `slurm/viz_detailed.sbatch` | **Detailed** variant — 16 cones per split, active-z slice picker, and an automatic shared low-z cutoff where global `x_HI` first departs from its settled late-time state. Set `PLOT_Z_MIN` to override the cutoff. FNO checkpoint. |
 | `legacy/slurm/viz_sirenfno.sbatch` | Standard SirenFNO prediction visualization using the best checkpoint by default. |
 | `legacy/slurm/viz_sirenfno_detailed.sbatch` | Detailed SirenFNO visualization with 16 cones per split and active-redshift diagnostics. |
@@ -141,14 +141,14 @@ root with `FNO_DATA_ROOT` / `FNO_COMPRESSED` / `FNO_LIGHTCONES`.
 | `slurm/viz_waveforms.sbatch` | CPU-only all-branch/all-axis waveform report from `CHECKPOINT_DIR`; raw bins, effective orthonormal modes, detailed plots and NPZ exports. |
 | `slurm/viz_spectral_weights.sbatch` | Render the compact epoch-by-epoch Fourier-weight history written during 3-D training. Set `CHECKPOINT_DIR` for another run. |
 | `slurm/viz_spectral_weights_z.sbatch` | Render only Z/LOS spectral-weight diagnostics for a selected checkpoint directory. |
-| `legacy/slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
+| `legacy/slurm/viz_spectral_weights_ufno.sbatch` | Render spectral-weight diagnostics for the basic U-FNO run in `./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/`. `CHECKPOINT_DIR` remains overridable for another U-FNO variant. |
 | `slurm/power_spectrum_eval.sbatch` | Paired power-spectrum evaluation (Local-FNO vs U-FNO by default): P(k) ratio and r(k) curves, cylindrical `(k⊥, k∥)` maps, per-stage CSV, and a reduced-results NPZ. Override `UFNO_CHECKPOINT`, `LOCALFNO_CHECKPOINT`, `N_CONES`, `CHUNK_Z`, `OUT_DIR` via `--export`. |
 | `slurm/bubble_size_eval.sbatch` | Paired transverse mean-free-path bubble-size evaluation (3-D LocalSirenFNO L2+H1 vs L2-only by default): stage-resolved BSD plots, capped/restricted Wasserstein distance, size bias, CSV, and reduced NPZ. Override model names/checkpoints, `N_CONES`, `RAYS_PER_SLICE`, `SLICES_PER_STAGE`, or `OUT_DIR`. |
 
 The prediction-visualization scripts write into a per-run subfolder under
 `figures/` whose
 name encodes the model variant, timestamp, and (when running under SLURM)
-the job id — e.g. `figures/ufno_20260606-143022_job3965704/`. A
+the job id — e.g. `figures/archive/ufno_20260606-143022_job3965704/`. A
 `run_info.txt` is dropped in each folder summarising the config so old
 renders are self-explanatory. Successive viz runs never overwrite each
 other.
@@ -167,7 +167,7 @@ project root is the conventional usage).
 **Not included in the repo** (see `.gitignore`):
 - `data/` — the 21cmFAST lightcone HDF5 files. Provide your own.
 - `neuraloperator/` — the third-party library (see below).
-- `checkpoints/`, `checkpoints/checkpoints_3d/` — trained model artifacts (regenerated by training).
+- `checkpoints/`, `checkpoints/3d_xhi/fno/checkpoints_3d/` — trained model artifacts (regenerated by training).
 
 ## Environment
 
@@ -357,14 +357,14 @@ their hyperparameters come from the training run; only the checkpoint
 directory and the figures tag have to be pointed at the right place:
 
 ```bash
-CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
+CHECKPOINT_DIR=./checkpoints/3d_xhi/fno/checkpoints_3d_local_whno_cnn \
     VIZ_TAG=local-whno-cnn python -m viz.visualize_3d
 ```
 
 `slurm/viz_localop.sbatch` is the cluster version — same single input:
 
 ```bash
-sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
+sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/3d_xhi/fno/checkpoints_3d_local_whno_cnn \
     slurm/viz_localop.sbatch
 ```
 
@@ -436,7 +436,7 @@ so the truncation becomes a smooth learned function of the mode coordinate.
 It reads the same `LOCALFNO_*` switches plus the SIREN trunk settings
 `SIREN_HIDDEN_DIM`, `SIREN_OMEGA`, `SIREN_N_HIDDEN`, `SIREN_FEATURE_DIM`,
 `SIREN_FF_SIGMA`, and `SIREN_LEARNABLE_FF`, trains with the LocalFNO
-stability defaults, and checkpoints to `checkpoints/checkpoints_3d_localsirenfno/`.
+stability defaults, and checkpoints to `checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno/`.
 The 2-D z_re pipeline accepts the same kind via `MODEL_KIND=localsirenfno`.
 
 `localwno` is a hybrid LocalWNO/FNO architecture for controlled wavelet
@@ -481,9 +481,9 @@ After training, compare bubble-wall fidelity on paired test cones:
 
 ```bash
 python -m viz.boundary_band_diagnostic --checkpoints \
-  ufno=checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt \
-  localfno=checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt \
-  --reference ufno --split test --n-cones 200 --out figures/band_out/localfno
+  ufno=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt \
+  localfno=checkpoints/3d_xhi/localfno/checkpoints_3d_localfno/best_model_state_dict.pt \
+  --reference ufno --split test --n-cones 200 --out figures/3d_xhi/eval/band_out/localfno
 ```
 
 The equivalent cluster job is:
@@ -500,9 +500,9 @@ per scale and epoch — run the power-spectrum evaluation on the same cones:
 
 ```bash
 python -m viz.power_spectrum_evaluation --checkpoints \
-  ufno=checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt \
-  localfno=checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt \
-  --split test --n-cones 200 --out figures/ps_out/localfno
+  ufno=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt \
+  localfno=checkpoints/3d_xhi/localfno/checkpoints_3d_localfno/best_model_state_dict.pt \
+  --split test --n-cones 200 --out figures/3d_xhi/eval/ps_out/localfno
 ```
 
 or on the cluster `sbatch slurm/power_spectrum_eval.sbatch`. It writes the
@@ -520,9 +520,9 @@ mean-free-path diagnostic:
 
 ```bash
 python -m viz.bubble_size_evaluation --checkpoints \
-  l2h1=checkpoints/checkpoints_3d_localsirenfno/best_model_state_dict.pt \
-  l2only=checkpoints/checkpoints_3d_localsirenfno_l2only/best_model_state_dict.pt \
-  --split test --n-cones 200 --out figures/bubble_size_out
+  l2h1=checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno/best_model_state_dict.pt \
+  l2only=checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno_l2only/best_model_state_dict.pt \
+  --split test --n-cones 200 --out figures/3d_xhi/eval/bubble_size_out
 ```
 
 or `sbatch slurm/bubble_size_eval.sbatch` on the cluster. Rays are launched
@@ -572,8 +572,8 @@ directory so the benchmark artifacts remain intact:
 
 ```bash
 sbatch --export=ALL,N_MODES_X=64,N_MODES_Y=64,N_MODES_Z=64,N_EPOCHS=100,\
-INIT_CHECKPOINT=checkpoints/checkpoints_3d_sirenfno_m64_test/final_model_state_dict.pt,\
-CHECKPOINT_DIR=checkpoints/checkpoints_3d_sirenfno_m64 \
+INIT_CHECKPOINT=checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno_m64_test/final_model_state_dict.pt,\
+CHECKPOINT_DIR=checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno_m64 \
   slurm/train_sirenfno_h200_4gpu.sbatch
 ```
 
@@ -590,9 +590,9 @@ For controlled repeated runs, keep `SPLIT_SEED=42` unchanged and vary
 the same train/validation/test cones:
 
 ```bash
-RUN_SEED=41 CHECKPOINT_DIR=checkpoints/checkpoints_3d_ufno_z32_seed41 python fno_21cm_3d.py
-RUN_SEED=42 CHECKPOINT_DIR=checkpoints/checkpoints_3d_ufno_z32_seed42 python fno_21cm_3d.py
-RUN_SEED=43 CHECKPOINT_DIR=checkpoints/checkpoints_3d_ufno_z32_seed43 python fno_21cm_3d.py
+RUN_SEED=41 CHECKPOINT_DIR=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_z32_seed41 python fno_21cm_3d.py
+RUN_SEED=42 CHECKPOINT_DIR=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_z32_seed42 python fno_21cm_3d.py
+RUN_SEED=43 CHECKPOINT_DIR=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_z32_seed43 python fno_21cm_3d.py
 ```
 
 Set `DETERMINISTIC_RUN=true` when bitwise repeatability is more important

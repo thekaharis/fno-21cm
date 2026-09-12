@@ -51,7 +51,7 @@ export PYTHONUNBUFFERED=1
 export NUM_WORKERS="${NUM_WORKERS:-8}"
 
 export MODEL_KIND=localsirenfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_localsirenfno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno}"
 # ~19.6 min/epoch on 4x H200 -> ~78 min/epoch on one GPU; 50 epochs keeps a
 # few hours of margin inside the 72 h walltime.
 export N_EPOCHS="${N_EPOCHS:-50}"

@@ -22,7 +22,7 @@
 ROOT=/pfs/10/work/hd_id260-fno_training/fno-21cm
 
 export CHECKPOINT_DIR="$ROOT/checkpoints_3d_localfno_warped256_volw_cont"
-export INIT_CHECKPOINT="$ROOT/checkpoints/checkpoints_3d_localfno_warped256_volw/best_model_state_dict.pt"
+export INIT_CHECKPOINT="$ROOT/checkpoints/3d_xhi/localfno/checkpoints_3d_localfno_warped256_volw/best_model_state_dict.pt"
 export N_EPOCHS=50
 
 # match the original warped256_volw run (job 4227743)

@@ -6,11 +6,11 @@
 # operator slots and all their hyperparameters come from the training run --
 # there is nothing about the architecture to configure here.
 #
-#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn \
+#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/3d_xhi/fno/checkpoints_3d_local_whno_cnn \
 #       slurm/viz_localop.sbatch
 #
 # VIZ_TAG defaults to the directory's basename minus the "checkpoints_3d_"
-# prefix (-> figures/local_whno_cnn_<timestamp>_job.../). Set it explicitly to
+# prefix (-> figures/3d_xhi/detailed_viz/local_whno_cnn_<timestamp>_job.../). Set it explicitly to
 # name the folder something else; without it every localop pairing would land
 # in an identically-named folder, since the tag otherwise falls back to the
 # model kind, which is just "localop" for all of them.
@@ -32,7 +32,7 @@
 # e.g. eight cones, test split only, strips and physical diagnostics, no
 # per-cone slice panels or hexbins:
 #
-#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn,\
+#   sbatch --export=ALL,CHECKPOINT_DIR=./checkpoints/3d_xhi/fno/checkpoints_3d_local_whno_cnn,\
 # N_CONES_PER_SPLIT=8,VIZ_SPLITS=test,VIZ_FIGURES=lightcone+physical+grid \
 #       slurm/viz_localop.sbatch
 #
@@ -62,7 +62,7 @@ cd "$PROJECT_ROOT"
 mkdir -p logs figures
 
 if [ -z "${CHECKPOINT_DIR:-}" ]; then
-    echo "CHECKPOINT_DIR is required, e.g. --export=ALL,CHECKPOINT_DIR=./checkpoints/checkpoints_3d_local_whno_cnn" >&2
+    echo "CHECKPOINT_DIR is required, e.g. --export=ALL,CHECKPOINT_DIR=./checkpoints/3d_xhi/fno/checkpoints_3d_local_whno_cnn" >&2
     exit 1
 fi
 if [ ! -d "$CHECKPOINT_DIR" ]; then

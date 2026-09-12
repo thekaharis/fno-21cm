@@ -13,7 +13,7 @@
 # Compare against another U-FNO checkpoint:
 #
 #   sbatch --export=ALL,\
-# UFNO_CHECKPOINT=checkpoints/checkpoints_3d_ufno_v3_anisoz/best_model_state_dict.pt \
+# UFNO_CHECKPOINT=checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_anisoz/best_model_state_dict.pt \
 #     slurm/power_spectrum_eval.sbatch
 #
 # The two slots take any architecture, so set MODEL_A_NAME / MODEL_B_NAME to
@@ -21,9 +21,9 @@
 # rows are filed under "ufno" / "localfno" regardless of the checkpoints:
 #
 #   sbatch --export=ALL,\
-# UFNO_CHECKPOINT=./checkpoints/checkpoints_3d_ufno_plain_gnorm/best_model_state_dict.pt,\
+# UFNO_CHECKPOINT=./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_plain_gnorm/best_model_state_dict.pt,\
 # MODEL_A_NAME=ufno-gnorm,\
-# LOCALFNO_CHECKPOINT=./checkpoints/checkpoints_3d_fno_whno_plain/best_model_state_dict.pt,\
+# LOCALFNO_CHECKPOINT=./checkpoints/3d_xhi/fno_whno/checkpoints_3d_fno_whno_plain/best_model_state_dict.pt,\
 # MODEL_B_NAME=fno_whno-plain \
 #     slurm/power_spectrum_eval.sbatch
 #
@@ -64,8 +64,8 @@ export PYTHONUNBUFFERED=1
 # ---------------------------------------------------------------- checkpoints
 # Both checkpoint directories must contain run_metadata.json. This lets the
 # diagnostic safely reconstruct different model architectures in one process.
-UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_ufno/best_model_state_dict.pt}"
-LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/checkpoints_3d_localfno/best_model_state_dict.pt}"
+UFNO_CHECKPOINT="${UFNO_CHECKPOINT:-./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno/best_model_state_dict.pt}"
+LOCALFNO_CHECKPOINT="${LOCALFNO_CHECKPOINT:-./checkpoints/3d_xhi/localfno/checkpoints_3d_localfno/best_model_state_dict.pt}"
 # Plot/CSV labels. The two slots are no longer necessarily a U-FNO and a
 # Local-FNO -- any two architectures can be compared here -- so the label must
 # be settable, otherwise every figure and every ps_metrics.csv row is filed

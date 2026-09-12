@@ -32,7 +32,7 @@ from modeling import TrainerModel, load_checkpoint
 # ------------------------------------------------------------------ config
 CHECKPOINT = "checkpoints/model_state_dict.pt"
 CACHE_FILE = paths.TRAINSET
-FIGURES_DIR = Path("figures")
+FIGURES_DIR = Path("figures") / "2d_xhi" / "detailed_viz"
 N_SLICES_PER_SPLIT = 4
 
 # Must match fno_21cm.py so val/test here are the same held-out cones.

@@ -11,7 +11,7 @@
 #   SPECS_FILE  file with one `name=path` per line (blank lines/# ignored)
 #   SUITE       bsd | ps | edge3d | edgeslice | parity | rmse | speed
 #
-#   sbatch --export=ALL,SUITE=bsd,SPECS_FILE=figures/final_eval/specs.txt \
+#   sbatch --export=ALL,SUITE=bsd,SPECS_FILE=figures/shared/eval/final_eval/specs.txt \
 #     slurm/final_eval_suite.sbatch
 #
 # A100 rather than A30: the bw48om60 cells peaked at 42 GB in training, and
@@ -64,7 +64,7 @@ done < "$SPECS_FILE"
 
 SPLIT="${SPLIT:-test}"
 N_CONES="${N_CONES:-200}"
-OUT_ROOT="${OUT_ROOT:-figures/final_eval}"
+OUT_ROOT="${OUT_ROOT:-figures/shared/eval/final_eval}"
 OUT="$OUT_ROOT/$SUITE"
 mkdir -p "$OUT"
 

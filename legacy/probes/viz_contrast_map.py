@@ -15,7 +15,7 @@ from dataset.dataset_3d import ParameterNormalization
 from viz.compare_xhi2d_models import build_model, representative_indices
 from modeling import load_checkpoint
 
-RUN = "checkpoints/xhi2d_whno_glob_lr3e4"
+RUN = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 THETAS = [None, 0.6, 0.4, 0.3, 0.2]
 QUANTILES = [0.2, 0.45, 0.7, 0.9]
 
@@ -74,7 +74,7 @@ for r in range(nrow):
         fontsize=9)
 fig.suptitle("Contrast map on trained whno_glob predictions "
              "(theta -> 0 = hard step at 1/2)", fontsize=13)
-out = "figures/contrast_map_examples"
+out = "figures/shared/diagnostics/contrast_map_examples"
 os.makedirs(out, exist_ok=True)
 fig.savefig(f"{out}/contrast_map_examples.png", dpi=155)
 print(f"wrote {out}/contrast_map_examples.png")

@@ -223,18 +223,18 @@ def test_pre_unification_metadata_still_rebuilds() -> None:
 def test_checkpoint_directories_are_unchanged_by_the_unification() -> None:
     """Renaming a checkpoint dir would orphan every run already on disk."""
     expected = {
-        "fno": "checkpoints/checkpoints_3d",
-        "ufno": "checkpoints/checkpoints_3d_ufno",
-        "localfno": "checkpoints/checkpoints_3d_localfno",
-        "localwno": "checkpoints/checkpoints_3d_localwno",
-        "localwhno": "checkpoints/checkpoints_3d_localwhno",
-        "localsirenfno": "checkpoints/checkpoints_3d_localsirenfno",
-        "sirenfno": "checkpoints/checkpoints_3d_sirenfno",
+        "fno": "checkpoints/3d_xhi/fno/checkpoints_3d",
+        "ufno": "checkpoints/3d_xhi/ufno/checkpoints_3d_ufno",
+        "localfno": "checkpoints/3d_xhi/localfno/checkpoints_3d_localfno",
+        "localwno": "checkpoints/3d_xhi/localwno/checkpoints_3d_localwno",
+        "localwhno": "checkpoints/3d_xhi/fno/checkpoints_3d_localwhno",
+        "localsirenfno": "checkpoints/3d_xhi/localsirenfno/checkpoints_3d_localsirenfno",
+        "sirenfno": "checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno",
     }
     for kind, path in expected.items():
         assert str(ModelConfig(kind=kind).default_checkpoint_dir) == path
     pair = ModelConfig(kind="localop", local_operator="hadamard",
                        global_operator="cnn")
     assert str(pair.default_checkpoint_dir) == (
-        "checkpoints/checkpoints_3d_local_whno_cnn"
+        "checkpoints/3d_xhi/fno/checkpoints_3d_local_whno_cnn"
     )

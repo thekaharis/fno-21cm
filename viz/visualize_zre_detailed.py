@@ -53,7 +53,7 @@ from util.run_metadata import resolve_checkpoint
 
 # ------------------------------------------------------------------ config
 N_CONES_PER_SPLIT = int(os.environ.get("N_CONES_PER_SPLIT", "16"))
-FIGURES_BASE = Path("figures")
+FIGURES_BASE = Path("figures") / "zre" / "detailed_viz"
 VIZ_TAG = os.environ.get("VIZ_TAG", f"zre-{MODEL_KIND}")
 CHECKPOINT = resolve_checkpoint(CHECKPOINT_DIR)
 

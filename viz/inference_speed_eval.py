@@ -28,7 +28,7 @@ Fourier and Walsh models incomparable.
 
 Run:
     python -m viz.inference_speed_eval --checkpoints name=path ... \
-        --out figures/final_eval/matrix/speed
+        --out figures/shared/eval/final_eval/matrix/speed
 """
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ def main(argv=None) -> None:
                     help="distinct cubes cycled through (default 4)")
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--iters", type=int, default=15)
-    ap.add_argument("--out", type=Path, default=Path("figures/inference_speed_3d"))
+    ap.add_argument("--out", type=Path, default=Path("figures/shared/benchmarks/inference_speed_3d"))
     args = ap.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)

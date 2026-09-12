@@ -38,7 +38,7 @@ import torch
 from learned_waveform_operator import WAVEFORM_INITIALIZATIONS, initial_waveform
 
 CKPT = Path("checkpoints")
-OUT = Path("figures/waveforms/init_comparison.png")
+OUT = Path("figures/shared/diagnostics/waveforms/init_comparison.png")
 RUN = "xhi2d_lwf_both_ph_{init}"
 BANKS = [("global (bottleneck)", "fno.bottleneck.0.spectral.bank", 31),
          ("local (encoder0)", "fno.encoder0.spectral.bank", 15)]

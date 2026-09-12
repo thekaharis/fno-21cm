@@ -30,11 +30,11 @@ from legacy.xhi2d.slice_eval import gather
 
 N = 512
 RUNS = [
-    ("baseline pure-L2", "checkpoints/xhi2d_whno_glob_lr3e4"),
-    ("h1semi (grad only)", "checkpoints/xhi2d_whno_glob_h1semi"),
-    ("expwall scale=16", "checkpoints/xhi2d_whno_glob_expwall16"),
-    ("expwall scale=8", "checkpoints/xhi2d_whno_glob_expwall8"),
-    ("expwall scale=4", "checkpoints/xhi2d_whno_glob_expwall4"),
+    ("baseline pure-L2", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"),
+    ("h1semi (grad only)", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_h1semi"),
+    ("expwall scale=16", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_expwall16"),
+    ("expwall scale=8", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_expwall8"),
+    ("expwall scale=4", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_expwall4"),
 ]
 
 

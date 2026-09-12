@@ -21,7 +21,7 @@ from dataset.dataset_3d import ParameterNormalization
 from viz.compare_xhi2d_models import build_model
 from modeling import load_checkpoint
 
-RUN = "checkpoints/xhi2d_whno_glob_lr3e4"
+RUN = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 N_SLICES = 256
 
 def contrast(x, theta):

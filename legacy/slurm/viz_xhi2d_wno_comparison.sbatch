@@ -29,12 +29,12 @@ conda activate fno-env
 export PYTHONUNBUFFERED=1
 
 python -m viz.compare_xhi2d_models \
-    --output figures/xhi2d_wno_sweep_comparison \
-    --run default-wno=checkpoints/checkpoints_2d_xhi_localwno \
-    --run wno-lr2e4=checkpoints/xhi2d_localwno_lr2e4_e30 \
-    --run wno-lr3e4=checkpoints/xhi2d_localwno_lr3e4_e30 \
-    --run wno-r32=checkpoints/xhi2d_localwno_lr3e4_r32 \
-    --run wno-w48r24=checkpoints/xhi2d_localwno_lr3e4_w48r24 \
-    --run wno-h1e3=checkpoints/xhi2d_localwno_lr3e4_h1e3 \
-    --run localfno=checkpoints/xhi2d_localfno_lr3e4_e30 \
-    --run ufno=checkpoints/xhi2d_ufno_lr3e4_e30
+    --output figures/2d_xhi/eval/xhi2d_wno_sweep_comparison \
+    --run default-wno=checkpoints/2d_xhi/localwno/checkpoints_2d_xhi_localwno \
+    --run wno-lr2e4=checkpoints/2d_xhi/localwno/xhi2d_localwno_lr2e4_e30 \
+    --run wno-lr3e4=checkpoints/2d_xhi/localwno/xhi2d_localwno_lr3e4_e30 \
+    --run wno-r32=checkpoints/2d_xhi/localwno/xhi2d_localwno_lr3e4_r32 \
+    --run wno-w48r24=checkpoints/2d_xhi/localwno/xhi2d_localwno_lr3e4_w48r24 \
+    --run wno-h1e3=checkpoints/2d_xhi/localwno/xhi2d_localwno_lr3e4_h1e3 \
+    --run localfno=checkpoints/2d_xhi/localfno/xhi2d_localfno_lr3e4_e30 \
+    --run ufno=checkpoints/2d_xhi/ufno/xhi2d_ufno_lr3e4_e30

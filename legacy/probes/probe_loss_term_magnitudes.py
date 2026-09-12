@@ -13,7 +13,7 @@ from losses import (AbsoluteLoss, BinaryCrossEntropyTerm, HighKPowerRatio,
 from viz.compare_xhi2d_models import build_model
 from modeling import load_checkpoint
 
-run = "checkpoints/xhi2d_whno_glob_lr3e4"
+run = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 meta = json.load(open(f"{run}/run_metadata.json"))
 model = build_model(meta["model_config"])
 load_checkpoint(model, f"{run}/final_model_state_dict.pt")

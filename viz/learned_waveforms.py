@@ -251,7 +251,7 @@ def main():
             render_bank(bank, args.shape, args.out, title=args.bank, max_modes=args.max_modes)
             print(f"Wrote {args.out} and {args.out.with_suffix('.npz')}")
         else:
-            out = args.out_dir or Path("figures") / "waveforms" / checkpoint.parent.name / checkpoint.stem
+            out = args.out_dir or Path("figures") / "shared" / "diagnostics" / "waveforms" / checkpoint.parent.name / checkpoint.stem
             manifest = render_all(state, metadata, out, input_shape=args.input_shape,
                                   max_modes=args.max_modes, checkpoint=checkpoint.resolve())
             print(f"Wrote {len(manifest['banks'])} bank plots, two overviews and numerical exports to {out}")

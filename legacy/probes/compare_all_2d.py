@@ -41,8 +41,8 @@ from legacy.xhi2d import field_metrics as fm
 from legacy.xhi2d.slice_eval import gather, open_run
 
 N_SLICES = 384
-OUT_MD = "figures/xhi2d_all_variants.md"
-OUT_CSV = "figures/xhi2d_all_variants.csv"
+OUT_MD = "figures/summary/xhi2d_all_variants.md"
+OUT_CSV = "figures/summary/xhi2d_all_variants.csv"
 
 TAGS = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
         "siren_fourier": "sirenfno", "cnn": "cnn"}

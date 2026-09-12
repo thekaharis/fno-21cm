@@ -24,7 +24,7 @@ Nothing special is required. The renderer reads the architecture from the run's
 own metadata:
 
 ```bash
-CHECKPOINT_DIR=checkpoints/checkpoints_3d_sirenfno_m64_stable sbatch slurm/viz_localop.sbatch
+CHECKPOINT_DIR=checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno_m64_stable sbatch slurm/viz_localop.sbatch
 ```
 
 ## Running legacy code directly

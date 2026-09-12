@@ -41,7 +41,7 @@ from dataset import paths
 from legacy.xhi2d.contrast_sweep import DEFAULT_THETAS, bootstrap_gain, theta_mse
 from legacy.xhi2d.slice_eval import cone_split, gather
 
-DEFAULT_RUN = "checkpoints/xhi2d_whno_glob_lr3e4"
+DEFAULT_RUN = "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"
 OUT = "contrast_theta_schedule.json"
 
 

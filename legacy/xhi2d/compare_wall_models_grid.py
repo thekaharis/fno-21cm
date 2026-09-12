@@ -39,13 +39,13 @@ from viz.visualize_xhi2d_representative import DEFAULT_QUANTILES
 # RMSE, wall placement and width alike). Replaced by the two alternating-refit
 # contrast runs, whose final fitted schedules ride along in their checkpoints.
 MODELS = [
-    ("L2 baseline", "checkpoints/xhi2d_whno_glob_lr3e4"),
-    ("expwall s=16", "checkpoints/xhi2d_whno_glob_expwall16"),
-    ("expwall s=8", "checkpoints/xhi2d_whno_glob_expwall8"),
-    ("ctr-refit (L2)", "checkpoints/xhi2d_whno_glob_ctrrefit"),
-    ("ctr-refit +SWD", "checkpoints/xhi2d_whno_glob_ctrrefit_swd"),
+    ("L2 baseline", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4"),
+    ("expwall s=16", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_expwall16"),
+    ("expwall s=8", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_expwall8"),
+    ("ctr-refit (L2)", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_ctrrefit"),
+    ("ctr-refit +SWD", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_ctrrefit_swd"),
 ]
-OUT = "figures/xhi2d_wall_models_grid_v2.png"
+OUT = "figures/summary/xhi2d_wall_models_grid_v2.png"
 CMAP = "magma"
 
 

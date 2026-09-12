@@ -5,8 +5,8 @@
 # diagnostics only had CLI entry points, so this wraps them the same way.
 #
 #   sbatch --export=ALL,\
-#     MODEL_A_NAME=ufno-gnorm,MODEL_A_CHECKPOINT=./checkpoints/checkpoints_3d_ufno_plain_gnorm/best_model_state_dict.pt,\
-#     MODEL_B_NAME=fno_whno-plain,MODEL_B_CHECKPOINT=./checkpoints/checkpoints_3d_fno_whno_plain/best_model_state_dict.pt \
+#     MODEL_A_NAME=ufno-gnorm,MODEL_A_CHECKPOINT=./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_plain_gnorm/best_model_state_dict.pt,\
+#     MODEL_B_NAME=fno_whno-plain,MODEL_B_CHECKPOINT=./checkpoints/3d_xhi/fno_whno/checkpoints_3d_fno_whno_plain/best_model_state_dict.pt \
 #     slurm/edge_metrics_eval.sbatch
 #
 # Both scripts rebuild each model from the run_metadata.json beside its
@@ -53,7 +53,7 @@ MODEL_B_CHECKPOINT="${MODEL_B_CHECKPOINT:-}"
 SPLIT="${SPLIT:-test}"
 N_CONES="${N_CONES:-200}"
 BOUNDARY_MODE="${BOUNDARY_MODE:-3d}"
-OUT_DIR="${OUT_DIR:-figures/edge_metrics_out/job${SLURM_JOB_ID:-local}}"
+OUT_DIR="${OUT_DIR:-figures/3d_xhi/eval/edge_metrics_out/job${SLURM_JOB_ID:-local}}"
 mkdir -p "$OUT_DIR"
 
 checkpoints=("${MODEL_A_NAME}=${MODEL_A_CHECKPOINT}")

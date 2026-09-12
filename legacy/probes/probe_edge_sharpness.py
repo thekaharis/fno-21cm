@@ -17,13 +17,13 @@ from viz.visualize_xhi2d_representative import DEFAULT_QUANTILES
 from modeling import load_checkpoint
 
 RUNS = [
-    ("L2 baseline (final ep29)", "checkpoints/xhi2d_whno_glob_lr3e4",
+    ("L2 baseline (final ep29)", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_lr3e4",
      "final_model_state_dict.pt"),
-    ("L2+SWD+highK (ep14)", "checkpoints/xhi2d_whno_glob_edge",
+    ("L2+SWD+highK (ep14)", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_edge",
      "model_state_dict.pt"),
-    ("L2+SWD      (ep14)", "checkpoints/xhi2d_whno_glob_swd",
+    ("L2+SWD      (ep14)", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_swd",
      "model_state_dict.pt"),
-    ("L2+highK    (ep14)", "checkpoints/xhi2d_whno_glob_highk",
+    ("L2+highK    (ep14)", "checkpoints/2d_xhi/fno_whno/xhi2d_whno_glob_highk",
      "model_state_dict.pt"),
 ]
 

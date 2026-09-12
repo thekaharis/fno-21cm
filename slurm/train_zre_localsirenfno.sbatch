@@ -64,7 +64,7 @@ export ZRE_TARGET_CACHE="${ZRE_TARGET_CACHE:-$DATA_DIR/zre_targets.h5}"
 
 # MODEL_KIND picks the architecture; CHECKPOINT_DIR is deliberately NOT set
 # here -- fno_zre.py derives a per-kind default
-# (checkpoints/checkpoints_zre_localsirenfno) so runs never overwrite others.
+# (checkpoints/zre/fno/checkpoints_zre_localsirenfno) so runs never overwrite others.
 export MODEL_KIND="${MODEL_KIND:-localsirenfno}"
 export TARGET_KIND="${TARGET_KIND:-gompertz}"
 export INPUT_FEATURES="${INPUT_FEATURES:-density_params}"

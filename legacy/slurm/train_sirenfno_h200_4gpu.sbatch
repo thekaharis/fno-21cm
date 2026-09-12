@@ -48,7 +48,7 @@ export PYTHONUNBUFFERED=1
 
 # --- SirenFNO architecture --------------------------------------------------
 export MODEL_KIND=sirenfno
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_sirenfno_m64_stable}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/sirenfno/checkpoints_3d_sirenfno_m64_stable}"
 # Set INIT_CHECKPOINT to warm-start from a prior feasibility run. Optimizer
 # and cosine scheduler state are intentionally reset for the new full run.
 export INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"

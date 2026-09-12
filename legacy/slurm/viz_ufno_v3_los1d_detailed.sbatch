@@ -54,7 +54,7 @@ export N_MODES_Z=32
 export UFNO_NORM=groupnorm
 
 # --- Checkpoint + figure-tag wiring -----------------------------------------
-export CHECKPOINT_DIR=./checkpoints/checkpoints_3d_ufno_v3_los1d
+export CHECKPOINT_DIR=./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno_v3_los1d
 export CHECKPOINT="${CHECKPOINT_DIR}/best_model_state_dict.pt"
 export VIZ_TAG=ufno-v3-los1d
 

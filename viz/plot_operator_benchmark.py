@@ -1,6 +1,6 @@
 """Parameters vs inference throughput for every operator pairing.
 
-Reads figures/operator_variant_benchmark.json (tests/bench_operator_variants.py).
+Reads figures/summary/operator_variant_benchmark.json (tests/bench_operator_variants.py).
 
 Colour encodes the *local* operator, because that is the finding: within each
 local family the three global operators differ by under 1% in speed, so the
@@ -29,8 +29,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-SRC = "figures/operator_variant_benchmark.json"
-OUT = "figures/operator_params_vs_throughput.png"
+SRC = "figures/summary/operator_variant_benchmark.json"
+OUT = "figures/summary/operator_params_vs_throughput.png"
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"

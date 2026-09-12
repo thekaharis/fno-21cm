@@ -16,7 +16,7 @@
 #   * Walltime padded to 18 h to absorb the ~2x per-epoch slowdown from the
 #     6-block + U-Net body.  Expected: ~7-10 min/epoch * 30 epochs ~= 3-5 h
 #     train + 1 h cube-cache staging = comfortably inside 18 h.
-#   * Distinct job name, log paths, and CHECKPOINT_DIR (./checkpoints/checkpoints_3d_ufno
+#   * Distinct job name, log paths, and CHECKPOINT_DIR (./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno
 #     auto-selected by fno_21cm_3d.py because MODEL_KIND=ufno) so the FNO
 #     baseline is never overwritten.
 #
@@ -61,11 +61,11 @@ export PYTHONUNBUFFERED=1
 # --- Model selection --------------------------------------------------------
 # The single switch that distinguishes this sbatch from the FNO one.
 # fno_21cm_3d.py reads MODEL_KIND at import time and (a) picks the model
-# constructor and (b) selects CHECKPOINT_DIR="./checkpoints/checkpoints_3d_ufno" so
+# constructor and (b) selects CHECKPOINT_DIR="./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno" so
 # this run never collides with the plain-FNO baseline.
 export MODEL_KIND=ufno
 export RUN_SEED="${RUN_SEED:-0}"
-export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/checkpoints_3d_ufno}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/3d_xhi/ufno/checkpoints_3d_ufno}"
 
 # 30 epochs is the first-pass experimental budget for U-FNO.  If the
 # trajectory looks promising at the end, extend by submitting again with
