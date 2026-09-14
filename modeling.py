@@ -728,24 +728,31 @@ class TrainerModel(nn.Module):
             return getattr(self._modules["fno"], name)
 
 
-def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
+def build_model(config: ModelConfig, in_channels: int, out_channels: int = 1,
+                output_sigmoid: bool | None = None) -> nn.Module:
     """Construct the configured architecture at ``config.ndim`` dimensions.
 
     One factory for all three tasks. Each architecture family has a 2-D and a
     3-D twin that take the same arguments, so the only thing that varies is
     which class is imported.
 
+    ``out_channels`` and ``output_sigmoid`` support multi-field projections.
+    Leaving ``output_sigmoid=None`` preserves each architecture's historical
+    activation; multi-field callers disable it and apply field-specific ones.
+
     Kinds no longer trained ("fno", "sirenfno" in 3-D) are still accepted and
     built from ``legacy.arch``, so a checkpoint written before the cleanup
     rebuilds from its own ``run_metadata.json`` with no edits.
     """
+    if in_channels < 1 or out_channels < 1:
+        raise ValueError("input and output channel counts must be positive")
     from legacy.arch import KINDS as LEGACY_KINDS
 
     two_d = config.ndim == 2
     if config.kind in LEGACY_KINDS and not two_d:
         from legacy import arch
 
-        return arch.build(config, in_channels)
+        return arch.build(config, in_channels, out_channels, output_sigmoid)
     if config.kind == "ufno":
         if two_d:
             from models_zre_2d import UFNO2d
@@ -753,7 +760,9 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
             return UFNO2d(
                 modes1=config.modes[0], modes2=config.modes[1],
                 width=config.ufno_width, in_channels=in_channels,
-                out_channels=1, sigmoid=True, norm=config.ufno_norm,
+                out_channels=out_channels,
+                sigmoid=True if output_sigmoid is None else output_sigmoid,
+                norm=config.ufno_norm,
             )
         from models_ufno import UFNOWrapped
 
@@ -763,8 +772,8 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
             modes3=config.modes[2],
             width=config.ufno_width,
             in_channels=in_channels,
-            out_channels=1,
-            sigmoid=True,
+            out_channels=out_channels,
+            sigmoid=True if output_sigmoid is None else output_sigmoid,
             norm=config.ufno_norm,
             unet_variant=config.ufno_unet_variant,
             global_residual=config.ufno_global_residual,
@@ -776,7 +785,7 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
             n_modes=config.modes,
             hidden_channels=config.hidden_channels,
             in_channels=in_channels,
-            out_channels=1,
+            out_channels=out_channels,
             n_layers=config.n_layers,
             siren_hidden_dim=config.siren_hidden_dim,
             siren_omega=config.siren_omega,
@@ -785,7 +794,8 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
             siren_ff_sigma=config.siren_ff_sigma,
             siren_learnable_ff=config.siren_learnable_ff,
             mlp_dropout=config.siren_mlp_dropout,
-            output_sigmoid=config.siren_output_sigmoid,
+            output_sigmoid=(config.siren_output_sigmoid if output_sigmoid is None
+                            else output_sigmoid),
             sigmoid_temperature=config.siren_sigmoid_temperature,
         )
     if config.is_local_global:
@@ -798,14 +808,14 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
             from local_fno_3d import LocalFNO3d as LocalFNO
         return LocalFNO(
             in_channels=in_channels,
-            out_channels=1,
+            out_channels=out_channels,
             base_width=config.localfno_base_width,
             local_window=config.localfno_window,
             local_modes=config.localfno_modes,
             global_modes=config.modes,
             spectral_rank=config.localfno_spectral_rank,
             patch_chunk_size=config.localfno_patch_chunk_size,
-            output_sigmoid=True,
+            output_sigmoid=True if output_sigmoid is None else output_sigmoid,
             local_operator=local_name,
             global_operator=global_name,
             local_operator_kwargs=local_kwargs,
@@ -820,15 +830,16 @@ def build_model(config: ModelConfig, in_channels: int) -> nn.Module:
         prefer_local_neuralop()
         from neuralop.models import FNO
 
-        return FNO(
+        model = FNO(
             n_modes=config.modes,
             hidden_channels=config.hidden_channels,
             in_channels=in_channels,
-            out_channels=1,
+            out_channels=out_channels,
             n_layers=config.n_layers,
             projection_channel_ratio=2,
             positional_embedding="grid",
         )
+        return nn.Sequential(model, nn.Sigmoid()) if output_sigmoid else model
     raise ValueError(f"no {config.ndim}-D builder for kind {config.kind!r}")
 
 
