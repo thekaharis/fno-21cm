@@ -23,6 +23,12 @@ from pathlib import Path
 DASH_DIR = Path(__file__).resolve().parent
 DEFAULT_ROOT = DASH_DIR.parent
 EXTRA_RUNS_FILE = DASH_DIR / "extra_runs.json"
+PINNED_RUNS_FILE = DASH_DIR / "pinned_runs.json"
+
+# Runs live at checkpoints/<target>/<family>/<run> after the 2026-09 reorg;
+# a few legacy ones sit at checkpoints/<group>/<run>. Walk far enough for both
+# without descending into each run's own snapshot/figure subdirectories.
+MAX_RUN_DEPTH = 3
 
 # Fallback liveness window (seconds) when a run has no epoch_train_time yet.
 LIVE_FALLBACK_S = 2 * 3600
@@ -38,6 +44,19 @@ def load_extra_runs():
 
 def save_extra_runs(paths):
     EXTRA_RUNS_FILE.write_text(json.dumps(sorted(set(paths)), indent=2) + "\n")
+
+
+def load_pinned_runs():
+    """Pinned run names. Server-side so pins survive a browser or machine change."""
+    try:
+        names = json.loads(PINNED_RUNS_FILE.read_text())
+        return [str(n) for n in names if isinstance(n, str)]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_pinned_runs(names):
+    PINNED_RUNS_FILE.write_text(json.dumps(sorted(set(names)), indent=2) + "\n")
 
 
 def json_safe(obj):
@@ -209,6 +228,33 @@ def read_task(run_dir, name):
     return "3d"
 
 
+def read_operators(run_dir):
+    """(local, global) operator slots, for the dashboard's operator filters.
+
+    Explicit ``localop`` runs name both slots. The preset kinds imply a pair,
+    and the dense architectures have no slots at all -- those report the kind
+    itself so every run is filterable rather than dropping out of the facet.
+    """
+    try:
+        meta = json.loads((run_dir / "run_metadata.json").read_text())
+        mc = meta.get("model_config", {})
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(mc, dict):
+        return None, None
+    local, glob = mc.get("local_operator"), mc.get("global_operator")
+    if local and glob:
+        return str(local), str(glob)
+    kind = str(mc.get("kind", "")).strip()
+    presets = {"localfno": ("fourier", "fourier"),
+               "localwno": ("wavelet", "fourier"),
+               "localwhno": ("hadamard", "fourier"),
+               "localsirenfno": ("siren_fourier", "siren_fourier")}
+    if kind in presets:
+        return presets[kind]
+    return (kind or None), (kind or None)
+
+
 def read_total_epochs(run_dir):
     try:
         meta = json.loads((run_dir / "run_metadata.json").read_text())
@@ -323,15 +369,38 @@ def columnize(rows):
     return keys, series
 
 
+def _walk_runs(base, depth, prefix=""):
+    """Directories holding a metrics.jsonl, at most `depth` levels below base.
+
+    Stops descending as soon as a directory is itself a run, so a run's
+    snapshots/ or figures/ subtrees are never scanned.
+    """
+    if depth < 0 or not base.is_dir():
+        return
+    try:
+        entries = sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return
+    for d in entries:
+        name = f"{prefix}{d.name}"
+        if (d / "metrics.jsonl").is_file():
+            yield name, d
+        else:
+            yield from _walk_runs(d, depth - 1, f"{name}/")
+
+
 def discover_run_dirs(root, extras):
-    """Yield (name, dir) pairs for every directory holding a metrics.jsonl."""
+    """Yield (name, dir) pairs for every directory holding a metrics.jsonl.
+
+    Names are paths relative to checkpoints/, so the reorganized layout
+    (<target>/<family>/<run>) stays visible and unambiguous in the UI.
+    """
     found = {}
     for d in sorted(root.glob("checkpoints_*")):
         if (d / "metrics.jsonl").is_file():
             found[d.name] = d
-    for d in sorted((root / "checkpoints").glob("*")):
-        if (d / "metrics.jsonl").is_file():
-            found[d.name] = d
+    for name, d in _walk_runs(root / "checkpoints", MAX_RUN_DEPTH):
+        found[name] = d
     for d in sorted((root / "checkpoint-archive").glob("*")):
         if (d / "metrics.jsonl").is_file():
             found[f"archive/{d.name}"] = d
@@ -359,8 +428,17 @@ def build_payload(root, extras):
             continue
         keys, series = columnize(rows)
         live = is_live(mtime, rows)
+        local_op, global_op = read_operators(d)
+        # name is "<target>/<family>/<run>" for reorganized runs; split it so
+        # the UI can group and facet without re-parsing paths.
+        parts = name.split("/")
         runs.append({
             "name": name,
+            "run": parts[-1],
+            "group": parts[0] if len(parts) > 1 else "",
+            "family": parts[-2] if len(parts) > 2 else "",
+            "local_op": local_op,
+            "global_op": global_op,
             "path": str(d),
             "mtime": mtime,
             "live": live,
@@ -373,7 +451,8 @@ def build_payload(root, extras):
             "task": read_task(d, name),
             "config": read_config(d),
         })
-    return {"generated": time.time(), "root": str(root), "extras": extras, "runs": runs}
+    return {"generated": time.time(), "root": str(root), "extras": extras,
+            "pinned": load_pinned_runs(), "runs": runs}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -420,6 +499,24 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             self._send(400, {"error": "bad request body"})
             return
+
+        # Pins are keyed by run name, not by path: a run keeps its pin if the
+        # directory is moved, which is exactly what the reorg did to all of them.
+        if path in ("/api/pin", "/api/unpin"):
+            name = str(body.get("name", "")).strip()
+            if not name:
+                self._send(400, {"error": "missing 'name'"})
+                return
+            pinned = load_pinned_runs()
+            if path == "/api/pin":
+                if name not in pinned:
+                    pinned.append(name)
+            else:
+                pinned = [p for p in pinned if p != name]
+            save_pinned_runs(pinned)
+            self._send(200, {"ok": True, "pinned": sorted(set(pinned))})
+            return
+
         if not target:
             self._send(400, {"error": "missing 'path'"})
             return

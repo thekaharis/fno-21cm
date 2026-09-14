@@ -35,7 +35,11 @@ runs on. So the server and your tunnel/forwarder must be on the SAME node:
 
 - Every run under `fno-21cm/checkpoints/`, `fno-21cm/checkpoints_*/` and
   `fno-21cm/checkpoint-archive/*/` that has a `metrics.jsonl`, labeled with
-  model config from `run_metadata.json`.
+  model config from `run_metadata.json`. Discovery walks up to
+  `MAX_RUN_DEPTH` (3) levels below `checkpoints/`, so the reorganized
+  `checkpoints/<target>/<family>/<run>` layout is found; it stops descending
+  as soon as a directory is itself a run, so `snapshots/` and figure
+  subdirectories are never scanned.
 - Runs are grouped into pages by training target (tabs in the header:
   21cm 3-D lightcones vs z_re maps). The tag comes from `task` in
   `run_metadata.json`, falling back to the directory name; tabs appear
@@ -50,6 +54,28 @@ runs on. So the server and your tunnel/forwarder must be on the SAME node:
   from the `[train i/N] ... ETA x min` lines in the newest `logs/*.out` whose
   header names the run's checkpoint dir — no training-code changes needed.
   A ⚠ appears if the log has been silent for >10 min (possible stall).
+- **The sidebar mirrors the checkpoint tree.** Runs are grouped under their
+  target (`2-D x_HI`, `3-D x_HI`, `z_re`, `misc`, `archive`) and then their
+  family folder (`fno_fmix`, `lwf_lwf`, `id_fno`, ...), in the same order as
+  on disk. Each row shows a `local/global` operator tag (`fno/fmix`,
+  `cnn/swhno`, ...); hover it for the full operator names, and hover the run
+  name for its full path.
+- **Filter panel** above the run list:
+  - **local operator** and **global operator** chips, one per basis actually
+    present, with counts. Selecting several is an OR within a facet and an AND
+    across facets, so `local: cnn` + `global: whno, swhno` gives exactly the
+    CNN-local Walsh-global cells.
+  - **family** chips for the checkpoint folder.
+  - a free-text **search** box over the run path.
+  - Option lists are built from the current tab, not the current filter, so
+    narrowing one facet never makes the others' options disappear.
+  - A `clear N filters` chip appears whenever anything is active.
+- **Pinning.** The ☆ on each row pins a run to a `★ pinned` section at the very
+  top, outside the folder grouping — a pin means the run does not move. Pins
+  live in `dashboard/pinned_runs.json` **server-side**, so they survive a
+  browser change, a different machine, and a server restart, and they are keyed
+  by run name rather than path, so a run keeps its pin if its directory moves
+  (which is what the reorg did to all of them).
 - Click runs to overlay them; click metric chips to add charts. Hover a chart
   for per-run values at an epoch. "log y" toggles log scale.
 - **clip to live epoch** cuts all curves at the live run's current epoch, so a
@@ -68,7 +94,12 @@ python3 serve.py --add /some/other/place/checkpoints_xyz
 ```
 
 Added paths persist in `dashboard/extra_runs.json` across restarts; remove one
-with the ✕ next to its name.
+with the ✕ next to its name. Pinned runs persist separately in
+`dashboard/pinned_runs.json`.
+
+Runs from before `run_metadata.json` existed (nine, all under `archive/`) have
+no operator information. They appear in the list with no operator tag and are
+absent from the operator facets — there is nothing to filter them by.
 
 ## Options
 

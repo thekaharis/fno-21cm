@@ -44,6 +44,24 @@
   .rm { color: var(--muted); background: none; border: none; cursor: pointer;
         font-size: 13px; padding: 0 2px; }
   .rm:hover { color: #f27878; }
+  .star { background: none; border: none; cursor: pointer; flex: none;
+          font-size: 12px; line-height: 1; padding: 0 2px; color: var(--muted); }
+  .star:hover, .star.on { color: #ffd866; }
+  .group-head { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+                color: var(--muted); margin: 9px 0 2px; padding-top: 6px;
+                border-top: 1px solid var(--border); }
+  .group-head.first { border-top: none; margin-top: 0; padding-top: 0; }
+  .family-head { font-size: 11px; color: var(--accent); margin: 5px 0 1px 2px; }
+  .run-row .op { font-size: 10px; color: var(--muted); flex: none;
+                 border: 1px solid var(--border); border-radius: 7px; padding: 0 5px; }
+  #facets { display: flex; flex-direction: column; gap: 7px; }
+  .facet-row { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+  .facet-label { font-size: 10.5px; color: var(--muted);
+                 width: 100%; margin-bottom: 1px; }
+  .chip { background: var(--bg); border: 1px solid var(--border); color: var(--text);
+          border-radius: 10px; padding: 1px 8px; cursor: pointer; font-size: 11px; }
+  .chip.on { background: var(--accent); border-color: var(--accent);
+             color: #08131d; font-weight: 600; }
   #metric-list { display: flex; flex-wrap: wrap; gap: 4px; }
   #metric-list button { background: var(--bg); border: 1px solid var(--border);
         color: var(--text); border-radius: 12px; padding: 2px 9px; cursor: pointer;
@@ -122,6 +140,11 @@
 <main>
   <div id="sidebar">
     <div class="panel">
+      <h2>Filter</h2>
+      <input type="text" id="search" placeholder="search run name…" style="margin-bottom:7px">
+      <div id="facets"></div>
+    </div>
+    <div class="panel">
       <h2>Runs</h2>
       <div id="run-list"></div>
       <div style="display:flex; gap:6px; margin-top:8px;">
@@ -150,7 +173,21 @@ const state = {
   timer: null,
   initialized: false,
   page: "all",
+  selLocal: new Set(),
+  selGlobal: new Set(),
+  selFamily: new Set(),
+  search: "",
 };
+
+// Registry operator names -> the short tags used in checkpoint directories.
+const OP_TAGS = {
+  fourier: "fno", siren_fourier: "sfno", wavelet: "wno", hadamard: "whno",
+  siren_hadamard: "swhno", cnn: "cnn", learned_waveform: "lwf",
+  identity: "id", frequency_mixing: "fmix", laplace: "lap",
+};
+const opTag = o => (o ? (OP_TAGS[o] || o) : "—");
+const GROUP_LABELS = {"2d_xhi": "2-D x_HI", "3d_xhi": "3-D x_HI",
+                      "zre": "z_re", "misc": "misc", "archive": "archive"};
 const TASK_LABELS = {"3d": "21cm 3-D", "2d": "2-D x_HI", "zre": "z_re maps"};
 const TASK_ORDER = ["3d", "2d", "zre"];
 
@@ -164,9 +201,34 @@ function selectDefaultMetrics(page) {
   state.selMetrics = new Set(preferred.filter(m => avail.has(m)));
 }
 
-function visibleRuns() {
+function taskRuns() {
+  // Tab scope only -- facet option lists are built from this, so filtering on
+  // one facet never makes the others' options vanish.
   return state.data.runs.filter(r =>
     state.page === "all" || (r.task || "3d") === state.page);
+}
+
+function visibleRuns() {
+  const q = state.search.trim().toLowerCase();
+  return taskRuns().filter(r =>
+    (!state.selLocal.size || state.selLocal.has(r.local_op || "")) &&
+    (!state.selGlobal.size || state.selGlobal.has(r.global_op || "")) &&
+    (!state.selFamily.size || state.selFamily.has(r.family || "")) &&
+    (!q || r.name.toLowerCase().includes(q)));
+}
+
+function isPinned(r) {
+  return (state.data.pinned || []).includes(r.name);
+}
+
+function sortedVisibleRuns() {
+  // Pinned first, then by group/family/name so the sidebar mirrors the
+  // checkpoints/<target>/<family>/<run> layout on disk.
+  return visibleRuns().slice().sort((a, b) => {
+    const pa = isPinned(a), pb = isPinned(b);
+    if (pa !== pb) return pa ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 const $ = id => document.getElementById(id);
@@ -231,6 +293,7 @@ function clipEpoch() {
 
 function render() {
   renderTabs();
+  renderFacets();
   renderRunList();
   renderMetricList();
   renderCharts();
@@ -257,53 +320,173 @@ function renderTabs() {
   }
 }
 
+function renderFacets() {
+  const box = $("facets");
+  box.innerHTML = "";
+  const scope = taskRuns();
+  const facets = [
+    ["local operator", "selLocal", r => r.local_op, true],
+    ["global operator", "selGlobal", r => r.global_op, true],
+    ["family (checkpoint folder)", "selFamily", r => r.family, false],
+  ];
+  for (const [title, key, pick, asTag] of facets) {
+    const counts = new Map();
+    for (const r of scope) {
+      const v = pick(r);
+      if (v) counts.set(v, (counts.get(v) || 0) + 1);
+    }
+    if (!counts.size) continue;
+    const row = document.createElement("div");
+    row.className = "facet-row";
+    const lab = document.createElement("span");
+    lab.className = "facet-label";
+    lab.textContent = title;
+    row.appendChild(lab);
+    for (const v of [...counts.keys()].sort()) {
+      const b = document.createElement("button");
+      b.className = "chip" + (state[key].has(v) ? " on" : "");
+      b.textContent = `${asTag ? opTag(v) : v} ${counts.get(v)}`;
+      b.title = v;
+      b.onclick = () => {
+        state[key].has(v) ? state[key].delete(v) : state[key].add(v);
+        render();
+      };
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+  const active = state.selLocal.size + state.selGlobal.size + state.selFamily.size
+                 + (state.search.trim() ? 1 : 0);
+  if (active) {
+    const row = document.createElement("div");
+    row.className = "facet-row";
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.textContent = `clear ${active} filter${active > 1 ? "s" : ""}`;
+    b.onclick = () => {
+      state.selLocal.clear(); state.selGlobal.clear(); state.selFamily.clear();
+      state.search = ""; $("search").value = "";
+      render();
+    };
+    row.appendChild(b);
+    box.appendChild(row);
+  }
+}
+
+function makeRunRow(r, extras) {
+  const row = document.createElement("div");
+  row.className = "run-row";
+  const on = state.selRuns.has(r.name);
+
+  const star = document.createElement("button");
+  const pinned = isPinned(r);
+  star.className = "star" + (pinned ? " on" : "");
+  star.textContent = pinned ? "★" : "☆";
+  star.title = pinned ? "unpin" : "pin to top";
+  star.onclick = async e => {
+    e.stopPropagation();
+    await fetch(pinned ? "/api/unpin" : "/api/pin",
+                {method: "POST", body: JSON.stringify({name: r.name})});
+    fetchRuns();
+  };
+
+  const sw = document.createElement("span");
+  sw.className = "swatch";
+  sw.style.background = on ? runColor(r.name) : "transparent";
+  sw.style.border = "1px solid " + runColor(r.name);
+
+  const name = document.createElement("span");
+  name.className = "name";
+  name.title = r.path;
+  name.textContent = r.run || r.name;
+  if (r.label) {
+    const lab = document.createElement("span");
+    lab.className = "label";
+    lab.textContent = r.label;
+    name.appendChild(lab);
+  }
+  row.append(star, sw, name);
+
+  if (r.local_op || r.global_op) {
+    const op = document.createElement("span");
+    op.className = "op";
+    op.textContent = `${opTag(r.local_op)}/${opTag(r.global_op)}`;
+    op.title = `local ${r.local_op || "?"} / global ${r.global_op || "?"}`;
+    row.appendChild(op);
+  }
+  if (r.live) {
+    const b = document.createElement("span");
+    b.className = "badge"; b.textContent = "LIVE";
+    row.appendChild(b);
+  }
+  const ep = document.createElement("span");
+  ep.className = "epochs"; ep.textContent = r.epochs + " ep";
+  row.appendChild(ep);
+
+  if (extras.has(r.path)) {
+    const rm = document.createElement("button");
+    rm.className = "rm"; rm.textContent = "\u2715"; rm.title = "remove from dashboard";
+    rm.onclick = async e => {
+      e.stopPropagation();
+      await fetch("/api/remove", {method: "POST", body: JSON.stringify({path: r.path})});
+      state.selRuns.delete(r.name);
+      fetchRuns();
+    };
+    row.appendChild(rm);
+  }
+  row.onclick = () => {
+    on ? state.selRuns.delete(r.name) : state.selRuns.add(r.name);
+    render();
+  };
+  return row;
+}
+
 function renderRunList() {
   const box = $("run-list");
   box.innerHTML = "";
   const extras = new Set(state.data.extras || []);
-  for (const r of visibleRuns()) {
-    const row = document.createElement("div");
-    row.className = "run-row";
-    const on = state.selRuns.has(r.name);
-    const sw = document.createElement("span");
-    sw.className = "swatch";
-    sw.style.background = on ? runColor(r.name) : "transparent";
-    sw.style.border = "1px solid " + runColor(r.name);
-    const name = document.createElement("span");
-    name.className = "name";
-    name.title = r.path;
-    name.textContent = r.name;
-    if (r.label) {
-      const lab = document.createElement("span");
-      lab.className = "label";
-      lab.textContent = r.label;
-      name.appendChild(lab);
+  const rows = sortedVisibleRuns();
+  if (!rows.length) {
+    const e = document.createElement("div");
+    e.className = "muted";
+    e.style.fontSize = "12px";
+    e.textContent = "no runs match the current filters";
+    box.appendChild(e);
+    return;
+  }
+
+  // Pinned runs are listed flat at the top, deliberately outside the folder
+  // grouping -- the point of a pin is that it does not move.
+  const pins = rows.filter(isPinned);
+  if (pins.length) {
+    const h = document.createElement("div");
+    h.className = "group-head first";
+    h.textContent = `\u2605 pinned (${pins.length})`;
+    box.appendChild(h);
+    pins.forEach(r => box.appendChild(makeRunRow(r, extras)));
+  }
+
+  let group = null, family = null, firstHead = !pins.length;
+  for (const r of rows.filter(x => !isPinned(x))) {
+    if ((r.group || "") !== group) {
+      group = r.group || "";
+      family = null;
+      const h = document.createElement("div");
+      h.className = "group-head" + (firstHead ? " first" : "");
+      firstHead = false;
+      h.textContent = GROUP_LABELS[group] || group || "(ungrouped)";
+      box.appendChild(h);
     }
-    row.append(sw, name);
-    if (r.live) {
-      const b = document.createElement("span");
-      b.className = "badge"; b.textContent = "LIVE";
-      row.appendChild(b);
+    if ((r.family || "") !== family) {
+      family = r.family || "";
+      if (family) {
+        const h = document.createElement("div");
+        h.className = "family-head";
+        h.textContent = family;
+        box.appendChild(h);
+      }
     }
-    const ep = document.createElement("span");
-    ep.className = "epochs"; ep.textContent = r.epochs + " ep";
-    row.appendChild(ep);
-    if (extras.has(r.path)) {
-      const rm = document.createElement("button");
-      rm.className = "rm"; rm.textContent = "✕"; rm.title = "remove from dashboard";
-      rm.onclick = async e => {
-        e.stopPropagation();
-        await fetch("/api/remove", {method: "POST", body: JSON.stringify({path: r.path})});
-        state.selRuns.delete(r.name);
-        fetchRuns();
-      };
-      row.appendChild(rm);
-    }
-    row.onclick = () => {
-      on ? state.selRuns.delete(r.name) : state.selRuns.add(r.name);
-      render();
-    };
-    box.appendChild(row);
+    box.appendChild(makeRunRow(r, extras));
   }
 }
 
@@ -667,6 +850,11 @@ $("logscale").onchange = renderCharts;
 $("clip").onchange = renderCharts;
 $("diffonly").onchange = renderCharts;
 $("interval").onchange = schedule;
+$("search").addEventListener("input", e => {
+  state.search = e.target.value;
+  renderFacets();
+  renderRunList();
+});
 $("add-btn").onclick = addRun;
 $("add-path").addEventListener("keydown", e => { if (e.key === "Enter") addRun(); });
 
