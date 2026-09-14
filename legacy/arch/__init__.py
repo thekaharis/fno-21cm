@@ -12,7 +12,8 @@ import torch.nn as nn
 KINDS = ("fno", "sirenfno")
 
 
-def build(config, in_channels: int) -> nn.Module:
+def build(config, in_channels: int, out_channels: int = 1,
+          output_sigmoid: bool | None = None) -> nn.Module:
     """Build a retired architecture from its recorded ``ModelConfig``."""
     if config.kind == "sirenfno":
         from legacy.arch.siren_fno_3d import SirenFNO3d
@@ -21,7 +22,7 @@ def build(config, in_channels: int) -> nn.Module:
             n_modes=config.modes,
             hidden_channels=config.hidden_channels,
             in_channels=in_channels,
-            out_channels=1,
+            out_channels=out_channels,
             n_layers=config.n_layers,
             padding=config.siren_padding,
             add_grid=True,
@@ -32,7 +33,8 @@ def build(config, in_channels: int) -> nn.Module:
             siren_ff_sigma=config.siren_ff_sigma,
             siren_learnable_ff=config.siren_learnable_ff,
             mlp_dropout=config.siren_mlp_dropout,
-            output_sigmoid=config.siren_output_sigmoid,
+            output_sigmoid=(config.siren_output_sigmoid if output_sigmoid is None
+                            else output_sigmoid),
             sigmoid_temperature=config.siren_sigmoid_temperature,
         )
     if config.kind == "fno":
@@ -41,13 +43,14 @@ def build(config, in_channels: int) -> nn.Module:
         prefer_local_neuralop()
         from neuralop.models import FNO
 
-        return FNO(
+        model = FNO(
             n_modes=config.modes,
             hidden_channels=config.hidden_channels,
             in_channels=in_channels,
-            out_channels=1,
+            out_channels=out_channels,
             n_layers=config.n_layers,
             projection_channel_ratio=2,
             positional_embedding="grid",
         )
+        return nn.Sequential(model, nn.Sigmoid()) if output_sigmoid else model
     raise ValueError(f"{config.kind!r} is not a retired architecture")

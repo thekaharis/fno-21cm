@@ -304,9 +304,9 @@ class UFNOWrapped(nn.Module):
         2 without).  Overrides the upstream ``SimpleBlock3d``'s hardcoded
         ``Linear(12, width)`` lifting layer.
     out_channels : int, default 1
-        Number of output channels.  Hardcoded to 1 in the upstream
-        ``SimpleBlock3d.fc2``; values other than 1 are not supported here
-        (the patch surface would grow significantly).
+        Number of output channels. The wrapper replaces the upstream
+        ``SimpleBlock3d.fc2`` projection when more than one is requested.
+        The default single-channel parameter layout is unchanged.
     sigmoid : bool, default True
         If True, apply a sigmoid to the output so predictions live in
         ``[0, 1]``.  Physically motivated for x_HI; disable for fair
@@ -393,11 +393,8 @@ class UFNOWrapped(nn.Module):
             back into the U-Net's input.  Composable with any variant.
         """
         super().__init__()
-        if out_channels != 1:
-            raise NotImplementedError(
-                "UFNOWrapped only supports out_channels=1 because the "
-                "upstream SimpleBlock3d hardcodes fc2 = Linear(128, 1). "
-                "Patch fc2 manually if you need a different output.")
+        if out_channels < 1:
+            raise ValueError("out_channels must be positive")
         norm = norm.lower()
         if norm not in ("batchnorm", "groupnorm"):
             raise ValueError(
@@ -420,6 +417,9 @@ class UFNOWrapped(nn.Module):
         # output MLPs) keeps the paper's defaults.
         self.body = SimpleBlock3d(modes1, modes2, modes3, width)
         self.body.fc0 = nn.Linear(self.in_channels, width)
+        # Preserve the single-output initialization/checkpoint layout exactly.
+        if self.out_channels != 1:
+            self.body.fc2 = nn.Linear(self.body.fc2.in_features, self.out_channels)
 
         # Tier 2 (D, F): replace each U-Fourier block's U-Net with the
         # selected variant.  "default" leaves Wen et al.'s upstream U_net
@@ -477,7 +477,7 @@ class UFNOWrapped(nn.Module):
         x = x.permute(0, 2, 3, 4, 1).contiguous()
 
         # Run the U-FNO body.  SimpleBlock3d returns (B, X+pad_x, Y+pad_y,
-        # Z+pad_z, 1) -- the final fc2 already projects to 1 output channel.
+        # Z+pad_z, out_channels).
         x = self.body(x)
 
         # Trim the padding back to the original spatial extent.  We replace
@@ -489,7 +489,7 @@ class UFNOWrapped(nn.Module):
         if self.sigmoid:
             x = torch.sigmoid(x)
 
-        # Back to channels-first (B, 1, X, Y, Z) for the rest of the pipeline.
+        # Back to channels-first (B, C_out, X, Y, Z).
         return x.permute(0, 4, 1, 2, 3).contiguous()
 
     # ----------------------------------------------------------- checkpoint

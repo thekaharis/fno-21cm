@@ -4,7 +4,12 @@ A Fourier Neural Operator (FNO) surrogate for the **density → neutral
 fraction** map of 21cmFAST reionization lightcones. Part of a master's thesis
 on Effective Field Theory for reionization simulations.
 
-Two pipelines live side by side:
+**Multi-field experiments:** [the modular field workflow](notes/multifield.md)
+adds configurable, disjoint input/target field sets for 3-D lightcones, common
+train-only normalization, per-field evaluation and staged mapping sweeps.
+Use `fno_multifield.py`; the existing entry points keep their defaults.
+
+Two original pipelines live side by side:
 
 - **v2 — 2-D, per-slice.** Takes one matter-density slice (140 × 140,
   200 Mpc box) at a fixed redshift and predicts `x_HI` on the same grid.
