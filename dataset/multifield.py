@@ -212,7 +212,10 @@ class MultiFieldDataset(Dataset):
         for name, (count, mean, m2) in moments.items():
             mode = self.registry[name].normalization
             std = float(np.sqrt(m2 / count))
-            offset, scale = (mean, std if std > 1e-8 else 1.0)
+            # Native fields can have very small units (e.g. velocities near
+            # 1e-16). A dimensional epsilon would erase their normalization.
+            # Only an exactly constant field needs the unit-scale fallback.
+            offset, scale = (mean, std if std > 0 else 1.0)
             if mode != "standard":
                 offset, scale = 0.0, 10.0 if mode == "density" else 1.0
             stats[name] = {"offset": offset, "scale": scale, "train_mean": mean,

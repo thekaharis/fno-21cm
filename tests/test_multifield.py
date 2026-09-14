@@ -217,6 +217,35 @@ def test_physical_metrics_spectra_and_zero_variance_baseline():
     assert constant.result()["los_velocity"]["pearson_r"] is None
 
 
+def test_tiny_native_velocity_units_are_normalized_and_metrics_are_unit_invariant(tmp_path):
+    path = tmp_path / "cache.h5"
+    write_cache(path)
+    with h5py.File(path, "r+") as f:
+        f["los_velocity"][:] *= 1e-17
+    dataset = MultiFieldDataset(all_mapping(), cache=path)
+    preparation = dataset.prepare()
+    rows = dataset.install_preparation(preparation)
+    scale = preparation["normalization"]["los_velocity"]["scale"]
+    assert 0 < scale < 1e-15
+    train_values = torch.stack([dataset[i]["y"][2] for i in rows["train"]])
+    assert train_values.std(unbiased=False).item() == pytest.approx(1, abs=1e-6)
+    dataset.close()
+
+    y = torch.randn(2, 1, 8, 8, 8)
+    metrics = []
+    for factor in (1, 1e-17):
+        accumulator = FieldMetrics(("los_velocity",), {"los_velocity": {
+            "offset": 5*factor, "scale": 2*factor, "train_mean": 5*factor}}, spectral_bins=4)
+        accumulator.update(y+1, y)
+        metrics.append(accumulator.result()["los_velocity"])
+    for key in ("normalized_mse", "pearson_r", "mse_skill_vs_train_mean"):
+        assert metrics[0][key] == pytest.approx(metrics[1][key])
+    assert metrics[1]["rmse"] / metrics[0]["rmse"] == pytest.approx(1e-17, abs=1e-25)
+    for key in ("power_ratio", "cross_correlation"):
+        assert metrics[0]["transverse_spectrum"][key] == pytest.approx(
+            metrics[1]["transverse_spectrum"][key])
+
+
 def test_cli_training_checkpoint_export_and_sweep(tmp_path):
     """Real CLI run on small cubes; reload and export reproduce predictions."""
     from fno_multifield import main, restore

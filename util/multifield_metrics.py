@@ -19,12 +19,16 @@ class FieldMetrics:
     def update(self, prediction, target):
         for i, name in enumerate(self.targets):
             stats = self.normalization[name]
-            p = prediction[:, i].double() * stats["scale"] + stats["offset"]
-            y = target[:, i].double() * stats["scale"] + stats["offset"]
+            # Accumulate dimensionless errors and correlations. Physical-unit
+            # epsilon tests incorrectly classify small native velocities as
+            # constant and make their spectra/skill undefined.
+            p = prediction[:, i].double()
+            y = target[:, i].double()
+            training_mean = (stats["train_mean"] - stats["offset"]) / stats["scale"]
             error = p - y
             values = [y.numel(), error.square().sum(), error.abs().sum(), error.sum(),
                       p.sum(), y.sum(), p.square().sum(), y.square().sum(), (p*y).sum(),
-                      (y - stats["train_mean"]).square().sum()]
+                      (y - training_mean).square().sum()]
             self.sums[name] += np.array([float(v) for v in values])
             if self.spectral_bins:
                 # Each lightcone slice is periodic only in X/Y. Remove its
@@ -57,12 +61,12 @@ class FieldMetrics:
                 raise ValueError("cannot evaluate an empty split")
             scale = self.normalization[name]["scale"]
             denominator = math.sqrt(max(0, pp-ps*ps/n) * max(0, yy-ys*ys/n))
-            item = {"mse": squared/n, "rmse": math.sqrt(squared/n),
-                    "mae": absolute/n, "mean_bias": bias/n,
-                    "normalized_mse": squared/n/scale**2,
+            item = {"mse": squared/n*scale**2, "rmse": math.sqrt(squared/n)*scale,
+                    "mae": absolute/n*scale, "mean_bias": bias/n*scale,
+                    "normalized_mse": squared/n,
                     "pearson_r": float(np.clip((py-ps*ys/n)/denominator, -1, 1))
                     if denominator > 1e-12 else None,
-                    "train_mean_baseline_rmse": math.sqrt(baseline/n),
+                    "train_mean_baseline_rmse": math.sqrt(baseline/n)*scale,
                     "mse_skill_vs_train_mean": 1-squared/baseline if baseline > 1e-12 else None}
             if self.spectral_bins:
                 pp, yy, py, counts = self.spectra[name]
