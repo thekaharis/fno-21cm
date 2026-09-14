@@ -25,6 +25,9 @@ registry entry so either slot can host any of:
 ``frequency_mixing``
     Fixed Fourier transforms, the signed-quadrant multiplier, and a
     coordinate-generated low-rank cross-frequency residual.
+``laplace``
+    Pole-residue operator of Cao et al. (2023): learned poles and residues give
+    a transient plus steady-state response. ``modes`` counts poles per axis.
 
 Every operator maps ``(B, C, *spatial) -> (B, C, *spatial)``. What differs is
 declared on :class:`OperatorSpec`: whether the enclosing block should wrap it in
@@ -619,6 +622,17 @@ def _build_learned_waveform(channels, ndim, modes, hyperparameters):
     return LearnedWaveformOperator(channels, ndim, modes, **hyperparameters)
 
 
+def _build_laplace(channels, ndim, modes, hyperparameters):
+    from laplace_operator import LaplaceOperator
+    return LaplaceOperator(channels, ndim, modes, **hyperparameters)
+
+
+def _validate_laplace(sizes, modes, hyperparameters, *, context):
+    from laplace_operator import validate_laplace_options, validate_laplace_shape
+    validate_laplace_options(**hyperparameters)
+    validate_laplace_shape(sizes, modes, context=context)
+
+
 def _build_frequency_mixing(channels, ndim, modes, hyperparameters):
     from spectral_mixing_operator import FrequencyMixingOperator
     return FrequencyMixingOperator(channels, ndim, modes, **hyperparameters)
@@ -697,6 +711,17 @@ def _validate_cnn(sizes, modes, hyperparameters, *, context):
 
 
 OPERATORS: dict[str, OperatorSpec] = {
+    "laplace": OperatorSpec(
+        name="laplace",
+        build=_build_laplace,
+        defaults={"pole_count": None, "stable_poles": True, "channel_chunk": 8},
+        # `modes` counts POLES per axis here, not a spectral cutoff: nothing is
+        # truncated, so there is no rank projection to apply and no shape
+        # constraint tying poles to the grid.
+        uses_modes=True,
+        rank_projected=False,
+        validate=_validate_laplace,
+    ),
     "frequency_mixing": OperatorSpec(
         name="frequency_mixing", build=_build_frequency_mixing,
         defaults={"backend": "factorized", "mixing_rank": 32, "hidden_dim": 64,

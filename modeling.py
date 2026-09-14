@@ -26,6 +26,7 @@ LOCAL_GLOBAL_KINDS = {
 
 #: Short tags used to name checkpoint directories of explicit ``localop`` runs.
 OPERATOR_TAGS = {
+    "laplace": "lap",
     "frequency_mixing": "fmix",
     "learned_waveform": "lwf",
     "fourier": "fno",
@@ -71,6 +72,10 @@ def operator_env_settings() -> dict:
         "waveform_lr_ratio": float(os.environ.get("WAVEFORM_LR_RATIO", "0.1")),
         "waveform_init": os.environ.get("WAVEFORM_INIT", "random").strip().lower(),
         "waveform_transform": os.environ.get("WAVEFORM_TRANSFORM", "tied").strip().lower(),
+        "laplace_pole_count": (int(os.environ["LAPLACE_POLE_COUNT"])
+                               if os.environ.get("LAPLACE_POLE_COUNT") else None),
+        "laplace_stable_poles": _env_bool("LAPLACE_STABLE_POLES", True),
+        "laplace_channel_chunk": int(os.environ.get("LAPLACE_CHANNEL_CHUNK", "8")),
         "frequency_mixing_backend": os.environ.get("FREQUENCY_MIXING_BACKEND", "factorized").strip().lower(),
         "frequency_mixing_rank": int(os.environ.get("FREQUENCY_MIXING_RANK", "32")),
         "frequency_mixing_hidden_dim": int(os.environ.get("FREQUENCY_MIXING_HIDDEN_DIM", "64")),
@@ -94,6 +99,10 @@ def operator_env_settings() -> dict:
 
 def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
     """Pick the hyperparameters one operator reads out of a settings mapping."""
+    if operator == "laplace":
+        return {"pole_count": settings.get("laplace_pole_count"),
+                "stable_poles": bool(settings.get("laplace_stable_poles", True)),
+                "channel_chunk": int(settings.get("laplace_channel_chunk", 8))}
     if operator == "frequency_mixing":
         return {"backend": settings.get("frequency_mixing_backend", "factorized"),
                 "mixing_rank": int(settings.get("frequency_mixing_rank", 32)),
@@ -182,6 +191,9 @@ class ModelConfig:
     waveform_lr_ratio: float = 0.1
     waveform_init: str = "random"
     waveform_transform: str = "tied"
+    laplace_pole_count: int | None = None
+    laplace_stable_poles: bool = True
+    laplace_channel_chunk: int = 8
     frequency_mixing_backend: str = "factorized"
     frequency_mixing_rank: int = 32
     frequency_mixing_hidden_dim: int = 64
@@ -289,6 +301,8 @@ class ModelConfig:
         validate_waveform_init(self.waveform_init)
         validate_waveform_transform(self.waveform_transform)
         from spectral_mixing_operator import validate_mixing_options
+        from laplace_operator import validate_laplace_options
+        validate_laplace_options(**self._slot_kwargs("laplace"))
         validate_mixing_options(**self._slot_kwargs("frequency_mixing"))
         if self.cnn_depth <= 0:
             raise ValueError("cnn_depth must be positive")
@@ -338,6 +352,9 @@ class ModelConfig:
         return slot_hyperparameters(
             operator,
             {
+                "laplace_pole_count": self.laplace_pole_count,
+                "laplace_stable_poles": self.laplace_stable_poles,
+                "laplace_channel_chunk": self.laplace_channel_chunk,
                 "frequency_mixing_backend": self.frequency_mixing_backend,
                 "frequency_mixing_rank": self.frequency_mixing_rank,
                 "frequency_mixing_hidden_dim": self.frequency_mixing_hidden_dim,
@@ -508,6 +525,9 @@ class ModelConfig:
             "waveform_lr_ratio": self.waveform_lr_ratio,
             "waveform_init": self.waveform_init,
             "waveform_transform": self.waveform_transform,
+            "laplace_pole_count": self.laplace_pole_count,
+            "laplace_stable_poles": self.laplace_stable_poles,
+            "laplace_channel_chunk": self.laplace_channel_chunk,
             "frequency_mixing_backend": self.frequency_mixing_backend,
             "frequency_mixing_rank": self.frequency_mixing_rank,
             "frequency_mixing_hidden_dim": self.frequency_mixing_hidden_dim,
@@ -560,6 +580,7 @@ class ModelConfig:
         """Architecture folder name: operator pair for localop, else the kind."""
         tags = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
                 "siren_hadamard": "swhno", "siren_fourier": "sfno",
+                "laplace": "lap",
                 "cnn": "cnn", "learned_waveform": "lwf", "identity": "id",
                 "frequency_mixing": "fmix"}
         if self.kind == "localop" and self.local_operator and self.global_operator:
