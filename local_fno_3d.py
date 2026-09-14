@@ -260,7 +260,7 @@ class QuadrantSpectralConv3d(nn.Module):
             out_ft,
             s=(nx, ny, nz),
             dim=(-3, -2, -1),
-        )
+        ).to(x.dtype)
 
 
 class QuadrantSpectralConv3dSiren(nn.Module):

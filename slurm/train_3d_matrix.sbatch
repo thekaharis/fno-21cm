@@ -4,6 +4,7 @@
 #   ARCH  ufno | fno_fno | fno_whno | wno_whno | whno_whno
 #         swhno_swhno | sfno_swhno | whno_swhno   (SIREN Walsh weights)
 #         cnn_whno | cnn_swhno | cnn_fno | cnn_sfno   (U-FNO shape, global slot swapped)
+#         fno_fmix | fmix_fmix                 (cross-frequency mixing)
 #         lwf_lwf                              (learned orthonormal waveforms)
 #   LOSS  plain | expwall | hybrid | expwall_theta | bsd
 #
@@ -13,6 +14,8 @@
 # ~28% while a 141 GB H200 is heavily over-provisioned, and the A100 pool is
 # twice the size. An A30 is not an option -- 24 GB peaks at 94% on the first step
 # and OOMs on the second when Adam allocates its moment buffers.
+# These GPU memory figures predate frequency_mixing. Profile fno_fmix/fmix_fmix
+# on the target GPU before extrapolating their full-model memory requirements.
 #
 # Default is 20 epochs for a first pass. To continue a finished run:
 #   sbatch --export=ALL,ARCH=fno_whno,LOSS=plain,N_EPOCHS=30,\
@@ -64,7 +67,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 export PYTHONUNBUFFERED=1
 
-ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno|cnn_whno|cnn_swhno|cnn_fno|cnn_sfno|lwf_lwf}"
+ARCH="${ARCH:?set ARCH to ufno|fno_fno|fno_whno|wno_whno|whno_whno|swhno_swhno|sfno_swhno|whno_swhno|cnn_whno|cnn_swhno|cnn_fno|cnn_sfno|lwf_lwf|fno_fmix|fmix_fmix}"
 LOSS="${LOSS:?set LOSS to plain|expwall|hybrid|expwall_theta|bsd}"
 
 # ---- architecture ------------------------------------------------------
@@ -77,6 +80,8 @@ case "$ARCH" in
   fno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=fourier  GLOBAL_OPERATOR=hadamard ;;
   wno_whno)   export MODEL_KIND=localop LOCAL_OPERATOR=wavelet  GLOBAL_OPERATOR=hadamard ;;
   whno_whno)  export MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=hadamard ;;
+  fno_fmix)   export MODEL_KIND=localop LOCAL_OPERATOR=fourier GLOBAL_OPERATOR=frequency_mixing ;;
+  fmix_fmix)  export MODEL_KIND=localop LOCAL_OPERATOR=frequency_mixing GLOBAL_OPERATOR=frequency_mixing ;;
   lwf_lwf)    export MODEL_KIND=localop LOCAL_OPERATOR=learned_waveform GLOBAL_OPERATOR=learned_waveform ;;
   # SIREN-generated Walsh weights: sequency is the Walsh analogue of
   # frequency, so the same hypernetwork trick the SirenFNO applies to

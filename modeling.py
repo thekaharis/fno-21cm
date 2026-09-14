@@ -26,6 +26,7 @@ LOCAL_GLOBAL_KINDS = {
 
 #: Short tags used to name checkpoint directories of explicit ``localop`` runs.
 OPERATOR_TAGS = {
+    "frequency_mixing": "fmix",
     "learned_waveform": "lwf",
     "fourier": "fno",
     "siren_fourier": "sirenfno",
@@ -70,6 +71,11 @@ def operator_env_settings() -> dict:
         "waveform_lr_ratio": float(os.environ.get("WAVEFORM_LR_RATIO", "0.1")),
         "waveform_init": os.environ.get("WAVEFORM_INIT", "random").strip().lower(),
         "waveform_transform": os.environ.get("WAVEFORM_TRANSFORM", "tied").strip().lower(),
+        "frequency_mixing_backend": os.environ.get("FREQUENCY_MIXING_BACKEND", "factorized").strip().lower(),
+        "frequency_mixing_rank": int(os.environ.get("FREQUENCY_MIXING_RANK", "32")),
+        "frequency_mixing_hidden_dim": int(os.environ.get("FREQUENCY_MIXING_HIDDEN_DIM", "64")),
+        "frequency_mixing_chunk_size": int(os.environ.get("FREQUENCY_MIXING_CHUNK_SIZE", "1024")),
+        "frequency_mixing_dense_limit": int(os.environ.get("FREQUENCY_MIXING_DENSE_LIMIT", "4000000")),
         "grid_embedding": _env_bool("GRID_EMBEDDING", False),
         "whno_ordering": os.environ.get("WHNO_ORDERING", "sequency").lower(),
         "cnn_depth": int(os.environ.get("CNN_DEPTH", "3")),
@@ -88,6 +94,12 @@ def operator_env_settings() -> dict:
 
 def slot_hyperparameters(operator: str, settings: Mapping) -> dict:
     """Pick the hyperparameters one operator reads out of a settings mapping."""
+    if operator == "frequency_mixing":
+        return {"backend": settings.get("frequency_mixing_backend", "factorized"),
+                "mixing_rank": int(settings.get("frequency_mixing_rank", 32)),
+                "hidden_dim": int(settings.get("frequency_mixing_hidden_dim", 64)),
+                "chunk_size": int(settings.get("frequency_mixing_chunk_size", 1024)),
+                "dense_limit": int(settings.get("frequency_mixing_dense_limit", 4_000_000))}
     if operator == "learned_waveform":
         return {"bins": int(settings.get("waveform_bins", 31)),
                 "condition_limit": float(settings.get("waveform_condition_limit", 1e4)),
@@ -170,6 +182,11 @@ class ModelConfig:
     waveform_lr_ratio: float = 0.1
     waveform_init: str = "random"
     waveform_transform: str = "tied"
+    frequency_mixing_backend: str = "factorized"
+    frequency_mixing_rank: int = 32
+    frequency_mixing_hidden_dim: int = 64
+    frequency_mixing_chunk_size: int = 1024
+    frequency_mixing_dense_limit: int = 4_000_000
     grid_embedding: bool = False
     whno_ordering: str = "sequency"
     cnn_depth: int = 3
@@ -271,6 +288,8 @@ class ModelConfig:
         from learned_waveform_operator import validate_waveform_init, validate_waveform_transform
         validate_waveform_init(self.waveform_init)
         validate_waveform_transform(self.waveform_transform)
+        from spectral_mixing_operator import validate_mixing_options
+        validate_mixing_options(**self._slot_kwargs("frequency_mixing"))
         if self.cnn_depth <= 0:
             raise ValueError("cnn_depth must be positive")
         if self.cnn_kernel_size <= 0 or not self.cnn_kernel_size % 2:
@@ -319,6 +338,11 @@ class ModelConfig:
         return slot_hyperparameters(
             operator,
             {
+                "frequency_mixing_backend": self.frequency_mixing_backend,
+                "frequency_mixing_rank": self.frequency_mixing_rank,
+                "frequency_mixing_hidden_dim": self.frequency_mixing_hidden_dim,
+                "frequency_mixing_chunk_size": self.frequency_mixing_chunk_size,
+                "frequency_mixing_dense_limit": self.frequency_mixing_dense_limit,
                 "waveform_bins": self.waveform_local_bins if local else self.waveform_global_bins,
                 "waveform_condition_limit": self.waveform_condition_limit,
                 "waveform_init": self.waveform_init,
@@ -484,6 +508,11 @@ class ModelConfig:
             "waveform_lr_ratio": self.waveform_lr_ratio,
             "waveform_init": self.waveform_init,
             "waveform_transform": self.waveform_transform,
+            "frequency_mixing_backend": self.frequency_mixing_backend,
+            "frequency_mixing_rank": self.frequency_mixing_rank,
+            "frequency_mixing_hidden_dim": self.frequency_mixing_hidden_dim,
+            "frequency_mixing_chunk_size": self.frequency_mixing_chunk_size,
+            "frequency_mixing_dense_limit": self.frequency_mixing_dense_limit,
             "grid_embedding": self.grid_embedding,
             "whno_ordering": self.whno_ordering,
             "cnn_depth": self.cnn_depth,
@@ -531,7 +560,8 @@ class ModelConfig:
         """Architecture folder name: operator pair for localop, else the kind."""
         tags = {"fourier": "fno", "wavelet": "wno", "hadamard": "whno",
                 "siren_hadamard": "swhno", "siren_fourier": "sfno",
-                "cnn": "cnn", "learned_waveform": "lwf", "identity": "id"}
+                "cnn": "cnn", "learned_waveform": "lwf", "identity": "id",
+                "frequency_mixing": "fmix"}
         if self.kind == "localop" and self.local_operator and self.global_operator:
             return (f"{tags.get(self.local_operator, self.local_operator)}_"
                     f"{tags.get(self.global_operator, self.global_operator)}")
@@ -601,6 +631,11 @@ class ModelConfig:
                 f" waveform-init={self.waveform_init} transform={self.waveform_transform} mixing=real-phase-blocks"
                 if "learned_waveform" in slots else ""
             )
+            frequency_mixing = (
+                f" mixing={self.frequency_mixing_backend}/rank{self.frequency_mixing_rank}"
+                f" generator-width={self.frequency_mixing_hidden_dim}"
+                if "frequency_mixing" in slots else ""
+            )
             # Only operators that truncate modes report them.
             local_modes = (
                 f"local-modes={self.localfno_modes} "
@@ -619,7 +654,7 @@ class ModelConfig:
                 f"{4 * self.localfno_base_width} "
                 f"rank={self.localfno_spectral_rank} "
                 f"chunk={self.localfno_patch_chunk_size}"
-                f"{siren}{wavelet}{walsh}{cnn}{waveform}{windowed} "
+                f"{siren}{wavelet}{walsh}{cnn}{waveform}{frequency_mixing}{windowed} "
                 "sigmoid-output"
             )
         residual = "+global_residual" if self.ufno_global_residual else ""
@@ -823,6 +858,15 @@ def load_checkpoint(
 
     transform, state_dict = max(candidates, key=lambda item: match_count(item[1]))
     matched = match_count(state_dict)
+    from spectral_mixing_operator import FrequencyMixingOperator
+    if any(isinstance(module, FrequencyMixingOperator) for module in model.modules()):
+        # Old Fourier checkpoints otherwise partially match the shell and
+        # silently leave the new multiplier random. Migration is explicit.
+        if (set(state_dict) != set(target) or matched != len(target)):
+            raise ValueError(
+                "frequency_mixing checkpoint must match the complete model; "
+                "convert legacy Fourier weights with util.frequency_mixing_checkpoint first"
+            )
     if matched == 0:
         raw_key = next(iter(raw), "<empty>")
         target_key = next(iter(target), "<empty>")

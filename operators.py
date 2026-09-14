@@ -22,6 +22,9 @@ registry entry so either slot can host any of:
 ``learned_waveform``
     Random learned bin tables, anti-aliased dilation, and orthonormal real QR
     transforms with per-mode channel mixing.
+``frequency_mixing``
+    Fixed Fourier transforms, the signed-quadrant multiplier, and a
+    coordinate-generated low-rank cross-frequency residual.
 
 Every operator maps ``(B, C, *spatial) -> (B, C, *spatial)``. What differs is
 declared on :class:`OperatorSpec`: whether the enclosing block should wrap it in
@@ -616,6 +619,17 @@ def _build_learned_waveform(channels, ndim, modes, hyperparameters):
     return LearnedWaveformOperator(channels, ndim, modes, **hyperparameters)
 
 
+def _build_frequency_mixing(channels, ndim, modes, hyperparameters):
+    from spectral_mixing_operator import FrequencyMixingOperator
+    return FrequencyMixingOperator(channels, ndim, modes, **hyperparameters)
+
+
+def _validate_frequency_mixing(sizes, modes, hyperparameters, *, context):
+    from spectral_mixing_operator import validate_mixing_options, validate_mixing_shape
+    validate_mixing_options(**hyperparameters)
+    validate_mixing_shape(sizes, modes, context=context)
+
+
 def _validate_learned_waveform(sizes, modes, hyperparameters, *, context):
     from learned_waveform_operator import validate_waveform_shape, validate_waveform_init, validate_waveform_transform
 
@@ -683,6 +697,12 @@ def _validate_cnn(sizes, modes, hyperparameters, *, context):
 
 
 OPERATORS: dict[str, OperatorSpec] = {
+    "frequency_mixing": OperatorSpec(
+        name="frequency_mixing", build=_build_frequency_mixing,
+        defaults={"backend": "factorized", "mixing_rank": 32, "hidden_dim": 64,
+                  "chunk_size": 1024, "dense_limit": 4_000_000},
+        uses_modes=True, validate=_validate_frequency_mixing,
+    ),
     "identity": OperatorSpec(
         name="identity",
         build=_build_identity,

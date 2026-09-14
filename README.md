@@ -30,6 +30,7 @@ Two pipelines live side by side:
 ├── models_zre_2d.py               # its 2-D twins
 ├── models_ufno.py, ufno.py        # U-FNO baseline
 ├── siren.py, wavelet_operator.py  # operator building blocks
+├── spectral_mixing_operator.py   # fixed Fourier + cross-frequency residual
 ├── losses.py, contrast.py         # objectives and the output contrast map
 ├── dataset/                       # readers, datasets, cache builders
 ├── viz/                           # prediction plots and metric evaluation
@@ -63,6 +64,10 @@ mean the same thing in all three. A 2-D run reads `*_X`/`*_Y` and ignores
 MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=cnn python fno_21cm_3d.py
 MODEL_KIND=localop LOCAL_OPERATOR=hadamard GLOBAL_OPERATOR=cnn python fno_xhi2d.py
 ```
+
+`GLOBAL_OPERATOR=frequency_mixing` adds coordinate-generated interactions
+between fixed Fourier coefficients. See [frequency mixing](notes/frequency-mixing.md)
+for configuration, mode conventions, checkpoint migration, and diagnostics.
 
 Everything under `legacy/` is out of the active path but still importable, so
 checkpoints trained before the cleanup remain loadable; `build_model`

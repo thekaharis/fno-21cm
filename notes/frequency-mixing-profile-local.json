@@ -1,0 +1,26 @@
+{
+  "shape": [
+    16,
+    16,
+    32
+  ],
+  "modes": [
+    6,
+    6,
+    12
+  ],
+  "channels": 16,
+  "batch_size": 32,
+  "rank": 32,
+  "baseline": false,
+  "device": "cpu",
+  "torch_version": "2.9.1",
+  "parameters": 961280,
+  "step_seconds": [
+    1.2762692089891061,
+    1.0369115830399096
+  ],
+  "mean_step_seconds": 1.1565903960145079,
+  "cpu_process_peak_rss_mib": 606.109375,
+  "cuda_peak_allocated_mib": null
+}

@@ -437,7 +437,7 @@ class QuadrantSpectralConv2d(nn.Module):
         out_ft[:, :, -mx:, :my] = self._contract(
             x_ft[:, :, -mx:, :my], self.weights2
         )
-        return torch.fft.irfft2(out_ft, s=(nx, ny))
+        return torch.fft.irfft2(out_ft, s=(nx, ny)).to(x.dtype)
 
 
 class QuadrantSpectralConv2dSiren(nn.Module):

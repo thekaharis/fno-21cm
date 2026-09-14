@@ -97,6 +97,19 @@ def test_visualization_launcher_preserves_argument_boundaries(cluster_stubs):
                     "--input-shape", "140", "140", "256", "--out-dir", "figures/my waveforms"]
 
 
+@pytest.mark.parametrize("arch,local", [("fno_fmix", "fourier"), ("fmix_fmix", "frequency_mixing")])
+def test_frequency_mixing_runner_selects_slots_and_preserves_rank(cluster_stubs, arch, local):
+    project, env = cluster_stubs
+    env.update(ARCH=arch, LOSS="plain", FREQUENCY_MIXING_RANK="7")
+    result = subprocess.run(["bash", str(project / "slurm/train_3d_matrix.sbatch")],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    settings = json.loads(Path(env["CAPTURE_PATH"]).read_text().splitlines()[-1])["env"]
+    assert settings["LOCAL_OPERATOR"] == local
+    assert settings["GLOBAL_OPERATOR"] == "frequency_mixing"
+    assert settings["FREQUENCY_MIXING_RANK"] == "7"
+
+
 @pytest.mark.parametrize("script", ["train_2d_xhi_waveform.sbatch", "train_3d_waveform.sbatch", "train_zre_waveform.sbatch"])
 def test_separate_default_checkpoint_directory_avoids_tied_runs(cluster_stubs, script):
     project, env = cluster_stubs
