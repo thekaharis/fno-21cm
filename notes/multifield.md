@@ -1,5 +1,8 @@
 # Modular 21cmFAST field experiments
 
+For the actual dataset inventory, unit evidence and pilot configuration discussed
+with Claude, see [Initial multi-field data configuration](multifield-data-configuration.md).
+
 The first implementation supports arbitrary **disjoint sets of registered,
 aligned scalar 3-D fields**, with a fixed backbone architecture and fresh weights
 for each mapping. It does not freeze a density → x_HI checkpoint. Every selected
@@ -61,7 +64,7 @@ fields):
 ```bash
 python fno_multifield.py cache --data "$RAW_LIGHTCONES" \
   --fields density,neutral_fraction,brightness_temp,los_velocity \
-  --z-min 5 --z-max 25 --n-z 256 --out "$MULTIFIELD_CACHE"
+  --z-min 5.001 --z-max 24.97 --n-z 256 --out "$MULTIFIELD_CACHE"
 ```
 
 Select a redshift range covered by **every** cone, or pass an increasing `.npy`
@@ -91,6 +94,13 @@ but is not automatically equal in gradient magnitude across fields. For a study
 that standardizes density too, set its registry normalization to `standard` and
 prepare a new study. Constant fields use scale 1. Raw training means/stds are
 also saved for baseline evaluation.
+
+Small native values are not treated as constant: any positive training standard
+deviation is retained, including velocity scales around `1e-16`. Only an exactly
+zero standard deviation uses scale 1. Correlations, normalized errors and spectral
+ratios are accumulated in normalized coordinates, then dimensional error metrics
+are converted back to source units. This keeps evaluation invariant to a change
+of velocity units.
 
 Conditioning is `none`, `z`, `params`, or `z_params` (default). It is fixed by the
 preparation artifact. Source paths, sizes, modification times, grids and IDs are
