@@ -3,6 +3,10 @@
 For the actual dataset inventory, unit evidence and pilot configuration discussed
 with Claude, see [Initial multi-field data configuration](multifield-data-configuration.md).
 
+For native-resolution contiguous LOS windows and fine windows with coarse
+surrounding inputs, see [Native LOS window training](los-window-sampling.md).
+Both use this entry point and support the same disjoint field mappings.
+
 The first implementation supports arbitrary **disjoint sets of registered,
 aligned scalar 3-D fields**, with a fixed backbone architecture and fresh weights
 for each mapping. It does not freeze a density → x_HI checkpoint. Every selected

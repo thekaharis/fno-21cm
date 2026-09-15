@@ -1,0 +1,9 @@
+{
+  "mode": "coarse_context",
+  "size": 256,
+  "halo": 32,
+  "windows_per_cone": 8,
+  "context_factor": 4,
+  "context_xy": 4,
+  "context_features": 8
+}

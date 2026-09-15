@@ -25,6 +25,22 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
+def sampling_argv(settings):
+    flags = {"size": "window-size", "halo": "window-halo", "windows_per_cone": "windows-per-cone",
+             "context_factor": "context-factor", "context_xy": "context-xy",
+             "context_features": "context-features"}
+    if set(settings) - (set(flags) | {"mode"}):
+        raise ValueError("unknown sampling configuration option")
+    mode = settings.get("mode", "full")
+    if mode not in {"full", "contiguous", "coarse_context"}:
+        raise ValueError("invalid sampling mode")
+    result = ["--sampling", mode]
+    for name, flag in flags.items():
+        if name in settings:
+            result.extend(("--"+flag, str(settings[name])))
+    return result
+
+
 def plan(args):
     out = Path(args.out).resolve()
     if out.exists():
@@ -42,6 +58,11 @@ def plan(args):
     if args.epochs < 1 or args.batch_size < 1 or args.workers < 0:
         raise ValueError("invalid run budget")
     settings = read_json(args.model_config) if args.model_config else {"kind": "localop", "ndim": 3}
+    sampling = (read_json(args.sampling_config) if getattr(args, "sampling_config", None)
+                else {"mode": "full"})
+    sampling_flags = sampling_argv(sampling)
+    if (prep["source"]["kind"] == "native") != (sampling.get("mode", "full") != "full"):
+        raise ValueError("native preparation and window sampling must be used together")
     run_root = Path(args.run_root).resolve() if args.run_root else out.parent / "runs"
     entries = []
     preparation_digest = hashlib.sha256(preparation_path.read_bytes()).hexdigest()
@@ -49,14 +70,15 @@ def plan(args):
         for seed in seeds:
             parameters = {"mapping": mapping.to_dict(), "seed": seed,
                           "epochs": args.epochs, "batch_size": args.batch_size, "workers": args.workers,
-                          "model_settings": settings, "preparation_sha256": preparation_digest}
+                          "model_settings": settings, "sampling": sampling,
+                          "preparation_sha256": preparation_digest}
             digest = hashlib.sha256(json.dumps(parameters, sort_keys=True).encode()).hexdigest()[:12]
             run_dir = run_root / mapping.slug / f"seed{seed}_{digest}"
             argv = [str(PROJECT / "fno_multifield.py"), "train", "--preparation", str(preparation_path),
                     "--inputs", ",".join(mapping.inputs), "--targets", ",".join(mapping.targets),
                     "--run-dir", str(run_dir), "--seed", str(seed), "--epochs", str(args.epochs),
                     "--batch-size", str(args.batch_size), "--workers", str(args.workers),
-                    "--model-settings", json.dumps(settings, sort_keys=True)]
+                    "--model-settings", json.dumps(settings, sort_keys=True), *sampling_flags]
             entries.append({"index": len(entries), **parameters, "run_dir": str(run_dir), "argv": argv})
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"schema_version": 1, "stage": args.stage,
@@ -91,7 +113,7 @@ def run(args):
                "--epochs", str(entry["epochs"]), "--batch-size", str(entry["batch_size"]),
                "--model-settings", json.dumps(entry["model_settings"]),
                "--workers", str(entry["workers"] if args.workers is None else args.workers),
-               "--device", args.device]
+               "--device", args.device, *sampling_argv(entry.get("sampling", {"mode": "full"}))]
     subprocess.run(command, cwd=PROJECT, check=True)
 
 
@@ -105,6 +127,7 @@ def comparison_key(metadata, target):
     return json.dumps({"inputs": metadata["mapping"]["inputs"], "target": target,
                        "conditioning": metadata["mapping"]["conditioning"],
                        "model_config": metadata["model_config"], "training": recipe,
+                       "sampling": metadata.get("sampling", {"mode": "full"}),
                        "preparation": metadata["preparation"]}, sort_keys=True)
 
 
@@ -129,6 +152,7 @@ def summarize(args):
         baseline = baselines.get(comparison_key(meta, target))
         row = {"inputs": ",".join(meta["mapping"]["inputs"]),
                "targets": ",".join(meta["mapping"]["targets"]), "field": target,
+               "sampling": json.dumps(meta.get("sampling", {"mode": "full"}), sort_keys=True),
                "seed": meta["training"]["seed"], "run_dir": root,
                **{key: value for key, value in metrics.items() if not isinstance(value, dict)}}
         row["auxiliary_mse_gain"] = (1 - metrics["normalized_mse"]/baseline
@@ -145,10 +169,10 @@ def summarize(args):
             writer.writerows(rows)
         groups = {}
         for row in rows:
-            groups.setdefault((row["inputs"], row["targets"], row["field"]), []).append(row)
+            groups.setdefault((row["inputs"], row["targets"], row["field"], row["sampling"]), []).append(row)
         with (out / "aggregate.csv").open("w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["inputs", "targets", "field", "n_seeds", "mean_normalized_mse",
+            writer.writerow(["inputs", "targets", "field", "sampling", "n_seeds", "mean_normalized_mse",
                              "std_normalized_mse", "n_paired_seeds", "mean_auxiliary_mse_gain"])
             for key, group in groups.items():
                 errors = [r["normalized_mse"] for r in group]
@@ -173,6 +197,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--model-config")
+    p.add_argument("--sampling-config", help="JSON window configuration (mode, size, halo, etc.)")
     p.add_argument("--run-root")
     p.add_argument("--out", required=True)
     p.set_defaults(function=plan)

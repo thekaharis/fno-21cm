@@ -23,6 +23,8 @@ from torch.utils.data import DataLoader, Subset
 from dataset.fields import FOUR_FIELDS, FieldMapping, FieldRegistry
 from dataset.lightcone_params import PARAM_NAMES
 from dataset.multifield import MultiFieldDataset
+from dataset.los_windows import (LOSWindowConfig, LOSWindowDataset, NativeLightconeDataset,
+                                 predict_native_cone)
 from modeling import ModelConfig
 from multifield_model import MultiFieldModel, weighted_objective
 from util.multifield_metrics import FieldMetrics
@@ -40,11 +42,19 @@ def read_json(path):
 
 
 def source_dataset(args, mapping, registry):
+    if getattr(args, "native_los", False):
+        if args.cache or args.target_z or any(getattr(args, key, None) is not None
+                                              for key in ("n_z", "z_min", "z_max")):
+            raise ValueError("--native-los uses full raw --data coverage; omit cache, target grid and z-range/resolution options")
+        return NativeLightconeDataset(mapping, files=sorted(Path(args.data).glob(args.glob)),
+                                      registry=registry)
     if args.cache:
         return MultiFieldDataset(mapping, cache=args.cache, registry=registry)
     files = sorted(Path(args.data).glob(args.glob))
     grid = (np.load(args.target_z) if args.target_z else
-            np.linspace(args.z_min, args.z_max, args.n_z))
+            np.linspace(args.z_min if args.z_min is not None else 5.0,
+                        args.z_max if args.z_max is not None else 25.0,
+                        args.n_z if args.n_z is not None else 256))
     return MultiFieldDataset(mapping, files=files, target_z=grid, registry=registry)
 
 
@@ -52,9 +62,12 @@ def prepared_dataset(preparation, mapping):
     source = preparation["source"]
     registry = FieldRegistry.from_dict(preparation["registry"])
     paths = [v["path"] for v in source["files"]]
-    kwargs = ({"cache": paths[0]} if source["kind"] == "cache" else
-              {"files": paths, "target_z": source["target_z"]})
-    dataset = MultiFieldDataset(mapping, registry=registry, **kwargs)
+    if source["kind"] == "native":
+        dataset = NativeLightconeDataset(mapping, files=paths, registry=registry)
+    else:
+        kwargs = ({"cache": paths[0]} if source["kind"] == "cache" else
+                  {"files": paths, "target_z": source["target_z"]})
+        dataset = MultiFieldDataset(mapping, registry=registry, **kwargs)
     rows = dataset.install_preparation(preparation)
     return dataset, rows, registry
 
@@ -126,6 +139,41 @@ def loader(dataset, rows, batch_size, workers, *, seed=0, shuffle=False):
                       num_workers=workers, generator=torch.Generator().manual_seed(seed))
 
 
+def window_configuration(args, dataset):
+    mode = getattr(args, "sampling", "full")
+    native = isinstance(dataset, NativeLightconeDataset)
+    if mode == "full":
+        if native:
+            raise ValueError("native preparation requires --sampling contiguous or coarse_context")
+        return None
+    if not native:
+        raise ValueError("window sampling requires preparation made with --native-los from raw data")
+    return LOSWindowConfig(mode=mode, size=args.window_size, halo=args.window_halo,
+        windows_per_cone=args.windows_per_cone, context_factor=args.context_factor,
+        context_xy=args.context_xy, context_features=args.context_features)
+
+
+@torch.no_grad()
+def evaluate_rows(model, dataset, rows, device, batch_size, workers, spectral_bins=0,
+                  window_config=None):
+    if window_config is None:
+        return evaluate_model(model, loader(dataset, rows, batch_size, workers),
+                              dataset, device, spectral_bins)
+    metrics = FieldMetrics(dataset.mapping.targets, dataset.normalization, spectral_bins)
+    for row in rows:
+        prediction = predict_native_cone(model, dataset, row, window_config, device)
+        n = len(dataset.redshifts[row])
+        # CPU accumulation in slabs avoids a second full-cone float64 allocation.
+        for start in range(0, n, window_config.core):
+            stop = min(start+window_config.core, n)
+            fields = dataset.read_fields(row, start, stop, dataset.mapping.targets)
+            target = torch.from_numpy(np.stack([
+                (fields[name]-dataset.normalization[name]["offset"])/dataset.normalization[name]["scale"]
+                for name in dataset.mapping.targets]))
+            metrics.update(prediction[None, ..., start:stop], target[None])
+    return metrics.result()
+
+
 @torch.no_grad()
 def evaluate_model(model, batches, dataset, device, spectral_bins=0):
     model.eval()
@@ -157,6 +205,7 @@ def train(args):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(args.inputs, args.targets, preparation["conditioning"], registry)
     dataset, rows, registry = prepared_dataset(preparation, mapping)
+    window_config = window_configuration(args, dataset)
     config = ModelConfig.from_dict(json.loads(args.model_settings))
     if config.ndim != 3:
         raise ValueError("multi-field lightcone training requires a 3-D model")
@@ -175,7 +224,7 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
     torch.use_deterministic_algorithms(args.deterministic)
     device = choose_device(args.device)
-    model = MultiFieldModel(config, dataset.in_channels, mapping, registry).to(device)
+    model = MultiFieldModel(config, dataset.in_channels, mapping, registry, window_config).to(device)
     weights_tensor = torch.tensor(weights, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -188,6 +237,7 @@ def train(args):
     metadata = {
         "schema_version": 1, "mapping": mapping.to_dict(), "model_config": config.to_dict(),
         "preparation": preparation, "input_channels": list(dataset.channel_names),
+        "sampling": window_config.to_dict() if window_config else {"mode": "full"},
         "training": {"epochs": args.epochs, "seed": args.seed, "batch_size": args.batch_size,
                      "learning_rate": args.lr, "weight_decay": args.weight_decay,
                      "grad_clip": args.grad_clip, "deterministic": args.deterministic,
@@ -204,19 +254,26 @@ def train(args):
         started = True
         print(f"Mapping: {mapping.slug}; device={device}; parameters={metadata['parameter_count']:,}; "
               f"train/val/test={len(rows['train'])}/{len(rows['val'])}/{len(rows['test'])}", flush=True)
-        train_loader = loader(dataset, rows["train"], args.batch_size, args.workers,
-                              seed=args.seed, shuffle=True)
-        val_loader = loader(dataset, rows["val"], args.batch_size, args.workers)
+        if window_config:
+            train_windows = LOSWindowDataset(dataset, rows["train"], window_config, args.seed)
+            train_loader = DataLoader(train_windows, batch_size=args.batch_size, shuffle=True,
+                num_workers=args.workers, generator=torch.Generator().manual_seed(args.seed))
+        else:
+            train_loader = loader(dataset, rows["train"], args.batch_size, args.workers,
+                                  seed=args.seed, shuffle=True)
         best = float("inf")
         start = time.monotonic()
         for epoch in range(args.epochs):
+            if window_config:
+                train_windows.set_epoch(epoch)
             model.train()
             total, samples = 0.0, 0
             for batch_index, batch in enumerate(train_loader):
                 x, y = batch["x"].to(device), batch["y"].to(device)
                 optimizer.zero_grad(set_to_none=True)
-                prediction = model(x)
-                loss = weighted_objective(prediction, y, weights_tensor)
+                kwargs = ({"context": batch["context"].to(device)} if "context" in batch else {})
+                prediction = model(x, **kwargs)
+                loss = weighted_objective(prediction, y, weights_tensor, batch.get("loss_mask"))
                 if not torch.isfinite(loss):
                     raise FloatingPointError("nonfinite training loss")
                 loss.backward()
@@ -228,7 +285,8 @@ def train(args):
                 if (batch_index + 1) % 25 == 0:
                     print(f"Epoch {epoch+1}, batch {batch_index+1}/{len(train_loader)}: "
                           f"loss={total/samples:.6g}", flush=True)
-            validation = evaluate_model(model, val_loader, dataset, device)
+            validation = evaluate_rows(model, dataset, rows["val"], device, args.batch_size,
+                                       args.workers, window_config=window_config)
             score = (sum(validation[n]["normalized_mse"] * w for n, w in zip(mapping.targets, weights))
                      / sum(weights) if args.monitor == "mean"
                      else validation[args.monitor]["normalized_mse"])
@@ -246,8 +304,8 @@ def train(args):
         save_checkpoint(out / "final.pt", model, metadata, args.epochs-1)
         checkpoint = torch.load(out / "best.pt", map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model"])
-        test = evaluate_model(model, loader(dataset, rows["test"], args.batch_size, args.workers),
-                              dataset, device, args.spectral_bins)
+        test = evaluate_rows(model, dataset, rows["test"], device, args.batch_size, args.workers,
+                             args.spectral_bins, window_config)
         write_json(out / "test_metrics.json", {"checkpoint": "best.pt", "epoch": checkpoint["epoch"],
                     "split": "test", "fields": test})
         metadata.update(status="complete", best_epoch=checkpoint["epoch"],
@@ -273,8 +331,10 @@ def restore(path, device):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(**metadata["mapping"], registry=registry)
     dataset, rows, _ = prepared_dataset(preparation, mapping)
+    sampling = metadata.get("sampling", {"mode": "full"})
+    window_config = None if sampling["mode"] == "full" else LOSWindowConfig(**sampling)
     model = MultiFieldModel(ModelConfig.from_dict(metadata["model_config"]),
-                            dataset.in_channels, mapping, registry).to(device)
+                            dataset.in_channels, mapping, registry, window_config).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     return checkpoint, model, dataset, rows
@@ -287,8 +347,10 @@ def evaluate(args):
     device = choose_device(args.device)
     checkpoint, model, dataset, rows = restore(args.checkpoint, device)
     try:
-        values = evaluate_model(model, loader(dataset, rows[args.split], args.batch_size, args.workers),
-                                dataset, device, args.spectral_bins)
+        sampling = checkpoint["metadata"].get("sampling", {"mode": "full"})
+        window_config = None if sampling["mode"] == "full" else LOSWindowConfig(**sampling)
+        values = evaluate_rows(model, dataset, rows[args.split], device, args.batch_size, args.workers,
+                               args.spectral_bins, window_config)
         out.parent.mkdir(parents=True, exist_ok=True)
         write_json(out, {"checkpoint": str(args.checkpoint), "epoch": checkpoint["epoch"],
                          "split": args.split, "fields": values})
@@ -307,17 +369,33 @@ def predict(args):
         matches = np.flatnonzero(dataset.cone_ids == args.cone_id)
         if not len(matches):
             raise ValueError("cone ID is absent from the prepared data")
-        sample = dataset[int(matches[0])]
-        prediction = model(sample["x"][None].to(device))[0].cpu().numpy()
+        row = int(matches[0])
+        if isinstance(dataset, NativeLightconeDataset):
+            config = LOSWindowConfig(**checkpoint["metadata"]["sampling"])
+            prediction = predict_native_cone(model, dataset, row, config, device).numpy()
+            fields = dataset.read_fields(row, names=dataset.mapping.targets)
+            target = np.stack([(fields[name]-dataset.normalization[name]["offset"])
+                               / dataset.normalization[name]["scale"] for name in dataset.mapping.targets])
+            target_z = dataset.redshifts[row]
+        else:
+            sample = dataset[row]
+            prediction = model(sample["x"][None].to(device))[0].cpu().numpy()
+            target = sample["y"].numpy()
+            target_z = dataset.target_z
         out.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(out, "x") as f:
-            f.create_dataset("target_z", data=dataset.target_z)
+            f.create_dataset("target_z", data=target_z)
+            if isinstance(dataset, NativeLightconeDataset):
+                distances = f.create_dataset("lightcone_distances", data=dataset.distances[row])
+                distances.attrs["units"] = "comoving Mpc"
+                f.attrs["axis_order"] = "increasing_redshift"
+            f.attrs["sampling"] = json.dumps(checkpoint["metadata"].get("sampling", {"mode": "full"}))
             f.attrs["cone_id"] = args.cone_id
             f.attrs["mapping"] = json.dumps(dataset.mapping.to_dict())
             f.attrs["checkpoint"] = str(Path(args.checkpoint).resolve())
             for i, name in enumerate(dataset.mapping.targets):
                 stats = dataset.normalization[name]
-                for group, value in (("prediction", prediction[i]), ("target", sample["y"][i].numpy())):
+                for group, value in (("prediction", prediction[i]), ("target", target[i])):
                     d = f.create_dataset(f"{group}/{name}",
                         data=value*stats["scale"]+stats["offset"], compression="gzip")
                     d.attrs["units"] = dataset.registry[name].units
@@ -335,14 +413,17 @@ def main():
         source.add_argument("--data")
         p.add_argument("--glob", default="21cmfast_11d_sample*.h5")
         p.add_argument("--target-z", help="optional increasing redshift grid (.npy)")
-        p.add_argument("--n-z", type=int, default=256)
-        p.add_argument("--z-min", type=float, default=5.0)
-        p.add_argument("--z-max", type=float, default=25.0)
+        p.add_argument("--n-z", type=int, default=None if name == "prepare" else 256,
+                       help="resampled LOS size (default 256); incompatible with --native-los")
+        p.add_argument("--z-min", type=float, default=None if name == "prepare" else 5.0)
+        p.add_argument("--z-max", type=float, default=None if name == "prepare" else 25.0)
         p.add_argument("--fields", default=",".join(FOUR_FIELDS))
         p.add_argument("--conditioning", choices=("none", "z", "params", "z_params"), default="z_params")
         p.add_argument("--registry", help="optional complete field-registry JSON")
         p.add_argument("--out", required=True)
         if name == "prepare":
+            p.add_argument("--native-los", action="store_true",
+                           help="preserve all native LOS cells for contiguous/coarse_context training; uses full source coverage")
             p.add_argument("--split-seed", type=int, default=42)
             p.add_argument("--val-fraction", type=float, default=0.1)
             p.add_argument("--test-fraction", type=float, default=0.1)
@@ -362,6 +443,13 @@ def main():
     p.add_argument("--loss-weights", default="{}", help='canonical field-name to positive weight JSON')
     p.add_argument("--monitor", default="mean")
     p.add_argument("--deterministic", action="store_true")
+    p.add_argument("--sampling", choices=("full", "contiguous", "coarse_context"), default="full")
+    p.add_argument("--window-size", type=int, default=256, help="native slices including both halos")
+    p.add_argument("--window-halo", type=int, default=32, help="context slices excluded from loss on each side")
+    p.add_argument("--windows-per-cone", type=int, default=8, help="random draws per training cone per epoch")
+    p.add_argument("--context-factor", type=int, default=4, help="surrounding LOS extent and LOS pooling factor")
+    p.add_argument("--context-xy", type=int, default=4, help="transverse box-pooling factor; must divide native X/Y")
+    p.add_argument("--context-features", type=int, default=8, help="features per coarse encoder branch")
     p.set_defaults(function=train)
     p = commands.add_parser("evaluate")
     p.add_argument("--checkpoint", required=True)

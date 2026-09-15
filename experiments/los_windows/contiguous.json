@@ -1,0 +1,6 @@
+{
+  "mode": "contiguous",
+  "size": 256,
+  "halo": 32,
+  "windows_per_cone": 8
+}

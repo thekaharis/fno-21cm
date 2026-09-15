@@ -182,6 +182,10 @@ class MultiFieldDataset(Dataset):
         payload = json.dumps(self.source_description(), sort_keys=True).encode()
         return hashlib.sha256(payload).hexdigest()
 
+    def iter_field_blocks(self, idx):
+        """Yield physical blocks for streaming training-only statistics."""
+        yield self.read_fields(idx)
+
     def prepare(self, split_seed=42, val_fraction=0.1, test_fraction=0.1, progress=None):
         if len(self) < 3 or not (0 < val_fraction < 1 and 0 < test_fraction < 1
                                 and val_fraction + test_fraction < 1):
@@ -198,14 +202,15 @@ class MultiFieldDataset(Dataset):
         # Streaming parallel-variance merge avoids catastrophic cancellation.
         moments = {f: [0, 0.0, 0.0] for f in self.mapping.fields}
         for index, row in enumerate(train_rows):
-            for name, values in self.read_fields(row).items():
-                values = values.astype(np.float64)
-                count, mean, m2 = moments[name]
-                n = values.size
-                batch_mean = float(values.mean())
-                delta = batch_mean - mean
-                moments[name] = [count + n, mean + delta * n / (count + n),
-                                 m2 + float(values.var()) * n + delta**2 * count * n / (count + n)]
+            for block in self.iter_field_blocks(row):
+                for name, values in block.items():
+                    values = values.astype(np.float64)
+                    count, mean, m2 = moments[name]
+                    n = values.size
+                    batch_mean = float(values.mean())
+                    delta = batch_mean - mean
+                    moments[name] = [count + n, mean + delta * n / (count + n),
+                                     m2 + float(values.var()) * n + delta**2 * count * n / (count + n)]
             if progress is not None and (index % 25 == 0 or index + 1 == len(train_rows)):
                 progress(index + 1, len(train_rows))
         stats = {}

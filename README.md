@@ -9,6 +9,10 @@ adds configurable, disjoint input/target field sets for 3-D lightcones, common
 train-only normalization, per-field evaluation and staged mapping sweeps.
 Use `fno_multifield.py`; the existing entry points keep their defaults.
 
+**Native LOS sampling:** [window training](notes/los-window-sampling.md) preserves
+contiguous native cells, with an optional coarse surrounding-input encoder.
+Both modes support full native-cone evaluation and export.
+
 Two original pipelines live side by side:
 
 - **v2 — 2-D, per-slice.** Takes one matter-density slice (140 × 140,
