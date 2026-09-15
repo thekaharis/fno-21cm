@@ -31,3 +31,34 @@ env/
 
 # --- OS / editor -------------------------------------------------------------
 .DS_Store
+
+# --- Additions 2026-09-15: close the gaps that .gitignore did not cover ------
+# checkpoint-archive/ (45 GB) was only excluded via .git/info/exclude, which is
+# local to this clone and invisible to anyone else who clones the repo.
+checkpoint-archive/
+checkpoints*/
+
+# Slurm job logs: regenerable, high churn, and they leak absolute cluster paths.
+logs/
+*.out
+*.err
+!slurm/*.sbatch
+
+# Any stray heavy artifact, wherever it lands. Model weights, caches and array
+# dumps are all regenerable from code + raw data; none belong in git.
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+
+# Temporary staging views built for cache/pilot builds (symlink farms).
+**/_pilot_stage/
+**/_multifield_stage/
+**/_eval_snapshot*/
+
+# Dashboard runtime state (per-user, not project configuration).
+dashboard/serve-*.log
+dashboard/__pycache__/

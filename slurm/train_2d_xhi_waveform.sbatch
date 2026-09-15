@@ -1,6 +1,6 @@
 #!/bin/bash
 # Submit from the project root after mkdir -p logs.
-# sbatch --export=ALL,N_EPOCHS=20,BATCH_SIZE=8 slurm/train_2d_xhi_waveform.sbatch
+# sbatch --export=ALL,N_EPOCHS=50,BATCH_SIZE=8 slurm/train_2d_xhi_waveform.sbatch
 # Existing 2-D data/environment setup; both operator slots are learned waveforms.
 #SBATCH --job-name=waveform-xhi2d
 #SBATCH --partition=gpu
