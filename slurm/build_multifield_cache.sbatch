@@ -29,7 +29,12 @@ set -eo pipefail
 PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$PROJECT_ROOT"
 
-RAW_LIGHTCONES="${RAW_LIGHTCONES:-/pfs/10/work/hd_id260-fno_training/data/data}"
+# Staged view of the raw lightcones excluding the 33 simulations whose
+# brightness_temp contains non-finite voxels (242 voxels total; every other
+# field is clean in all 6600). IDs: experiments/multifield/nonfinite_report.json,
+# produced by slurm/scan_nonfinite.sbatch. The reader refuses non-finite cubes,
+# so these must be excluded before the build rather than hit 10 minutes into it.
+RAW_LIGHTCONES="${RAW_LIGHTCONES:-/pfs/10/work/hd_id260-fno_training/data/_multifield_stage}"
 MULTIFIELD_CACHE="${MULTIFIELD_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compressed/multifield_z256.h5}"
 FIELDS="${FIELDS:-density,neutral_fraction,brightness_temp,los_velocity}"
 N_Z="${N_Z:-256}"

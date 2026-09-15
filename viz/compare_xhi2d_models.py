@@ -118,15 +118,21 @@ def load_run(label: str, path: Path) -> Run | None:
     return Run(label, path, metadata, report)
 
 
-def build_model(config: dict) -> TrainerModel:
+def build_model(config: dict, metadata: dict | None = None) -> TrainerModel:
     """Rebuild a trained 2-D model from its recorded ``model_config``.
 
     Delegates to the one factory; ``ModelConfig.from_dict`` absorbs the older
     per-task metadata shapes, so runs predating the unified config still load.
     """
-    inner = build_model_from_config(
-        ModelConfig.from_dict(config), int(config["in_channels"])
-    )
+    # Runs since the unified config record in_channels under input_features
+    # instead of model_config; reading only the old location raises KeyError on
+    # every run after that change. viz.ps_coherence_highk.rebuild does the same.
+    channels = config.get("in_channels")
+    if channels is None and metadata is not None:
+        channels = metadata.get("input_features", {}).get("in_channels")
+    if channels is None:
+        raise KeyError("in_channels missing from model_config and input_features")
+    inner = build_model_from_config(ModelConfig.from_dict(config), int(channels))
     contrast_mode = str(config.get("contrast_mode", "off"))
     if contrast_mode != "off":
         from contrast import ContrastComposed
@@ -204,7 +210,7 @@ def predict(
     inputs: torch.Tensor,
     device: str,
 ) -> np.ndarray:
-    model = build_model(run.metadata["model_config"])
+    model = build_model(run.metadata["model_config"], run.metadata)
     result = load_checkpoint(model, run.checkpoint)
     if result.missing or result.unexpected or result.matched != result.total:
         raise RuntimeError(

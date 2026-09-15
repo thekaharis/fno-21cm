@@ -66,3 +66,77 @@ Standardizing `brightness_temp` on training cones will therefore have its scale
 set by a small number of extreme voxels. Robust statistics or an explicit,
 recorded clip is worth considering; whichever is chosen must be stored in the
 preparation artifact rather than recomputed.
+
+## Non-finite values and the exclusion decision (2026-09-14)
+
+The first full build (job 4923961) aborted after 10 minutes at cone 72:
+
+    ValueError: invalid/undefined values in brightness_temp, cone 72;
+    sparse or sentinel-valued fields require an explicit mask policy
+
+The pilot did not catch this. It selected geometry and cosmology extremes as
+agreed, which are not value pathologies, and its finiteness check sampled
+`[:, ::4, ::4, :]` -- a 9-voxel defect is invisible to a 1-in-16 subsample.
+Both are fixed: any future pilot should include known-defective cones, and the
+check must read full resolution.
+
+An exhaustive full-resolution scan of all 6600 simulations followed
+(`slurm/scan_nonfinite.sbatch`, 16-way array, ~1 h; results merged into
+`experiments/multifield/nonfinite_report.json`):
+
+| Field | Cones affected | Voxels |
+| --- | ---: | ---: |
+| density | 0 | 0 |
+| neutral_fraction | 0 | 0 |
+| **brightness_temp** | **33 (0.50%)** | 242 |
+| los_velocity | 0 | 0 |
+
+1-30 bad voxels per affected cone (median 8), out of 2.8e11 voxels scanned.
+The defect is confined entirely to `brightness_temp`.
+
+**Decision: exclude all 33 simulations uniformly.** The cache is built from
+**6567** cones. Excluding per-mapping instead would have kept the affected cones
+for mappings that do not use brightness temperature, but the field combinations
+would then no longer share an identical simulation set -- confounding exactly
+the comparison this study exists to make. Repair by neighbour interpolation was
+rejected as silently altering simulator output.
+
+The exclusion is implemented as a staged symlink view at
+`data/_multifield_stage`, not by modifying the raw data. The excluded IDs are in
+`nonfinite_report.json` and must be carried into the preparation artifact.
+
+Because the reader assigns `cone_id` by sorted file position, the built cache
+will carry 0..6566 rather than true sample IDs; it is patched afterwards from
+the stored `source_description` paths, as was done for the pilot.
+
+## Full cache built (2026-09-15)
+
+`data/compressed/multifield_z256.h5` -- job 4929874, **12h 05m**, **398 GiB**
+(6.6 s/cone). Four fields x (6567, 140, 140, 256) float32, plus `params`,
+`cone_id`, `target_z` on 256 points spanning 5.00100-24.97000.
+
+Size landed at 398 GiB against the 1.06 TB quoted before measurement; gzip at
+one cone per chunk accounts for most of the difference.
+
+`cone_id` was patched from the stored `source_description` paths to true
+21cmFAST sample IDs, asserted before writing: 6567 unique, zero intersection
+with the 33 excluded, and 6567 + 33 = 6600. It now runs 0..6598 with gaps at the
+excluded simulations rather than a contiguous 0..6566, which would have
+misidentified every cone after the first exclusion. The file also carries
+`cone_id_source`, `excluded_sample_ids` and `exclusion_reason` in its attributes,
+so it is self-describing without the JSON reports.
+
+Verification against the raw lightcones, 12 randomly chosen cones
+re-interpolated independently and compared value-by-value:
+
+- worst relative discrepancy **5.5e-08**, i.e. float32 round-off (eps ~1.2e-07).
+- the row -> sample_id offsets grow with row index exactly as the exclusions
+  accumulate (row 108 -> 109, row 5994 -> 6022), which is the check that the
+  identity mapping is right rather than merely self-consistent.
+- finiteness and x_HI bounds on 40 further random cones: 0 problems.
+
+Remaining before training: `fno_multifield.py prepare --split-seed 42`. The
+exclusion list must be carried into that artifact, and the brightness-temperature
+tail (cone 5984 reaches 25,575 mK in the raw lightcone) needs an explicit,
+recorded normalization decision -- robust statistics or a stored clip -- before
+the preparation artifact is fixed.

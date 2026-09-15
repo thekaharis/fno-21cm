@@ -52,7 +52,14 @@ export LOCALFNO_GLOBAL_MODES_Y="${LOCALFNO_GLOBAL_MODES_Y:-16}"
 export LOCALFNO_SPECTRAL_RANK="${LOCALFNO_SPECTRAL_RANK:-16}"
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-32}"
 export LOCALWNO_LEVELS="${LOCALWNO_LEVELS:-2}"
-export N_EPOCHS="${N_EPOCHS:-20}"
+# 50 epochs is the standing 2-D budget (set 2026-09-14). Across 53 runs that
+# logged >=60 epochs, 83% reached their best val_l2 by epoch 50 and the median
+# cost of stopping there is 0.00000, mean +0.00010 -- inside the 0.0002-0.0009
+# seed-replicate floor. Note T_max=N_EPOCHS, so the cosine schedule anneals to
+# zero at the budget: a 50-epoch run is NOT the first 50 epochs of a 100-epoch
+# run, and is generally slightly better. Alternating waveform schedules peak
+# latest and are the ones worth running longer.
+export N_EPOCHS="${N_EPOCHS:-50}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1}"
 export BATCH_SIZE="${BATCH_SIZE:-32}"
 export LEARNING_RATE="${LEARNING_RATE:-1e-4}"
