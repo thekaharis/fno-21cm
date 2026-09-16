@@ -41,6 +41,19 @@ done
 
 FILES=""
 for c in $CONES; do FILES="$FILES $PRED_DIR/cone_$c.h5"; done
+
+# Detailed per-field diagnostic pages
 python -m viz.multifield_detailed --prediction $FILES --out-dir "$OUT_DIR" --note "$NOTE"
+
+# Truth/prediction slice comparisons, both orientations
+SLICE_DIR="${SLICE_DIR:-$(dirname "$OUT_DIR")/slices}"
+python -m viz.multifield_slices --prediction $FILES --out-dir "$SLICE_DIR" --n-slices 5
+python -m viz.multifield_slices --prediction $FILES --out-dir "$SLICE_DIR"        --orientation los --n-slices 4
+
+# Stacked lightcone strips, full range and cropped to the active band
+STRIP_DIR="${STRIP_DIR:-$(dirname "$OUT_DIR")/strips}"
+python -m viz.multifield_lightcone_strips --prediction $FILES --out-dir "$STRIP_DIR" --note "$NOTE"
+python -m viz.multifield_lightcone_strips --prediction $FILES --out-dir "$STRIP_DIR" --crop --note "$NOTE"
+
 echo "---- figures ----"
-ls -la "$OUT_DIR"
+ls -la "$OUT_DIR" "$SLICE_DIR" "$STRIP_DIR"
