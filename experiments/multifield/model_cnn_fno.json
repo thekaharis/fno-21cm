@@ -1,0 +1,27 @@
+{
+ "kind": "localop",
+ "ndim": 3,
+ "local_operator": "cnn",
+ "global_operator": "fourier",
+ "hidden_channels": 32,
+ "modes": [
+  16,
+  16,
+  16
+ ],
+ "localfno_modes": [
+  6,
+  6,
+  12
+ ],
+ "localfno_window": [
+  16,
+  16,
+  32
+ ],
+ "localfno_base_width": 32,
+ "cnn_depth": 3,
+ "cnn_kernel_size": 3,
+ "cnn_norm": "groupnorm",
+ "grid_embedding": true
+}
