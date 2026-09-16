@@ -25,6 +25,9 @@ Build rate 8.6 s/cone; gzip chunked one cone per chunk, ~18% saving.
 Round-trip relative L2 (native -> n_z grid -> native, inside the retained
 interval), typical cone 2299:
 
+Measured on cone 2299 only. **The `neutral_fraction` column of this table is
+not representative -- see the correction below.**
+
 | n_z | density | neutral_fraction | brightness_temp | los_velocity |
 | ---: | ---: | ---: | ---: | ---: |
 | **256** | **1.0016** | 0.0037 | 0.4929 | 0.2984 |
@@ -44,17 +47,87 @@ campaign is built, so it is the established grid rather than a regression.
 
 Consequences that must be carried into any write-up:
 
-- Per-field representation is extremely uneven. `neutral_fraction` is reproduced
-  to 0.4%; `density` is not reproduced at all along the LOS. A field-to-field
-  comparison across this cache is therefore **not** a like-for-like comparison of
-  how learnable the fields are -- part of any ranking is the cache.
-- `brightness_temp` and `los_velocity` as **targets** are floored by the grid, at
-  roughly 49% and 30% relative error respectively. Achievable error is bounded by
-  the cache, not the model.
 - Transverse structure is unaffected: the native 140 x 140 grid is preserved.
   Transverse spectra remain meaningful; LOS and full 3-D spectra do not.
+- Most of the end-to-end error of a trained model on this cache is the grid
+  rather than the model -- quantified in the correction below.
 
-Revisit n_z if brightness temperature or velocity becomes a primary target.
+Revisit n_z if the fine LOS structure of any field matters.
+
+## Correction (2026-09-16): the x_HI fidelity figure above is not representative
+
+**What was wrong.** The table reports `neutral_fraction` round-tripping at
+0.0037, and that number was used to argue that x_HI is preserved almost exactly
+while only density and brightness temperature are degraded. The measurement is
+real but the cone is not typical of the ensemble: cone 2299 was selected for the
+pilot by matching the median `n_z` and `OMm`, **never by ionization state**. Its
+mean x_HI is 0.9996 with standard deviation 0.0020 -- an essentially uniform
+neutral field, which round-trips almost perfectly because it has almost no LOS
+structure to lose.
+
+On genuinely ionized cones x_HI loses **0.09 to 0.24**, i.e. 25-64x more than
+the figure above. The claim that per-field representation is "extremely uneven"
+was therefore an artifact of cone selection. It is uneven, but far less so.
+
+**Round-trip bound on four held-out test cones** (`tools_roundtrip_bound.py`,
+raw data at 2x transverse stride, results in `roundtrip_bound.json`). Three
+quantities, all relative L2:
+
+- `cache` -- native -> 256 grid -> native. What the grid discards, model-free.
+- `model` -- prediction vs the *cached* truth, both on the 256 grid. **Not**
+  floored by the cache: a perfect model scores zero here.
+- `end_to_end` -- prediction lifted back to native vs native truth. What the
+  pipeline delivers; bounded below by `cache`.
+
+| cone | mean x_HI | field | cache | model | end_to_end | grid share |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 47 | 0.90 | brightness_temp | 0.3187 | 0.2023 | 0.3222 | 97.9% |
+| 67 | 0.99 | brightness_temp | 0.2223 | 0.1289 | 0.2347 | 89.7% |
+| 444 | 0.89 | brightness_temp | 0.4743 | 0.3169 | 0.4848 | 95.7% |
+| 541 | 0.72 | brightness_temp | 0.3621 | 0.3728 | 0.4541 | 63.6% |
+| 47 | 0.90 | neutral_fraction | 0.1776 | 0.1032 | 0.2072 | 73.5% |
+| 67 | 0.99 | neutral_fraction | 0.0936 | 0.0213 | 0.0996 | 88.2% |
+| 444 | 0.89 | neutral_fraction | 0.2372 | 0.0908 | 0.2486 | 91.0% |
+| 541 | 0.72 | neutral_fraction | 0.1501 | 0.1164 | 0.1941 | 59.8% |
+
+(Model column from the epoch-10 snapshot of `mf_cnn_fno`, training still in
+progress, so it will improve; the `cache` column will not.)
+
+**What this establishes.**
+
+- `end_to_end` sits essentially on top of `cache` in almost every row. **60-98%
+  of the end-to-end error variance is the LOS grid, not the model**, and on
+  three of the four cones the brightness-temperature model error is already
+  *smaller* than the cache loss. A better architecture cannot recover most of
+  this; only more LOS points can.
+- **Both** targets are substantially grid-limited, not just brightness
+  temperature. The earlier framing -- x_HI faithful, T_b floored -- does not
+  survive measurement.
+- Cone 541 is the informative exception: the most ionized of the four
+  (mean x_HI 0.72), the most real structure, and the only cone where the model
+  error meets or exceeds the cache loss (0.373 vs 0.362 for T_b). Where there is
+  genuine structure to learn, the model is the limiting factor. High grid shares
+  elsewhere partly reflect cones that are close to featureless.
+
+**Superseded statements.** The earlier claim that brightness temperature and
+velocity "as targets are floored by the grid" was imprecise in a second way: the
+model predicts the *cached* target from *cached* inputs, so the grid does not
+floor the model's error against that target at all. What the grid does is
+degrade the **inputs** and bound the **end-to-end** error against the native
+field. Those are different statements and only the latter two are supported.
+
+**Limits of this measurement.** It captures LOS information loss only, and says
+nothing about whether density and velocity determine brightness temperature in
+principle. The data audit found that spin temperature -- absent from the four
+fields -- leaves between 5% and 90% of T_b unexplained depending on redshift, so
+part of the `model` column may be genuinely unpredictable from these inputs
+rather than a modelling shortfall.
+
+**Selection lesson for future pilots.** Choosing pilot cones by geometry and
+cosmology extremes missed both of the problems that actually mattered: the
+non-finite brightness-temperature voxels that aborted the first full build, and
+the ionization-state dependence of round-trip fidelity. A pilot set should span
+the **target field's own dynamic range**, not only the metadata.
 
 ## Heavy tail in brightness temperature
 

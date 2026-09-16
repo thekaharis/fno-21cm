@@ -1,0 +1,58 @@
+[
+  {
+    "cone": 541,
+    "field": "brightness_temp",
+    "cache": 0.3620588242848244,
+    "model": 0.3727825064967984,
+    "end_to_end": 0.454090356990215
+  },
+  {
+    "cone": 541,
+    "field": "neutral_fraction",
+    "cache": 0.15007456305518194,
+    "model": 0.11636384551434219,
+    "end_to_end": 0.19409445188662064
+  },
+  {
+    "cone": 444,
+    "field": "brightness_temp",
+    "cache": 0.47434182006231473,
+    "model": 0.31685935482302746,
+    "end_to_end": 0.4847999479015308
+  },
+  {
+    "cone": 444,
+    "field": "neutral_fraction",
+    "cache": 0.23721193456956977,
+    "model": 0.09082983193772694,
+    "end_to_end": 0.24862394222729592
+  },
+  {
+    "cone": 47,
+    "field": "brightness_temp",
+    "cache": 0.31873407570737056,
+    "model": 0.20230921014737788,
+    "end_to_end": 0.3221584062467721
+  },
+  {
+    "cone": 47,
+    "field": "neutral_fraction",
+    "cache": 0.17762198545454194,
+    "model": 0.10318045300072382,
+    "end_to_end": 0.20720460950688913
+  },
+  {
+    "cone": 67,
+    "field": "brightness_temp",
+    "cache": 0.22227328820332365,
+    "model": 0.1289075648288222,
+    "end_to_end": 0.23470015539784783
+  },
+  {
+    "cone": 67,
+    "field": "neutral_fraction",
+    "cache": 0.09359465799287492,
+    "model": 0.02132084131843095,
+    "end_to_end": 0.09964801059925264
+  }
+]
