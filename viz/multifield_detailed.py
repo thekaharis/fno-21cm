@@ -30,6 +30,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import TwoSlopeNorm
 
+from viz._zaxis import edges, transverse_edges
+
 BOX_MPC = 200.0
 
 
@@ -65,7 +67,13 @@ def page(field, truth, pred, z, cone_id, units, out_path, epoch_note=""):
     # not three near-identical frames of quiescent high-redshift gas.
     activity = truth.std(axis=(0, 1))
     zc = int(np.argmax(activity))
-    picks = sorted({max(0, zc - nz // 8), zc, min(nz - 1, zc + nz // 8)})
+    # Three slices spread across the band where the field actually varies.
+    # Offsetting from the peak by a fixed fraction of the LOS could land on a
+    # fully ionized (empty) slice, or collapse to fewer than three near an edge.
+    active = np.flatnonzero(activity > 0.05 * activity.max()) if activity.max() > 0 \
+        else np.arange(nz)
+    lo, hi = int(active[0]), int(active[-1])
+    picks = sorted({int(round(lo + f * (hi - lo))) for f in (0.2, 0.5, 0.8)})
 
     diverging = field != "neutral_fraction"
     cmap = "viridis" if not diverging else "magma"
@@ -76,19 +84,18 @@ def page(field, truth, pred, z, cone_id, units, out_path, epoch_note=""):
     # ---- row 1: lightcone slice through the middle of the box ----------------
     mid = nx // 2
     lo, hi = np.percentile(truth[mid], [1, 99])
+    xe, ze = transverse_edges(ny, BOX_MPC), edges(z)
     for col, (name, data) in enumerate((("truth", truth[mid]), ("prediction", pred[mid]))):
         ax = fig.add_subplot(gs[0, col])
-        im = ax.imshow(data.T, aspect="auto", origin="lower", cmap=cmap,
-                       vmin=lo, vmax=hi,
-                       extent=[0, BOX_MPC, z[0], z[-1]])
+        im = ax.pcolormesh(xe, ze, data.T, cmap=cmap, vmin=lo, vmax=hi,
+                           shading="flat", rasterized=True)
         ax.set_title(f"{name}", fontsize=11)
         ax.set_xlabel("x [Mpc]"); ax.set_ylabel("redshift" if col == 0 else "")
         fig.colorbar(im, ax=ax, label=units if col == 1 else "")
     ax = fig.add_subplot(gs[0, 2])
     lim = np.percentile(np.abs(err[mid]), 99) or 1.0
-    im = ax.imshow(err[mid].T, aspect="auto", origin="lower", cmap="RdBu_r",
-                   norm=TwoSlopeNorm(0.0, -lim, lim),
-                   extent=[0, BOX_MPC, z[0], z[-1]])
+    im = ax.pcolormesh(xe, ze, err[mid].T, cmap="RdBu_r",
+                       norm=TwoSlopeNorm(0.0, -lim, lim), shading="flat", rasterized=True)
     ax.set_title("prediction - truth", fontsize=11)
     ax.set_xlabel("x [Mpc]")
     fig.colorbar(im, ax=ax, label=units)
@@ -96,7 +103,11 @@ def page(field, truth, pred, z, cone_id, units, out_path, epoch_note=""):
     # ---- row 2: transverse maps at three redshifts ---------------------------
     for col, j in enumerate(picks):
         ax = fig.add_subplot(gs[1, col])
-        pair = np.concatenate([truth[:, :, j], pred[:, :, j]], axis=1)
+        # Join along x (axis 0) so the transposed image is [truth | prediction]
+        # side by side. Joining along y put truth in the bottom half and the
+        # prediction in the top half, each squashed, under a "truth | prediction"
+        # label -- every row-2 panel before 2026-09-21 was drawn that way.
+        pair = np.concatenate([truth[:, :, j], pred[:, :, j]], axis=0)
         v0, v1 = np.percentile(truth[:, :, j], [1, 99])
         im = ax.imshow(pair.T, origin="lower", cmap=cmap, vmin=v0, vmax=v1,
                        extent=[0, 2 * BOX_MPC, 0, BOX_MPC])
@@ -124,7 +135,13 @@ def page(field, truth, pred, z, cone_id, units, out_path, epoch_note=""):
     ax.plot(span, span, "w--", lw=1.0)
     ax.set_xlabel(f"truth [{units}]"); ax.set_ylabel(f"prediction [{units}]")
     # Regression slope < 1 is the hedging signature: predictions pulled to the mean.
-    slope = np.polyfit(t, p, 1)[0]
+    # Closed form in float64. np.polyfit's default rcond is len(x) * eps(dtype):
+    # with float32 and millions of voxels that reaches ~0.3 and silently
+    # truncates the fit whenever the truth sits near one value (a 0.965 slope
+    # came out as 0.497 on a mostly neutral cone).
+    t64, p64 = t.astype(np.float64), p.astype(np.float64)
+    var_t = t64.var()
+    slope = float(((t64 - t64.mean()) * (p64 - p64.mean())).mean() / var_t) if var_t > 0 else float("nan")
     ax.set_title(f"parity — slope {slope:.3f}", fontsize=10)
 
     ax = fig.add_subplot(gs[2, 2])

@@ -194,6 +194,52 @@ def save_checkpoint(path, model, metadata, epoch):
     temporary.replace(path)
 
 
+def cone_means(dataset, rows, target):
+    """Mean of ``target`` over each whole cone (one full-field read per cone)."""
+    means = []
+    for r in rows:
+        if isinstance(dataset, NativeLightconeDataset):
+            value = dataset.read_fields(r, names=[target])[target]
+        else:
+            value = dataset.read_fields(r)[target]
+        means.append(float(np.mean(value)))
+    return means
+
+
+def stratified_pick(means, n):
+    """Positions of n items at evenly spaced quantiles of ``means``."""
+    order = np.argsort(means, kind="stable")
+    return [int(order[i]) for i in
+            np.unique(np.linspace(0, len(means) - 1, n).round().astype(int))]
+
+
+def validation_subset(dataset, val_rows, n, target):
+    """Fixed, representative subset of validation rows for per-epoch monitoring.
+
+    Full native-cone validation walks every cone through overlapping windows
+    and is I/O-bound on the raw gzip lightcones; at 200 cones it cost ~60% of
+    each epoch. A fixed subset keeps monitoring and checkpoint selection honest
+    at a fraction of the cost.
+
+    Cones are ranked by the mean of ``target`` and taken at evenly spaced
+    quantiles -- a proportional stratified sample. That spans the ionization
+    histories present while keeping the subset's composition matched to the
+    full split, so its score is a lower-variance proxy for the full validation
+    score rather than one tilted toward any reionization stage. Selection is
+    deterministic and does not depend on the model.
+    """
+    rows = [int(r) for r in val_rows]
+    if n <= 0 or n >= len(rows):
+        return rows, None
+    means = cone_means(dataset, rows, target)
+    chosen = sorted(rows[i] for i in stratified_pick(means, n))
+    info = {"target": target, "requested": n, "selected": len(chosen),
+            "of": len(rows),
+            "cone_ids": [int(dataset.cone_ids[r]) for r in chosen],
+            "cone_means": [round(means[rows.index(r)], 6) for r in chosen]}
+    return chosen, info
+
+
 def train(args):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("multi-field runs currently use one process/GPU; schedule mappings independently")
@@ -254,6 +300,16 @@ def train(args):
         started = True
         print(f"Mapping: {mapping.slug}; device={device}; parameters={metadata['parameter_count']:,}; "
               f"train/val/test={len(rows['train'])}/{len(rows['val'])}/{len(rows['test'])}", flush=True)
+        val_rows, val_info = validation_subset(dataset, rows["val"], args.val_cones,
+                                               mapping.targets[0])
+        metadata["training"]["validation"] = (
+            {"mode": "full", "cones": len(val_rows)} if val_info is None
+            else {"mode": "stratified_subset", **val_info})
+        write_json(out / "run_metadata.json", metadata)
+        if val_info is not None:
+            print(f"Per-epoch validation on {len(val_rows)}/{len(rows['val'])} cones "
+                  f"(stratified on {val_info['target']}); full split evaluated at the end",
+                  flush=True)
         if window_config:
             train_windows = LOSWindowDataset(dataset, rows["train"], window_config, args.seed)
             train_loader = DataLoader(train_windows, batch_size=args.batch_size, shuffle=True,
@@ -285,7 +341,7 @@ def train(args):
                 if (batch_index + 1) % 25 == 0:
                     print(f"Epoch {epoch+1}, batch {batch_index+1}/{len(train_loader)}: "
                           f"loss={total/samples:.6g}", flush=True)
-            validation = evaluate_rows(model, dataset, rows["val"], device, args.batch_size,
+            validation = evaluate_rows(model, dataset, val_rows, device, args.batch_size,
                                        args.workers, window_config=window_config)
             score = (sum(validation[n]["normalized_mse"] * w for n, w in zip(mapping.targets, weights))
                      / sum(weights) if args.monitor == "mean"
@@ -294,6 +350,7 @@ def train(args):
                 best = score
                 save_checkpoint(out / "best.pt", model, metadata, epoch)
             record = {"epoch": epoch, "train_loss": total/samples, "val_score": score,
+                      "val_cones": len(val_rows),
                       "validation": validation, "learning_rate": optimizer.param_groups[0]["lr"],
                       "elapsed_seconds": time.monotonic()-start}
             with (out / "metrics.jsonl").open("a") as f:
@@ -308,6 +365,14 @@ def train(args):
                              args.spectral_bins, window_config)
         write_json(out / "test_metrics.json", {"checkpoint": "best.pt", "epoch": checkpoint["epoch"],
                     "split": "test", "fields": test})
+        if val_info is not None:
+            # The subset only steered monitoring and checkpoint choice; report the
+            # full split too, so the proxy's fidelity is on record.
+            full_val = evaluate_rows(model, dataset, rows["val"], device, args.batch_size,
+                                     args.workers, args.spectral_bins, window_config)
+            write_json(out / "val_full_metrics.json", {
+                "checkpoint": "best.pt", "epoch": checkpoint["epoch"], "split": "val",
+                "cones": len(rows["val"]), "fields": full_val})
         metadata.update(status="complete", best_epoch=checkpoint["epoch"],
                         elapsed_seconds=time.monotonic()-start)
         write_json(out / "run_metadata.json", metadata)
@@ -450,6 +515,11 @@ def main():
     p.add_argument("--context-factor", type=int, default=4, help="surrounding LOS extent and LOS pooling factor")
     p.add_argument("--context-xy", type=int, default=4, help="transverse box-pooling factor; must divide native X/Y")
     p.add_argument("--context-features", type=int, default=8, help="features per coarse encoder branch")
+    p.add_argument("--val-cones", type=int, default=0,
+                   help="validate on this many fixed validation cones each epoch (0 = all). "
+                        "Chosen as a stratified sample over the first target's cone mean; "
+                        "the full validation split and test split are still evaluated once "
+                        "at the end on the best checkpoint")
     p.set_defaults(function=train)
     p = commands.add_parser("evaluate")
     p.add_argument("--checkpoint", required=True)

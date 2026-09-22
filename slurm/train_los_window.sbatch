@@ -9,13 +9,34 @@
 #   coarse_context  same fine window plus a 4x-decimated 1024-slice surrounding
 #                   region through a small trainable encoder
 #
-# Budget: the full ensemble costs ~6.7 h/epoch (5280 train cones x 8 draws),
-# i.e. 134 h for 20 epochs -- not viable. This uses the 2000-cone subset
-# preparation: 1600 train x 4 draws = 6400 batches/epoch, ~1 h/epoch. Cones were
-# preferred over draws because extra draws add coverage of the same simulations,
-# not independent ones. The 48 h wall leaves ~2.4x headroom over the ~20 h
-# estimate, so the cosine schedule anneals inside the budget rather than being
-# truncated mid-schedule.
+# Budget: uses the 2000-cone subset preparation (1600 train / 200 val / 200 test).
+#
+# Per-epoch cost was measured (jobs 4952130/4952131, 5096595) and has two
+# different bottlenecks:
+#   training     GPU compute, ~0.6 s fwd+bwd per 140x140x256 window. Raw-file
+#                loading (1.3-2.1 s/sample) runs on DataLoader workers and hides
+#                behind it.
+#   validation   I/O, serial: every validation cone is walked through ~15
+#                overlapping windows at 12-15 s of reads per cone, because the
+#                raw fields are gzip-compressed in 9x9x307 chunks and a single
+#                window read costs about as much as reading the whole field.
+# At 4 windows/cone and full 200-cone validation that came to 2.4-2.7 h/epoch
+# (~60% of it validation), and both 48 h runs were killed before finishing.
+#
+# Defaults (2026-09-22): WINDOWS_PER_CONE=4, VAL_CONES=40, EPOCHS=30, 48 h wall.
+# 1 window/cone (run los-coarse-r3) made epochs 4.4x cheaper but learned ~4x
+# less per epoch -- no better per GPU hour -- so 4 windows is back; the 40-cone
+# validation subset is kept because it removed ~1.5 h/epoch of pure I/O.
+#
+# Cost is dominated by the model's forward pass (train ~2.9x forward per 256-cell
+# window; validation and the final 400-cone pass are ~31 s/cone of raw-file I/O
+# plus 15 forwards). Projected 30-epoch totals incl. the final pass:
+#   cnn/whno, cnn/swhno (116 ms fwd)              ~33 h   fits 48 h
+#   cnn/fno bw48, cnn/sfno bw48om60 (~317 ms)     ~65 h   does NOT fit
+#   sfno/swhno bw48om60 (458 ms)                  ~87 h   does NOT fit
+# Set --time per model accordingly; a run killed mid-schedule never anneals.
+#
+# Select the model with MODEL_TAG (reads experiments/los_windows/model_<tag>.json).
 #
 #   sbatch --export=ALL,SAMPLING=contiguous slurm/train_los_window.sbatch
 #   sbatch --export=ALL,SAMPLING=coarse_context slurm/train_los_window.sbatch
@@ -38,7 +59,10 @@ conda activate fno-env
 
 SAMPLING="${SAMPLING:?set SAMPLING=contiguous|coarse_context}"
 PREPARATION="${PREPARATION:-experiments/los_windows/preparation_xhi_2000.json}"
-RUN_DIR="${RUN_DIR:-checkpoints/3d_xhi/los_windows/${SAMPLING}_cnn_fno_2000_s0}"
+MODEL_TAG="${MODEL_TAG:-cnn_fno}"
+MODEL_JSON="${MODEL_JSON:-experiments/los_windows/model_${MODEL_TAG}.json}"
+[[ -f "$MODEL_JSON" ]] || { echo "missing model settings: $MODEL_JSON" >&2; exit 1; }
+RUN_DIR="${RUN_DIR:-checkpoints/3d_xhi/los_windows/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}}"
 
 extra=()
 if [[ "$SAMPLING" == "coarse_context" ]]; then
@@ -49,18 +73,20 @@ fi
 
 echo "sampling:    $SAMPLING"
 echo "preparation: $PREPARATION"
+echo "model:       $MODEL_JSON"
 echo "run dir:     $RUN_DIR"
 echo "started:     $(date)"
 
 srun python fno_multifield.py train \
     --preparation "$PREPARATION" \
     --inputs density --targets neutral_fraction \
-    --model-settings "$(cat experiments/los_windows/model_cnn_fno.json)" \
+    --model-settings "$(cat "$MODEL_JSON")" \
     --sampling "$SAMPLING" \
     --window-size "${WINDOW_SIZE:-256}" --window-halo "${WINDOW_HALO:-32}" \
     --windows-per-cone "${WINDOWS_PER_CONE:-4}" \
+    --val-cones "${VAL_CONES:-40}" \
     "${extra[@]}" \
-    --epochs "${EPOCHS:-20}" --batch-size "${BATCH_SIZE:-1}" \
+    --epochs "${EPOCHS:-30}" --batch-size "${BATCH_SIZE:-1}" \
     --lr "${LR:-3e-4}" --weight-decay "${WEIGHT_DECAY:-1e-5}" \
     --seed "${SEED:-0}" --workers "${WORKERS:-4}" --device cuda \
     --run-dir "$RUN_DIR"
