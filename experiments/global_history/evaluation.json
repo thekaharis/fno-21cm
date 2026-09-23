@@ -1,0 +1,162 @@
+{
+ "xhi_val": {
+  "cones": 200,
+  "history_rmse_5_25": 0.009910111472398533,
+  "midpoint_abs_dz_median": 0.0392359895167842,
+  "midpoint_abs_dz_p90": 0.13347545545219808,
+  "midpoint_cones": 114
+ },
+ "xhi_test": {
+  "cones": 200,
+  "history_rmse_5_25": 0.008635262037176133,
+  "midpoint_abs_dz_median": 0.043697235862635075,
+  "midpoint_abs_dz_p90": 0.09425175941485621,
+  "midpoint_cones": 97
+ },
+ "cones": {
+  "1031": {
+   "z_mid_true": 5.977584637055586,
+   "z_mid_emulator": 6.002908279311754,
+   "z_mid_contiguous_ep18": 6.463285589113119,
+   "z_mid_box_history": 6.07537240855137,
+   "history_rmse_box_vs_slice": 0.027799560437727213,
+   "history_rmse_emulator": 0.03899468858119576,
+   "history_rmse_contiguous_ep18": 0.09682459384202957,
+   "emulator_spread": 0.0045256306116921476,
+   "z_mid_coarse_context_ep16": 5.933160779268951,
+   "history_rmse_coarse_context_ep16": 0.050230514258146286
+  },
+  "1109": {
+   "z_mid_true": NaN,
+   "z_mid_emulator": NaN,
+   "z_mid_contiguous_ep18": NaN,
+   "z_mid_box_history": NaN,
+   "history_rmse_box_vs_slice": 0.002633051803588112,
+   "history_rmse_emulator": 0.003686986950334579,
+   "history_rmse_contiguous_ep18": 0.003371971193701029,
+   "emulator_spread": 0.001193694438889876,
+   "z_mid_coarse_context_ep16": NaN,
+   "history_rmse_coarse_context_ep16": 0.0036733855959028006
+  },
+  "1275": {
+   "z_mid_true": 10.47892854934892,
+   "z_mid_emulator": 10.691438894903856,
+   "z_mid_contiguous_ep18": 9.679326807247351,
+   "z_mid_box_history": 10.621564374196513,
+   "history_rmse_box_vs_slice": 0.04143777685201659,
+   "history_rmse_emulator": 0.04423204446136297,
+   "history_rmse_contiguous_ep18": 0.12356136739253998,
+   "emulator_spread": 0.022253978067636637,
+   "z_mid_coarse_context_ep16": 9.663373312370949,
+   "history_rmse_coarse_context_ep16": 0.1527767777442932
+  },
+  "1368": {
+   "z_mid_true": NaN,
+   "z_mid_emulator": NaN,
+   "z_mid_contiguous_ep18": NaN,
+   "z_mid_box_history": NaN,
+   "history_rmse_box_vs_slice": 0.00817631411566062,
+   "history_rmse_emulator": 0.008445078155951646,
+   "history_rmse_contiguous_ep18": 0.002069649985060096,
+   "emulator_spread": 0.0023057935207116144,
+   "z_mid_coarse_context_ep16": NaN,
+   "history_rmse_coarse_context_ep16": 0.007754125632345676
+  },
+  "1625": {
+   "z_mid_true": 5.210397432481255,
+   "z_mid_emulator": 5.197716312027826,
+   "z_mid_contiguous_ep18": 5.216616044942353,
+   "z_mid_box_history": 5.183882557184568,
+   "history_rmse_box_vs_slice": 0.02804984800364333,
+   "history_rmse_emulator": 0.028231621938284688,
+   "history_rmse_contiguous_ep18": 0.01004381850361824,
+   "emulator_spread": 0.012106455787040572,
+   "z_mid_coarse_context_ep16": 5.202540237247878,
+   "history_rmse_coarse_context_ep16": 0.018618512898683548
+  },
+  "1684": {
+   "z_mid_true": NaN,
+   "z_mid_emulator": NaN,
+   "z_mid_contiguous_ep18": NaN,
+   "z_mid_box_history": NaN,
+   "history_rmse_box_vs_slice": 0.004544830270795533,
+   "history_rmse_emulator": 0.003675556516630383,
+   "history_rmse_contiguous_ep18": 0.007322695106267929,
+   "emulator_spread": 0.0010517806080831704,
+   "z_mid_coarse_context_ep16": NaN,
+   "history_rmse_coarse_context_ep16": 0.002700474811717868
+  },
+  "1892": {
+   "z_mid_true": 8.823425254596302,
+   "z_mid_emulator": 8.82253619534404,
+   "z_mid_contiguous_ep18": 8.856533032453646,
+   "z_mid_box_history": 8.734135630993979,
+   "history_rmse_box_vs_slice": 0.023175080275319965,
+   "history_rmse_emulator": 0.030727229222160805,
+   "history_rmse_contiguous_ep18": 0.04149544611573219,
+   "emulator_spread": 0.006773990237810202,
+   "z_mid_coarse_context_ep16": 8.66947942155321,
+   "history_rmse_coarse_context_ep16": 0.03628658503293991
+  },
+  "1956": {
+   "z_mid_true": 5.110197261926247,
+   "z_mid_emulator": 5.401599130310359,
+   "z_mid_contiguous_ep18": 5.105741919800211,
+   "z_mid_box_history": 5.376606594300855,
+   "history_rmse_box_vs_slice": 0.07760951161317929,
+   "history_rmse_emulator": 0.07984337955603746,
+   "history_rmse_contiguous_ep18": 0.021639063954353333,
+   "emulator_spread": 0.005968487176211101,
+   "z_mid_coarse_context_ep16": 5.364977681633602,
+   "history_rmse_coarse_context_ep16": 0.022669043391942978
+  },
+  "24": {
+   "z_mid_true": 9.072085354484955,
+   "z_mid_emulator": 9.389744575807265,
+   "z_mid_contiguous_ep18": 9.070894983454993,
+   "z_mid_box_history": 9.316964293130864,
+   "history_rmse_box_vs_slice": 0.04693381441154642,
+   "history_rmse_emulator": 0.05337754600204844,
+   "history_rmse_contiguous_ep18": 0.016850043088197708,
+   "emulator_spread": 0.008372189498462856,
+   "z_mid_coarse_context_ep16": 8.89991837116544,
+   "history_rmse_coarse_context_ep16": 0.14281043410301208
+  },
+  "27": {
+   "z_mid_true": 15.982929954768986,
+   "z_mid_emulator": 15.896147531874373,
+   "z_mid_contiguous_ep18": 15.344948500458521,
+   "z_mid_box_history": 15.840006698579648,
+   "history_rmse_box_vs_slice": 0.04753999957413411,
+   "history_rmse_emulator": 0.06335016568740195,
+   "history_rmse_contiguous_ep18": 0.14759449660778046,
+   "emulator_spread": 0.021499201225743423,
+   "z_mid_coarse_context_ep16": 14.647456490858103,
+   "history_rmse_coarse_context_ep16": 0.2655376195907593
+  },
+  "731": {
+   "z_mid_true": NaN,
+   "z_mid_emulator": NaN,
+   "z_mid_contiguous_ep18": NaN,
+   "z_mid_box_history": NaN,
+   "history_rmse_box_vs_slice": 0.025027590879245165,
+   "history_rmse_emulator": 0.02573393495099244,
+   "history_rmse_contiguous_ep18": 0.010593559592962265,
+   "emulator_spread": 0.004243503897662454,
+   "z_mid_coarse_context_ep16": NaN,
+   "history_rmse_coarse_context_ep16": 0.009128793142735958
+  },
+  "759": {
+   "z_mid_true": 7.044035500134276,
+   "z_mid_emulator": 7.195957622573,
+   "z_mid_contiguous_ep18": 7.061077145802401,
+   "z_mid_box_history": 7.256223012313251,
+   "history_rmse_box_vs_slice": 0.0457568745052481,
+   "history_rmse_emulator": 0.04931790867929667,
+   "history_rmse_contiguous_ep18": 0.018059425055980682,
+   "emulator_spread": 0.007440027674408036,
+   "z_mid_coarse_context_ep16": 7.018100233734371,
+   "history_rmse_coarse_context_ep16": 0.021998558193445206
+  }
+ }
+}

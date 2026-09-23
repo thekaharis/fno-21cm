@@ -40,6 +40,10 @@
 # rotation and reflection to each training window (exact symmetries of the
 # periodic box faces; LOS untouched) and appends _augtransverse to the run dir.
 #
+# HISTORY_EMULATOR=experiments/global_history/emulator.pt appends the emulated
+# global history x_HI(z) (dataset/global_history.py) as the last input channel
+# and appends _hist to the run dir.
+#
 # Select the model with MODEL_TAG (reads experiments/los_windows/model_<tag>.json).
 #
 # Multi-field (density,los_velocity -> neutral_fraction,brightness_temp) uses the
@@ -84,9 +88,11 @@ esac
 MODEL_TAG="${MODEL_TAG:-cnn_fno}"
 MODEL_JSON="${MODEL_JSON:-experiments/los_windows/model_${MODEL_TAG}.json}"
 [[ -f "$MODEL_JSON" ]] || { echo "missing model settings: $MODEL_JSON" >&2; exit 1; }
+HISTORY_EMULATOR="${HISTORY_EMULATOR:-}"
+HIST_SUFFIX=""; [[ -n "$HISTORY_EMULATOR" ]] && HIST_SUFFIX="_hist"
 AUGMENT="${AUGMENT:-none}"
 AUG_SUFFIX=""; [[ "$AUGMENT" != none ]] && AUG_SUFFIX="_aug${AUGMENT}"
-RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}${AUG_SUFFIX}}"
+RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}${AUG_SUFFIX}${HIST_SUFFIX}}"
 
 extra=()
 if [[ "$SAMPLING" == "coarse_context" ]]; then
@@ -99,6 +105,7 @@ echo "sampling:    $SAMPLING"
 echo "preparation: $PREPARATION"
 echo "fields:      $INPUTS -> $TARGETS"
 echo "augment:     $AUGMENT"
+echo "history:     ${HISTORY_EMULATOR:-none}"
 echo "model:       $MODEL_JSON"
 echo "run dir:     $RUN_DIR"
 echo "started:     $(date)"
@@ -111,6 +118,7 @@ srun python fno_multifield.py train \
     --window-size "${WINDOW_SIZE:-256}" --window-halo "${WINDOW_HALO:-32}" \
     --windows-per-cone "${WINDOWS_PER_CONE:-4}" \
     --augment "$AUGMENT" \
+    ${HISTORY_EMULATOR:+--history-emulator "$HISTORY_EMULATOR"} \
     --val-cones "${VAL_CONES:-40}" \
     "${extra[@]}" \
     --epochs "${EPOCHS:-30}" --batch-size "${BATCH_SIZE:-1}" \

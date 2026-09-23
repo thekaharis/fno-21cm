@@ -21,6 +21,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from dataset.fields import FOUR_FIELDS, FieldMapping, FieldRegistry
+from dataset.global_history import HistoryEmulator
 from dataset.lightcone_params import PARAM_NAMES
 from dataset.multifield import MultiFieldDataset
 from dataset.los_windows import (LOSWindowConfig, LOSWindowDataset, NativeLightconeDataset,
@@ -251,6 +252,12 @@ def train(args):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(args.inputs, args.targets, preparation["conditioning"], registry)
     dataset, rows, registry = prepared_dataset(preparation, mapping)
+    history = None
+    if getattr(args, "history_emulator", None):
+        if not isinstance(dataset, NativeLightconeDataset):
+            raise ValueError("--history-emulator is implemented for native LOS windows")
+        history = HistoryEmulator(args.history_emulator)
+        dataset.install_history(history)
     window_config = window_configuration(args, dataset)
     config = ModelConfig.from_dict(json.loads(args.model_settings))
     if config.ndim != 3:
@@ -288,6 +295,7 @@ def train(args):
                      "learning_rate": args.lr, "weight_decay": args.weight_decay,
                      "grad_clip": args.grad_clip, "deterministic": args.deterministic,
                      "augment": getattr(args, "augment", "none"),
+                     "history_emulator": history.describe() if history else None,
                      "loss": "weighted mean of per-field normalized MSE",
                      "loss_weights": dict(zip(mapping.targets, weights)), "monitor": args.monitor,
                      "backbone_training": "from_scratch", "device": str(device)},
@@ -398,6 +406,11 @@ def restore(path, device):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(**metadata["mapping"], registry=registry)
     dataset, rows, _ = prepared_dataset(preparation, mapping)
+    history = metadata.get("training", {}).get("history_emulator")
+    if history:
+        dataset.install_history(HistoryEmulator(history["path"], history["sha256"]))
+        if list(dataset.channel_names) != list(metadata["input_channels"]):
+            raise ValueError("restored input channels differ from the trained model's")
     sampling = metadata.get("sampling", {"mode": "full"})
     window_config = None if sampling["mode"] == "full" else LOSWindowConfig(**sampling)
     model = MultiFieldModel(ModelConfig.from_dict(metadata["model_config"]),
@@ -514,6 +527,9 @@ def main():
     p.add_argument("--window-size", type=int, default=256, help="native slices including both halos")
     p.add_argument("--window-halo", type=int, default=32, help="context slices excluded from loss on each side")
     p.add_argument("--windows-per-cone", type=int, default=8, help="random draws per training cone per epoch")
+    p.add_argument("--history-emulator", default=None,
+                   help="frozen global-history emulator (dataset.global_history); its x_HI(z) "
+                        "is appended as the last input channel")
     p.add_argument("--augment", choices=("none", "transverse"), default="none",
                    help="training-window augmentation: random transverse periodic shift, "
                         "rotation and reflection (exact symmetries of the box faces)")

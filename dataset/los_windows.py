@@ -111,6 +111,21 @@ class NativeLightconeDataset(MultiFieldDataset):
                               "relative_los_Mpc/1000", "native_valid")
         self.in_channels = len(self.channel_names)
         self.out_channels = len(self.mapping.targets)
+        self.history = None
+
+    def install_history(self, emulator):
+        """Append the emulated global history x_HI(z) as the LAST input channel.
+
+        Appending keeps every existing channel index (including those the
+        excursion-set layer reads) unchanged.
+        """
+        if not self.mapping.use_params:
+            raise ValueError("the history emulator needs parameter conditioning")
+        if self.history is not None:
+            raise ValueError("history emulator already installed")
+        self.history = (emulator.z, emulator.histories(self.params, PARAM_NAMES))
+        self.channel_names = (*self.channel_names, emulator.CHANNEL)
+        self.in_channels = len(self.channel_names)
 
     def source_description(self):
         return {"kind": "native", "files": [
@@ -184,6 +199,9 @@ class NativeLightconeDataset(MultiFieldDataset):
             conditioning.extend(torch.full(pooled_shape, float(v))
                 for v in self.parameter_normalization.normalize(self.params[idx]))
         conditioning.extend((los_channel(relative), los_channel(valid)))
+        if self.history is not None:
+            nodes, histories = self.history
+            conditioning.append(los_channel(np.interp(z, nodes, histories[idx])))
         return values, conditioning
 
     def window(self, idx, start, config):

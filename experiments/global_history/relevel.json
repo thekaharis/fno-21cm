@@ -1,0 +1,170 @@
+[
+ {
+  "run": "contiguous_ep18",
+  "cone": 1031,
+  "mse": 0.026346028131764537,
+  "mse_relevel_emulator": 0.015827325241351033,
+  "mse_relevel_oracle": 0.014063399438486118
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1109,
+  "mse": 0.00023444294662723451,
+  "mse_relevel_emulator": 0.0002864401303621644,
+  "mse_relevel_oracle": 0.0002678461074673254
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1275,
+  "mse": 0.022775197212059138,
+  "mse_relevel_emulator": 0.00844527358585431,
+  "mse_relevel_oracle": 0.007074064452514489
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1368,
+  "mse": 0.00061749906401548,
+  "mse_relevel_emulator": 0.000820824566345933,
+  "mse_relevel_oracle": 0.00065070183272177
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1625,
+  "mse": 0.0035859601159695977,
+  "mse_relevel_emulator": 0.004132764537319235,
+  "mse_relevel_oracle": 0.0034011439504979535
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1684,
+  "mse": 0.0006515125125679833,
+  "mse_relevel_emulator": 0.0006002870584505595,
+  "mse_relevel_oracle": 0.0005891243421027808
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1892,
+  "mse": 0.007638621270799309,
+  "mse_relevel_emulator": 0.007233604602699169,
+  "mse_relevel_oracle": 0.00624685395287864
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 1956,
+  "mse": 0.011389646007711165,
+  "mse_relevel_emulator": 0.01625425313099489,
+  "mse_relevel_oracle": 0.011028830630847085
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 24,
+  "mse": 0.005825267316554923,
+  "mse_relevel_emulator": 0.007082821571500659,
+  "mse_relevel_oracle": 0.005559715791027839
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 27,
+  "mse": 0.01074737585507326,
+  "mse_relevel_emulator": 0.005718127787822662,
+  "mse_relevel_oracle": 0.0036678070346037018
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 731,
+  "mse": 0.006637636010838067,
+  "mse_relevel_emulator": 0.007211939237326102,
+  "mse_relevel_oracle": 0.0064690316847052344
+ },
+ {
+  "run": "contiguous_ep18",
+  "cone": 759,
+  "mse": 0.01068189700114223,
+  "mse_relevel_emulator": 0.013361107580754306,
+  "mse_relevel_oracle": 0.010186946434556447
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1031,
+  "mse": 0.018340075916819378,
+  "mse_relevel_emulator": 0.016953849100707113,
+  "mse_relevel_oracle": 0.014758125326828719
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1109,
+  "mse": 0.00016867716068771696,
+  "mse_relevel_emulator": 0.00019431416359891643,
+  "mse_relevel_oracle": 0.00017988247539690757
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1275,
+  "mse": 0.023442311151616515,
+  "mse_relevel_emulator": 0.006492805281683336,
+  "mse_relevel_oracle": 0.0050402225613869174
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1368,
+  "mse": 0.0007654760070233119,
+  "mse_relevel_emulator": 0.0007525020200880535,
+  "mse_relevel_oracle": 0.0005819723574453697
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1625,
+  "mse": 0.004331468304889451,
+  "mse_relevel_emulator": 0.0048750186458771565,
+  "mse_relevel_oracle": 0.004163530050878185
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1684,
+  "mse": 0.000693253827203072,
+  "mse_relevel_emulator": 0.0006373206502816936,
+  "mse_relevel_oracle": 0.0006057708027868938
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1892,
+  "mse": 0.00716033198488817,
+  "mse_relevel_emulator": 0.007046453219313778,
+  "mse_relevel_oracle": 0.0061878019966735125
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 1956,
+  "mse": 0.010281128525034466,
+  "mse_relevel_emulator": 0.015361267997583014,
+  "mse_relevel_oracle": 0.009851370184404155
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 24,
+  "mse": 0.01884678411654946,
+  "mse_relevel_emulator": 0.007502447986165583,
+  "mse_relevel_oracle": 0.0062056431561960425
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 27,
+  "mse": 0.0244427037004314,
+  "mse_relevel_emulator": 0.005332283304994328,
+  "mse_relevel_oracle": 0.00399443775658497
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 731,
+  "mse": 0.00646307875210555,
+  "mse_relevel_emulator": 0.007069929596610367,
+  "mse_relevel_oracle": 0.006248371249806228
+ },
+ {
+  "run": "coarse_context_ep16",
+  "cone": 759,
+  "mse": 0.011500478529242358,
+  "mse_relevel_emulator": 0.013855282971361103,
+  "mse_relevel_oracle": 0.01071344084571125
+ }
+]
