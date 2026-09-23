@@ -205,6 +205,14 @@ class ModelConfig:
     cnn_kernel_size: int = 3
     cnn_dropout: float = 0.0
     cnn_norm: str = "groupnorm"
+    # Excursion-set input features (multifield_model.ExcursionSetFeatures);
+    # applied by MultiFieldModel on native LOS windows, ignored elsewhere.
+    excursion_set: str = "none"
+    excursion_set_radii: int = 12
+    excursion_set_rmin: float = 0.9
+    excursion_set_rmax: float = 20.0
+    excursion_set_los_pad: int = 64
+    excursion_set_hidden: int = 64
 
     def __post_init__(self) -> None:
         if self.kind not in {
@@ -310,6 +318,11 @@ class ModelConfig:
             raise ValueError("cnn_kernel_size must be a positive odd integer")
         if not 0.0 <= self.cnn_dropout < 1.0:
             raise ValueError("cnn_dropout must be in [0, 1)")
+        if self.excursion_set not in {"none", "es", "bank"}:
+            raise ValueError(f"excursion_set must be none, es or bank, got {self.excursion_set!r}")
+        if (self.excursion_set_radii < 2 or not 0 < self.excursion_set_rmin < self.excursion_set_rmax
+                or self.excursion_set_los_pad < 0 or self.excursion_set_hidden < 1):
+            raise ValueError("invalid excursion-set radii, padding or hidden width")
         if self.cnn_norm not in {"groupnorm", "batchnorm"}:
             raise ValueError(
                 f"cnn_norm must be 'groupnorm' or 'batchnorm', "
@@ -539,6 +552,12 @@ class ModelConfig:
             "cnn_kernel_size": self.cnn_kernel_size,
             "cnn_dropout": self.cnn_dropout,
             "cnn_norm": self.cnn_norm,
+            "excursion_set": self.excursion_set,
+            "excursion_set_radii": self.excursion_set_radii,
+            "excursion_set_rmin": self.excursion_set_rmin,
+            "excursion_set_rmax": self.excursion_set_rmax,
+            "excursion_set_los_pad": self.excursion_set_los_pad,
+            "excursion_set_hidden": self.excursion_set_hidden,
         }
 
     @property
