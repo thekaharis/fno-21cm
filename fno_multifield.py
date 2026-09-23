@@ -287,6 +287,7 @@ def train(args):
         "training": {"epochs": args.epochs, "seed": args.seed, "batch_size": args.batch_size,
                      "learning_rate": args.lr, "weight_decay": args.weight_decay,
                      "grad_clip": args.grad_clip, "deterministic": args.deterministic,
+                     "augment": getattr(args, "augment", "none"),
                      "loss": "weighted mean of per-field normalized MSE",
                      "loss_weights": dict(zip(mapping.targets, weights)), "monitor": args.monitor,
                      "backbone_training": "from_scratch", "device": str(device)},
@@ -311,7 +312,8 @@ def train(args):
                   f"(stratified on {val_info['target']}); full split evaluated at the end",
                   flush=True)
         if window_config:
-            train_windows = LOSWindowDataset(dataset, rows["train"], window_config, args.seed)
+            train_windows = LOSWindowDataset(dataset, rows["train"], window_config, args.seed,
+                                             augment=args.augment)
             train_loader = DataLoader(train_windows, batch_size=args.batch_size, shuffle=True,
                 num_workers=args.workers, generator=torch.Generator().manual_seed(args.seed))
         else:
@@ -512,6 +514,9 @@ def main():
     p.add_argument("--window-size", type=int, default=256, help="native slices including both halos")
     p.add_argument("--window-halo", type=int, default=32, help="context slices excluded from loss on each side")
     p.add_argument("--windows-per-cone", type=int, default=8, help="random draws per training cone per epoch")
+    p.add_argument("--augment", choices=("none", "transverse"), default="none",
+                   help="training-window augmentation: random transverse periodic shift, "
+                        "rotation and reflection (exact symmetries of the box faces)")
     p.add_argument("--context-factor", type=int, default=4, help="surrounding LOS extent and LOS pooling factor")
     p.add_argument("--context-xy", type=int, default=4, help="transverse box-pooling factor; must divide native X/Y")
     p.add_argument("--context-features", type=int, default=8, help="features per coarse encoder branch")

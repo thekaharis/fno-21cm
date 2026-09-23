@@ -209,15 +209,59 @@ class NativeLightconeDataset(MultiFieldDataset):
         raise RuntimeError("native cones have variable lengths; use LOSWindowDataset or tiled inference")
 
 
+AUGMENTATIONS = ("none", "transverse")
+# Fields that are vector components across the sky would change sign or swap
+# under transverse flips/rotations; none are in the registry today.
+TRANSVERSE_VECTOR_FIELDS = frozenset({"velocity_x", "velocity_y"})
+
+
+def transverse_augment(sample, rng, context_xy=1):
+    """Random element of the transverse symmetry group, applied consistently.
+
+    The transverse planes of a 21cmFAST lightcone are the periodic box faces,
+    and every field used here is a scalar or the LOS velocity component, so
+    periodic shifts, 90-degree rotations and reflections in (x, y) are exact
+    symmetries of the data distribution. The LOS axis is left untouched: it
+    carries redshift evolution and the loss mask.
+
+    The coarse context (pooled by ``context_xy`` transversally) receives the
+    same rotation/reflection and a shift of ``shift/context_xy`` cells; fine
+    shifts are restricted to multiples of ``context_xy`` so both grids stay
+    aligned block for block.
+    """
+    nx, ny = sample["x"].shape[1:3]
+    step = context_xy if "context" in sample else 1
+    quarter_turns = int(rng.integers(4)) if nx == ny else 2*int(rng.integers(2))
+    reflect = bool(rng.integers(2))
+    shift = (int(rng.integers(nx//step))*step, int(rng.integers(ny//step))*step)
+
+    def apply(t, scale):
+        t = torch.rot90(t, quarter_turns, dims=(1, 2))
+        if reflect:
+            t = torch.flip(t, dims=(1,))
+        return torch.roll(t, (shift[0]//scale, shift[1]//scale), dims=(1, 2)).contiguous()
+
+    out = dict(sample)
+    out["x"], out["y"] = apply(sample["x"], 1), apply(sample["y"], 1)
+    if "context" in sample:
+        out["context"] = apply(sample["context"], step)
+    return out
+
+
 class LOSWindowDataset(Dataset):
     """Equal draws per cone, reproducible across worker counts and epochs."""
-    def __init__(self, source, rows, config, seed=0):
+    def __init__(self, source, rows, config, seed=0, augment="none"):
         self.source, self.rows, self.config = source, tuple(rows), config
         self.seed, self.epoch = int(seed), 0
+        self.augment = augment
         if self.seed < 0 or not self.rows:
             raise ValueError("need a nonnegative sampling seed and a nonempty split")
         if config.mode == "coarse_context" and any(n % config.context_xy for n in source.transverse_shape):
             raise ValueError("context_xy must divide the native transverse dimensions")
+        if augment not in AUGMENTATIONS:
+            raise ValueError(f"augment must be one of {AUGMENTATIONS}")
+        if augment == "transverse" and TRANSVERSE_VECTOR_FIELDS & set(source.mapping.fields):
+            raise ValueError("transverse augmentation would corrupt transverse vector fields")
 
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
@@ -233,7 +277,11 @@ class LOSWindowDataset(Dataset):
         # trains the explicit edge-padding behavior used during reconstruction.
         center = int(rng.integers(n))
         start = center - self.config.core//2 - self.config.halo
-        return self.source.window(row, start, self.config)
+        sample = self.source.window(row, start, self.config)
+        # Drawn after the center, so window positions match unaugmented runs.
+        if self.augment == "transverse":
+            sample = transverse_augment(sample, rng, self.config.context_xy)
+        return sample
 
 
 @torch.no_grad()
