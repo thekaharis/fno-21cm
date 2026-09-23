@@ -38,6 +38,15 @@
 #
 # Select the model with MODEL_TAG (reads experiments/los_windows/model_<tag>.json).
 #
+# Multi-field (density,los_velocity -> neutral_fraction,brightness_temp) uses the
+# chunked native mirror (data/native_mirror_4f, 1992 cones, 140x140x64 chunks;
+# window reads ~20x faster than the raw gzip files):
+#   sbatch --export=ALL,SAMPLING=contiguous,MODEL_TAG=cnn_whno,FIELDSET=multifield \
+#          slurm/train_los_window.sbatch
+# FIELDSET=multifield sets PREPARATION, INPUTS, TARGETS and the run root; each can
+# still be overridden. INPUTS/TARGETS are comma lists, so pass them through an
+# exported variable rather than --export (which splits on commas).
+#
 #   sbatch --export=ALL,SAMPLING=contiguous slurm/train_los_window.sbatch
 #   sbatch --export=ALL,SAMPLING=coarse_context slurm/train_los_window.sbatch
 # =============================================================================
@@ -58,11 +67,20 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 
 SAMPLING="${SAMPLING:?set SAMPLING=contiguous|coarse_context}"
-PREPARATION="${PREPARATION:-experiments/los_windows/preparation_xhi_2000.json}"
+FIELDSET="${FIELDSET:-xhi}"
+case "$FIELDSET" in
+    xhi)        PREPARATION="${PREPARATION:-experiments/los_windows/preparation_xhi_2000.json}"
+                INPUTS="${INPUTS:-density}"; TARGETS="${TARGETS:-neutral_fraction}"
+                RUN_ROOT="${RUN_ROOT:-checkpoints/3d_xhi/los_windows}" ;;
+    multifield) PREPARATION="${PREPARATION:-experiments/los_windows/preparation_multifield_2000.json}"
+                INPUTS="${INPUTS:-density,los_velocity}"; TARGETS="${TARGETS:-neutral_fraction,brightness_temp}"
+                RUN_ROOT="${RUN_ROOT:-checkpoints/3d_xhi/mf_los_windows}" ;;
+    *) echo "unknown FIELDSET=$FIELDSET (xhi|multifield)" >&2; exit 1 ;;
+esac
 MODEL_TAG="${MODEL_TAG:-cnn_fno}"
 MODEL_JSON="${MODEL_JSON:-experiments/los_windows/model_${MODEL_TAG}.json}"
 [[ -f "$MODEL_JSON" ]] || { echo "missing model settings: $MODEL_JSON" >&2; exit 1; }
-RUN_DIR="${RUN_DIR:-checkpoints/3d_xhi/los_windows/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}}"
+RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}}"
 
 extra=()
 if [[ "$SAMPLING" == "coarse_context" ]]; then
@@ -73,13 +91,14 @@ fi
 
 echo "sampling:    $SAMPLING"
 echo "preparation: $PREPARATION"
+echo "fields:      $INPUTS -> $TARGETS"
 echo "model:       $MODEL_JSON"
 echo "run dir:     $RUN_DIR"
 echo "started:     $(date)"
 
 srun python fno_multifield.py train \
     --preparation "$PREPARATION" \
-    --inputs density --targets neutral_fraction \
+    --inputs "$INPUTS" --targets "$TARGETS" \
     --model-settings "$(cat "$MODEL_JSON")" \
     --sampling "$SAMPLING" \
     --window-size "${WINDOW_SIZE:-256}" --window-halo "${WINDOW_HALO:-32}" \
