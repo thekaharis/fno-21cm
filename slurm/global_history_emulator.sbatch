@@ -16,4 +16,5 @@ module load devel/miniforge >/dev/null 2>&1 || true
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fno-env
 python -u tools_global_history_emulator.py ${STEPS:-train evaluate relevel} \
-    --workers 16 --members "${MEMBERS:-5}" --epochs "${EPOCHS:-400}"
+    --workers 16 --members "${MEMBERS:-5}" --epochs "${EPOCHS:-400}" \
+    --quantity "${QUANTITY:-neutral_fraction}"

@@ -42,7 +42,10 @@
 #
 # HISTORY_EMULATOR=experiments/global_history/emulator.pt appends the emulated
 # global history x_HI(z) (dataset/global_history.py) as the last input channel
-# and appends _hist to the run dir.
+# and appends _hist to the run dir. Several emulators are separated by ':'
+# (e.g. adding emulator_brightness_temp.pt gives _histtb).
+# FIELDSET=multifield_tbclean trains on the dv/dr-clipped brightness_temp and
+# appends _tbclean to the run dir.
 #
 # Select the model with MODEL_TAG (reads experiments/los_windows/model_<tag>.json).
 #
@@ -83,16 +86,24 @@ case "$FIELDSET" in
     multifield) PREPARATION="${PREPARATION:-experiments/los_windows/preparation_multifield_2000.json}"
                 INPUTS="${INPUTS:-density,los_velocity}"; TARGETS="${TARGETS:-neutral_fraction,brightness_temp}"
                 RUN_ROOT="${RUN_ROOT:-checkpoints/3d_xhi/mf_los_windows}" ;;
-    *) echo "unknown FIELDSET=$FIELDSET (xhi|multifield)" >&2; exit 1 ;;
+    multifield_tbclean)
+                # brightness_temp rebuilt with |dv/dr|/H clipped to 0.2
+                # (tools_clean_brightness_temp.py, data/native_mirror_4f_tbclean)
+                PREPARATION="${PREPARATION:-experiments/los_windows/preparation_multifield_2000_tbclean.json}"
+                INPUTS="${INPUTS:-density,los_velocity}"; TARGETS="${TARGETS:-neutral_fraction,brightness_temp}"
+                RUN_ROOT="${RUN_ROOT:-checkpoints/3d_xhi/mf_los_windows}"; DATA_SUFFIX="_tbclean" ;;
+    *) echo "unknown FIELDSET=$FIELDSET (xhi|multifield|multifield_tbclean)" >&2; exit 1 ;;
 esac
 MODEL_TAG="${MODEL_TAG:-cnn_fno}"
 MODEL_JSON="${MODEL_JSON:-experiments/los_windows/model_${MODEL_TAG}.json}"
 [[ -f "$MODEL_JSON" ]] || { echo "missing model settings: $MODEL_JSON" >&2; exit 1; }
 HISTORY_EMULATOR="${HISTORY_EMULATOR:-}"
+# Several emulators are separated by ':' (--export splits on commas).
 HIST_SUFFIX=""; [[ -n "$HISTORY_EMULATOR" ]] && HIST_SUFFIX="_hist"
+[[ "$HISTORY_EMULATOR" == *brightness_temp* ]] && HIST_SUFFIX="${HIST_SUFFIX}tb"
 AUGMENT="${AUGMENT:-none}"
 AUG_SUFFIX=""; [[ "$AUGMENT" != none ]] && AUG_SUFFIX="_aug${AUGMENT}"
-RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}${AUG_SUFFIX}${HIST_SUFFIX}}"
+RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${SAMPLING}_${MODEL_TAG}_2000_w${WINDOWS_PER_CONE:-4}e${EPOCHS:-30}_s${SEED:-0}${AUG_SUFFIX}${HIST_SUFFIX}${DATA_SUFFIX:-}}"
 
 extra=()
 if [[ "$SAMPLING" == "coarse_context" ]]; then

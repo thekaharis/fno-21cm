@@ -1,0 +1,69 @@
+{
+ "xhi_test": {
+  "cones": 199,
+  "rmse_mK": 2.5741908000559266,
+  "truth_rms_mK": 55.15230362624719,
+  "trough_depth_abs_err_median_mK": 0.9995288848876953,
+  "trough_depth_rel_err_median": 0.012646209645070319,
+  "trough_z_abs_err_median": 0.0
+ },
+ "mf_test": {
+  "cones": 198,
+  "rmse_mK": 2.129684054284885,
+  "truth_rms_mK": 57.25692032782303,
+  "trough_depth_abs_err_median_mK": 0.870732307434082,
+  "trough_depth_rel_err_median": 0.01047120133370916,
+  "trough_z_abs_err_median": 0.0
+ },
+ "cones": {
+  "27": {
+   "trough_truth_mK": -110.26629638671875,
+   "trough_emulator_mK": -99.21300506591797,
+   "trough_z_truth": 17.844365208556844,
+   "trough_z_emulator": 17.844365208556844,
+   "rmse_mK": 5.21084495820869
+  },
+  "969": {
+   "trough_truth_mK": -80.23079681396484,
+   "trough_emulator_mK": -82.3910903930664,
+   "trough_z_truth": 17.844365208556844,
+   "trough_z_emulator": 18.221252512727983,
+   "rmse_mK": 5.308926994273119
+  },
+  "1872": {
+   "trough_truth_mK": -207.5012664794922,
+   "trough_emulator_mK": -205.9647979736328,
+   "trough_z_truth": 11.93535192749715,
+   "trough_z_emulator": 11.93535192749715,
+   "rmse_mK": 2.020294649267419
+  },
+  "403": {
+   "trough_truth_mK": -104.49756622314453,
+   "trough_emulator_mK": -105.8335952758789,
+   "trough_z_truth": 8.056807920516773,
+   "trough_z_emulator": 8.056807920516773,
+   "rmse_mK": 2.4913774432320372
+  },
+  "762": {
+   "trough_truth_mK": -108.37835693359375,
+   "trough_emulator_mK": -97.6412353515625,
+   "trough_z_truth": 14.458942961066132,
+   "trough_z_emulator": 14.155826432417776,
+   "rmse_mK": 4.0025043229362
+  },
+  "1275": {
+   "trough_truth_mK": -167.10816955566406,
+   "trough_emulator_mK": -166.7860107421875,
+   "trough_z_truth": 12.457940145368035,
+   "trough_z_emulator": 12.457940145368035,
+   "rmse_mK": 2.654351785732515
+  },
+  "1031": {
+   "trough_truth_mK": -81.5705795288086,
+   "trough_emulator_mK": -80.98477935791016,
+   "trough_z_truth": 11.189271026506725,
+   "trough_z_emulator": 11.189271026506725,
+   "rmse_mK": 0.980751581607253
+  }
+ }
+}

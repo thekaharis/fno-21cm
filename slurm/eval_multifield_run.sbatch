@@ -12,7 +12,9 @@
 #   sbatch --export=ALL,CHECKPOINT=x.pt,TAG=name,CONES="27 1892 1625 1684" \
 #          slurm/eval_multifield_run.sbatch
 # NOTE must not contain commas: sbatch --export splits on them and silently
-# truncates the value. SKIP_SPEED=1 skips step 4 (e.g. when only adding cones).
+# truncates the value. SKIP_SPEED=1 skips step 4 (e.g. when only adding cones);
+# SKIP_METRICS=1 skips step 1 (e.g. mid-training snapshots, where the run's own
+# end-of-training pass will produce the full metrics).
 # =============================================================================
 #SBATCH --job-name=eval-mf
 #SBATCH --partition=gpu
@@ -42,7 +44,8 @@ mkdir -p "$FIG" "$PRED"
 echo "checkpoint: $CHECKPOINT"; echo "tag: $TAG"; echo "cones: $CONES"; date
 
 echo "== [1] test metrics"
-if [[ -e "$METRICS" ]]; then echo "exists, skipping: $METRICS"
+if [[ "${SKIP_METRICS:-0}" == "1" ]]; then echo "skipped (SKIP_METRICS=1)"
+elif [[ -e "$METRICS" ]]; then echo "exists, skipping: $METRICS"
 else python fno_multifield.py evaluate --checkpoint "$CHECKPOINT" --split test \
          --spectral-bins 12 --out "$METRICS"; fi
 date

@@ -252,12 +252,14 @@ def train(args):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(args.inputs, args.targets, preparation["conditioning"], registry)
     dataset, rows, registry = prepared_dataset(preparation, mapping)
-    history = None
+    histories = []
     if getattr(args, "history_emulator", None):
         if not isinstance(dataset, NativeLightconeDataset):
             raise ValueError("--history-emulator is implemented for native LOS windows")
-        history = HistoryEmulator(args.history_emulator)
-        dataset.install_history(history)
+        for path in args.history_emulator.replace(":", ",").split(","):
+            if path:
+                histories.append(HistoryEmulator(path))
+                dataset.install_history(histories[-1])
     window_config = window_configuration(args, dataset)
     config = ModelConfig.from_dict(json.loads(args.model_settings))
     if config.ndim != 3:
@@ -295,7 +297,7 @@ def train(args):
                      "learning_rate": args.lr, "weight_decay": args.weight_decay,
                      "grad_clip": args.grad_clip, "deterministic": args.deterministic,
                      "augment": getattr(args, "augment", "none"),
-                     "history_emulator": history.describe() if history else None,
+                     "history_emulator": [h.describe() for h in histories] or None,
                      "loss": "weighted mean of per-field normalized MSE",
                      "loss_weights": dict(zip(mapping.targets, weights)), "monitor": args.monitor,
                      "backbone_training": "from_scratch", "device": str(device)},
@@ -408,7 +410,8 @@ def restore(path, device):
     dataset, rows, _ = prepared_dataset(preparation, mapping)
     history = metadata.get("training", {}).get("history_emulator")
     if history:
-        dataset.install_history(HistoryEmulator(history["path"], history["sha256"]))
+        for entry in (history if isinstance(history, list) else [history]):
+            dataset.install_history(HistoryEmulator(entry["path"], entry["sha256"]))
         if list(dataset.channel_names) != list(metadata["input_channels"]):
             raise ValueError("restored input channels differ from the trained model's")
     sampling = metadata.get("sampling", {"mode": "full"})
@@ -528,8 +531,8 @@ def main():
     p.add_argument("--window-halo", type=int, default=32, help="context slices excluded from loss on each side")
     p.add_argument("--windows-per-cone", type=int, default=8, help="random draws per training cone per epoch")
     p.add_argument("--history-emulator", default=None,
-                   help="frozen global-history emulator (dataset.global_history); its x_HI(z) "
-                        "is appended as the last input channel")
+                   help="frozen global-history emulator file(s) (dataset.global_history), "
+                        "separated by ':' or ','; each appends one input channel, in order")
     p.add_argument("--augment", choices=("none", "transverse"), default="none",
                    help="training-window augmentation: random transverse periodic shift, "
                         "rotation and reflection (exact symmetries of the box faces)")

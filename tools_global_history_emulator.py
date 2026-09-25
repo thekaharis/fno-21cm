@@ -25,11 +25,18 @@ Held out from training: the validation and test cones of BOTH the x_HI study
 can feed either field model without leakage.
 
   python tools_global_history_emulator.py --workers 16
+
+--quantity brightness_temp builds the global T_b history emulator instead
+(unconstrained MLP ensemble on standardized mK; files histories_brightness_temp.npz
+and emulator_brightness_temp.pt; channel T_b_global_emulated in units of 100 mK).
+Its evaluate step reports RMSE in mK and absorption-trough depth/position errors;
+relevel applies to x_HI only.
 """
 from __future__ import annotations
 
 import argparse
 import json
+from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -37,21 +44,27 @@ import h5py
 import numpy as np
 import torch
 
-from dataset.global_history import MonotoneHistory
+from dataset.global_history import HistoryEmulator, MonotoneHistory, PlainHistory
 
 RAW = Path("/pfs/10/work/hd_id260-fno_training/data/data")
 OUT = Path("experiments/global_history")
 PRED_DIRS = {"contiguous_ep18": Path("experiments/los_windows/predictions/contiguous_ep18"),
              "coarse_context_ep16": Path("experiments/los_windows/predictions/coarse_context_ep16")}
 Z_RANGE = (5.0, 25.0)           # lightcone coverage
+CHANNELS = {"neutral_fraction": ("x_HI_global_emulated", 1.0),
+            "brightness_temp": ("T_b_global_emulated", 100.0)}     # name, channel scale
 
 
-def read_one(path):
+def suffix(quantity):
+    return "" if quantity == "neutral_fraction" else f"_{quantity}"
+
+
+def read_one(path, quantity="neutral_fraction"):
     try:
         with h5py.File(path, "r") as h:
             sid = int(h.attrs["sample_id"])
             z = h["lightcone/node_redshifts"][:]
-            x = h["lightcone/global_quantities/neutral_fraction"][:]
+            x = h[f"lightcone/global_quantities/{quantity}"][:]
             theta = h["params/values"][:]
             names = [n.decode() if isinstance(n, bytes) else str(n) for n in h["params/names"][:]]
         if not (np.isfinite(x).all() and np.isfinite(theta).all()):
@@ -61,15 +74,16 @@ def read_one(path):
         return None
 
 
-def collect(out, workers):
+def collect(out, workers, quantity="neutral_fraction"):
     paths = sorted(RAW.glob("21cmfast_11d_sample*.h5"))
     with Pool(workers) as pool:
-        rows = [r for r in pool.map(read_one, paths, chunksize=16) if r is not None]
+        rows = [r for r in pool.map(partial(read_one, quantity=quantity), paths, chunksize=16)
+                if r is not None]
     z = rows[0][1]
     if not all(np.array_equal(r[1], z) for r in rows):
         raise ValueError("node redshifts differ between simulations")
     order = np.argsort(z)                                   # increasing z
-    np.savez(out/"histories.npz", sample_id=np.array([r[0] for r in rows]),
+    np.savez(out/f"histories{suffix(quantity)}.npz", sample_id=np.array([r[0] for r in rows]),
              z=z[order], x=np.stack([r[2][order] for r in rows]),
              theta=np.stack([r[3] for r in rows]), names=np.array(rows[0][4]))
     print(f"collected {len(rows)}/{len(paths)} simulations")
@@ -83,8 +97,9 @@ def holdout_ids():
             "all": set(xhi["val"]) | set(xhi["test"]) | mf}
 
 
-def train(out, members, epochs, seed0=0):
-    d = np.load(out/"histories.npz")
+def train(out, members, epochs, seed0=0, quantity="neutral_fraction"):
+    d = np.load(out/f"histories{suffix(quantity)}.npz")
+    monotone = quantity == "neutral_fraction"
     held = holdout_ids()["all"]
     sid = d["sample_id"]
     pool_idx = np.flatnonzero(~np.isin(sid, list(held)))
@@ -94,11 +109,12 @@ def train(out, members, epochs, seed0=0):
     val_idx, train_idx = pool_idx[:n_val], pool_idx[n_val:]
     mu, sd = d["theta"][train_idx].mean(0), d["theta"][train_idx].std(0)
     th = torch.tensor((d["theta"]-mu)/sd, dtype=torch.float32)
-    x = torch.tensor(d["x"], dtype=torch.float32)
+    offset, scale = (0.0, 1.0) if monotone else (float(d["x"][train_idx].mean()), float(d["x"][train_idx].std()))
+    x = torch.tensor((d["x"]-offset)/scale, dtype=torch.float32)
     states = []
     for m in range(members):
         torch.manual_seed(seed0+m)
-        model = MonotoneHistory(th.shape[1], x.shape[1])
+        model = (MonotoneHistory if monotone else PlainHistory)(th.shape[1], x.shape[1])
         opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
         best, best_state = np.inf, None
@@ -118,24 +134,22 @@ def train(out, members, epochs, seed0=0):
                     best, best_state = v, {k: t.clone() for k, t in model.state_dict().items()}
         print(f"member {m}: best val MSE {best:.3e}", flush=True)
         states.append(best_state)
+    channel, channel_scale = CHANNELS[quantity]
     torch.save({"states": states, "theta_mean": mu, "theta_std": sd, "z": d["z"],
                 "names": list(d["names"]), "train_ids": sid[train_idx].tolist(),
-                "val_ids": sid[val_idx].tolist(), "hidden": 256}, out/"emulator.pt")
+                "val_ids": sid[val_idx].tolist(), "hidden": 256, "quantity": quantity,
+                "kind": "monotone" if monotone else "plain", "channel": channel,
+                "output_offset": offset, "output_scale": scale, "channel_scale": channel_scale},
+               out/f"emulator{suffix(quantity)}.pt")
     print(f"train {len(train_idx)}  val {len(val_idx)}  held out {len(held)}")
 
 
-def load_emulator(out):
-    ck = torch.load(out/"emulator.pt", weights_only=False)
-    models = []
-    for s in ck["states"]:
-        m = MonotoneHistory(len(ck["theta_mean"]), len(ck["z"]), ck["hidden"])
-        m.load_state_dict(s); m.eval(); models.append(m)
+def load_emulator(out, quantity="neutral_fraction"):
+    emu = HistoryEmulator(out/f"emulator{suffix(quantity)}.pt")
 
-    def predict(theta):
-        t = torch.tensor((np.atleast_2d(theta)-ck["theta_mean"])/ck["theta_std"], dtype=torch.float32)
-        with torch.no_grad():
-            return torch.stack([m(t) for m in models]).numpy()     # (members, n, nodes)
-    return predict, ck["z"]
+    def predict(theta):                                            # (members, n, nodes)
+        return emu.ensemble(theta, emu.names)
+    return predict, emu.z
 
 
 def crossing(z, x, level=0.5):
@@ -200,6 +214,57 @@ def evaluate(out):
     for cone, r in sorted(comparison.items()):
         print(f"{cone:5d} " + "  ".join(f"{r.get(k, np.nan):22.3f}" for k in keys))
     plot(d, predict, z, comparison, out)
+
+
+def evaluate_tb(out):
+    """Global T_b emulator on held-out cones: RMSE (mK) and absorption trough."""
+    q = "brightness_temp"
+    d = np.load(out/f"histories{suffix(q)}.npz")
+    predict, z = load_emulator(out, q)
+    held = holdout_ids()
+    mf_test = {r["sample_id"] for r in json.load(open(
+        "experiments/los_windows/preparation_multifield_2000_sample_ids.json"))["rows"] if r["split"] == "test"}
+    sid = list(d["sample_id"])
+    band = (z >= Z_RANGE[0]) & (z <= Z_RANGE[1])
+    report = {}
+    for split, ids in (("xhi_test", held["xhi_test"]), ("mf_test", mf_test)):
+        idx = [sid.index(s) for s in sorted(ids) if s in sid]
+        mean = predict(d["theta"][idx]).mean(0)[:, band]
+        truth = d["x"][idx][:, band]
+        zb = z[band]
+        depth_t, depth_p = truth.min(1), mean.min(1)
+        report[split] = {"cones": len(idx),
+                         "rmse_mK": float(np.sqrt(((mean-truth)**2).mean())),
+                         "truth_rms_mK": float(np.sqrt((truth**2).mean())),
+                         "trough_depth_abs_err_median_mK": float(np.median(np.abs(depth_p-depth_t))),
+                         "trough_depth_rel_err_median": float(np.median(np.abs(depth_p-depth_t)/np.abs(depth_t))),
+                         "trough_z_abs_err_median": float(np.median(np.abs(zb[mean.argmin(1)]-zb[truth.argmin(1)])))}
+    cones = {}
+    for c in (27, 969, 1872, 403, 762, 1275, 1031):
+        i = sid.index(c)
+        t, p = d["x"][i][band], predict(d["theta"][i:i+1]).mean(0)[0][band]
+        cones[c] = {"trough_truth_mK": float(t.min()), "trough_emulator_mK": float(p.min()),
+                    "trough_z_truth": float(z[band][t.argmin()]), "trough_z_emulator": float(z[band][p.argmin()]),
+                    "rmse_mK": float(np.sqrt(((p-t)**2).mean()))}
+    report["cones"] = cones
+    (out/"evaluation_brightness_temp.json").write_text(json.dumps(report, indent=1))
+    print(json.dumps(report, indent=1))
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, 4, figsize=(16, 6))
+    for ax, c in zip(axes.flat, list(cones)+[None]):
+        if c is None:
+            ax.axis("off"); continue
+        i = sid.index(c); ens = predict(d["theta"][i:i+1])[:, 0]
+        ax.plot(z, d["x"][i], "k", lw=2, label="truth (box history)")
+        ax.fill_between(z, ens.min(0), ens.max(0), color="C0", alpha=0.3)
+        ax.plot(z, ens.mean(0), "C0", lw=1.3, label="emulator")
+        ax.set_xlim(*Z_RANGE); ax.set_title(f"sample {c}", fontsize=10); ax.grid(alpha=0.3)
+        ax.set_xlabel("z"); ax.set_ylabel("mean T_b [mK]")
+    axes[0][0].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out/"tb_histories_emulator.png", dpi=120)
 
 
 def relevel_slices(pred, target_mean, iters=40):
@@ -279,13 +344,17 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--members", type=int, default=5)
     ap.add_argument("--epochs", type=int, default=400)
+    ap.add_argument("--quantity", choices=tuple(CHANNELS), default="neutral_fraction")
     args = ap.parse_args()
+    if args.quantity != "neutral_fraction" and "relevel" in args.steps:
+        args.steps = [s for s in args.steps if s != "relevel"]
     args.out.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(max(1, args.workers))
     for step in args.steps:
-        {"collect": lambda: collect(args.out, args.workers),
-         "train": lambda: train(args.out, args.members, args.epochs),
-         "evaluate": lambda: evaluate(args.out),
+        q = args.quantity
+        {"collect": lambda: collect(args.out, args.workers, q),
+         "train": lambda: train(args.out, args.members, args.epochs, quantity=q),
+         "evaluate": lambda: evaluate(args.out) if q == "neutral_fraction" else evaluate_tb(args.out),
          "relevel": lambda: relevel(args.out)}[step]()
 
 

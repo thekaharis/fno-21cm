@@ -111,20 +111,21 @@ class NativeLightconeDataset(MultiFieldDataset):
                               "relative_los_Mpc/1000", "native_valid")
         self.in_channels = len(self.channel_names)
         self.out_channels = len(self.mapping.targets)
-        self.history = None
+        self.history = []
 
     def install_history(self, emulator):
-        """Append the emulated global history x_HI(z) as the LAST input channel.
+        """Append an emulated global history q(z) as a new LAST input channel.
 
         Appending keeps every existing channel index (including those the
-        excursion-set layer reads) unchanged.
+        excursion-set layer reads) unchanged. Several emulators may be
+        installed; each adds one channel, in installation order.
         """
         if not self.mapping.use_params:
             raise ValueError("the history emulator needs parameter conditioning")
-        if self.history is not None:
-            raise ValueError("history emulator already installed")
-        self.history = (emulator.z, emulator.histories(self.params, PARAM_NAMES))
-        self.channel_names = (*self.channel_names, emulator.CHANNEL)
+        if emulator.channel in self.channel_names:
+            raise ValueError(f"history channel {emulator.channel} already installed")
+        self.history.append((emulator.z, emulator.channel_histories(self.params, PARAM_NAMES)))
+        self.channel_names = (*self.channel_names, emulator.channel)
         self.in_channels = len(self.channel_names)
 
     def source_description(self):
@@ -199,8 +200,7 @@ class NativeLightconeDataset(MultiFieldDataset):
             conditioning.extend(torch.full(pooled_shape, float(v))
                 for v in self.parameter_normalization.normalize(self.params[idx]))
         conditioning.extend((los_channel(relative), los_channel(valid)))
-        if self.history is not None:
-            nodes, histories = self.history
+        for nodes, histories in self.history:
             conditioning.append(los_channel(np.interp(z, nodes, histories[idx])))
         return values, conditioning
 
