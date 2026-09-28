@@ -113,6 +113,10 @@ class PhysicalConfig:
     partial_range: tuple[float, float] = (0.1, 0.9)
     dtb_range_mk: tuple[float, float] = (-5.0, 100.0)
     dtb_bins: int = 105
+    # "saturated": dT_b recomputed from x_HI and density (T_S >> T_CMB, no
+    # velocities) -- isolates the x_HI error. "npz": a model's own predicted
+    # dT_b and its target, read from the manifest npz (tb_pred / tb_truth).
+    dtb_source: str = "saturated"
     xbar_bins: int = 20
     k_targets: tuple[float, ...] = (0.1, 0.2, 0.5)
     eft_k_max: float = 0.25
@@ -265,7 +269,8 @@ class PhysicalAccumulator:
         return rows
 
     # -- main entry --------------------------------------------------------- #
-    def add_cone(self, cone_id, pred, truth, density=None, omega_m=None):
+    def add_cone(self, cone_id, pred, truth, density=None, omega_m=None,
+                 dtb_pred=None, dtb_truth=None):
         cfg = self.cfg
         pred = np.asarray(pred, dtype=np.float64)
         truth = np.asarray(truth, dtype=np.float64)
@@ -316,14 +321,22 @@ class PhysicalAccumulator:
             if delta.shape != truth.shape:
                 raise ValueError("density must match the x_HI cube shape")
             self._add_observable(rec, masks, xbar_t, truth, pred, delta,
-                                 cosmo, power_t, power_p)
+                                 cosmo, power_t, power_p, dtb_pred, dtb_truth)
         self.records.append(rec)
 
     def _add_observable(self, rec, masks, xbar_t, truth, pred, delta, cosmo,
-                        power_t, power_p):
+                        power_t, power_p, dtb_pred=None, dtb_truth=None):
         cfg = self.cfg
-        dtb_t = brightness_temperature_mk(truth, delta, self.z, **cosmo)
-        dtb_p = brightness_temperature_mk(pred, delta, self.z, **cosmo)
+        if (dtb_pred is None) != (dtb_truth is None):
+            raise ValueError("give both dtb_pred and dtb_truth, or neither")
+        if dtb_pred is not None:
+            dtb_t = np.asarray(dtb_truth, dtype=np.float64)
+            dtb_p = np.asarray(dtb_pred, dtype=np.float64)
+            if dtb_t.shape != truth.shape or dtb_p.shape != truth.shape:
+                raise ValueError("dT_b cubes must match the x_HI cube shape")
+        else:
+            dtb_t = brightness_temperature_mk(truth, delta, self.z, **cosmo)
+            dtb_p = brightness_temperature_mk(pred, delta, self.z, **cosmo)
 
         rec["dtb_hist_truth"] = self._stage_hist(dtb_t, masks, cfg.dtb_edges)
         rec["dtb_hist_pred"] = self._stage_hist(dtb_p, masks, cfg.dtb_edges)
@@ -885,10 +898,12 @@ def run_from_cubes(sources: dict[str, Callable], cfg: PhysicalConfig, z_grid,
     results = {}
     for name, source in sources.items():
         accumulator = None
-        for cone_id, pred, truth, density, omega_m in source():
+        for item in source():
+            cone_id, pred, truth, density, omega_m, *extra = item
+            extra = extra[0] if extra else {}
             if accumulator is None:
                 accumulator = PhysicalAccumulator(cfg, z_grid, truth.shape[:2])
-            accumulator.add_cone(cone_id, pred, truth, density, omega_m)
+            accumulator.add_cone(cone_id, pred, truth, density, omega_m, **extra)
         if accumulator is None:
             raise ValueError(f"model {name!r} produced no cones")
         print(f"[{name}] accumulated {len(accumulator.records)} cones")
@@ -919,27 +934,34 @@ def run_from_cubes(sources: dict[str, Callable], cfg: PhysicalConfig, z_grid,
     return results
 
 
-def _manifest_source(entries: list[dict]) -> Callable:
+def _manifest_source(entries: list[dict], dtb_from_npz: bool = False) -> Callable:
     def generate():
         for entry in entries:
             with np.load(entry["npz"]) as data:
                 pred = np.asarray(data["pred"])
                 truth = np.asarray(data["truth"])
                 density = np.asarray(data["density"]) if "density" in data else None
+                extra = {}
+                if dtb_from_npz:
+                    if "tb_pred" not in data or "tb_truth" not in data:
+                        raise ValueError(f"{entry['npz']} has no tb_pred/tb_truth for --dtb-from-npz")
+                    extra = {"dtb_pred": np.asarray(data["tb_pred"]),
+                             "dtb_truth": np.asarray(data["tb_truth"])}
             yield (entry.get("cone_id", entry["npz"]), pred, truth, density,
-                   entry.get("omega_m"))
+                   entry.get("omega_m"), extra)
 
     return generate
 
 
 def run_from_manifest(manifest_path: Path, cfg: PhysicalConfig, out_dir: Path):
+    dtb_from_npz = cfg.dtb_source == "npz"
     from viz.bubble_size_evaluation import _validate_manifest_pairing
 
     spec = json.loads(Path(manifest_path).read_text())
     if "z_grid" not in spec:
         raise ValueError("manifest needs a top-level z_grid for the history diagnostics")
     _validate_manifest_pairing(spec["models"])
-    sources = {name: _manifest_source(entries) for name, entries in spec["models"].items()}
+    sources = {name: _manifest_source(entries, dtb_from_npz) for name, entries in spec["models"].items()}
     return run_from_cubes(sources, cfg, np.asarray(spec["z_grid"]), out_dir)
 
 
@@ -1137,6 +1159,14 @@ def _parse_kv(items: list[str]) -> dict[str, str]:
     return parsed
 
 
+def _dtb_settings(args) -> dict:
+    if args.dtb_from_npz and not args.manifest:
+        raise SystemExit("--dtb-from-npz needs --manifest")
+    lo, hi = args.dtb_range or ((-250.0, 100.0) if args.dtb_from_npz else (-5.0, 100.0))
+    return {"dtb_source": "npz" if args.dtb_from_npz else "saturated",
+            "dtb_range_mk": (float(lo), float(hi)), "dtb_bins": int(round(hi - lo))}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1154,6 +1184,12 @@ def main(argv=None):
     parser.add_argument("--k-targets", type=float, nargs="+", default=[0.1, 0.2, 0.5])
     parser.add_argument("--eft-k-max", type=float, default=0.25)
     parser.add_argument("--eft-terms", type=int, default=2)
+    parser.add_argument("--dtb-from-npz", action="store_true",
+                        help="manifest only: evaluate the model's own dT_b (npz tb_pred/tb_truth) "
+                             "instead of recomputing it from x_HI in the saturated limit")
+    parser.add_argument("--dtb-range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                        help="dT_b PDF range in mK (1 mK bins); default -5 100, or -250 100 "
+                             "with --dtb-from-npz (absorption)")
     args = parser.parse_args(argv)
 
     if args.selftest:
@@ -1165,6 +1201,7 @@ def main(argv=None):
         k_targets=tuple(args.k_targets),
         eft_k_max=args.eft_k_max,
         eft_terms=args.eft_terms,
+        **_dtb_settings(args),
     )
     if args.manifest:
         run_from_manifest(args.manifest, cfg, args.out)
