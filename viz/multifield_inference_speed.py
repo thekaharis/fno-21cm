@@ -111,6 +111,54 @@ def time_model(model, samples, warmup, iters):
     }
 
 
+def time_native(model, dataset, rows, config, warmup, iters):
+    """Whole-cone inference for native-LOS window models.
+
+    For these models one forward pass covers a single window, so the honest
+    per-cone cost is assembling the full native cone from overlapping windows
+    (predict_native_cone), which is what a user of the model actually pays.
+    That path copies each window's core to host memory, so unlike the full-grid
+    timing this includes device-to-host transfer.
+    """
+    from dataset.los_windows import predict_native_cone
+    device = next(model.parameters()).device
+    with torch.no_grad():
+        for i in range(warmup):
+            predict_native_cone(model, dataset, rows[i % len(rows)], config, device)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+        times, lengths = [], []
+        for i in range(iters):
+            row = rows[i % len(rows)]
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            out = predict_native_cone(model, dataset, row, config, device)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            times.append(time.perf_counter() - t0)
+            lengths.append(int(out.shape[-1]))
+    t = np.asarray(times, dtype=float)
+    med = float(np.median(t))
+    n_los = float(np.median(lengths))
+    spatial = int(np.prod(dataset.transverse_shape)) * n_los
+    peak = (torch.cuda.max_memory_allocated() / 2 ** 20
+            if device.type == "cuda" else float("nan"))
+    return {
+        "ms_per_cone": med * 1e3,
+        "ms_p16": float(np.percentile(t, 16)) * 1e3,
+        "ms_p84": float(np.percentile(t, 84)) * 1e3,
+        "cones_per_s": 1.0 / med,
+        "in_voxels_per_s": dataset.in_channels * spatial / med,
+        "out_voxels_per_s": dataset.out_channels * spatial / med,
+        "peak_mib": peak,
+        "n_timed": int(t.size),
+        "in_shape": ("native", int(n_los)),
+        "out_shape": ("native", int(n_los)),
+    }
+
+
 def run(checkpoints, split, n_samples, warmup, iters, device_arg):
     from fno_multifield import restore, choose_device
     device = choose_device(device_arg)
@@ -121,16 +169,24 @@ def run(checkpoints, split, n_samples, warmup, iters, device_arg):
     for name, path in checkpoints.items():
         checkpoint, model, dataset, split_rows = restore(path, device)
         try:
-            idx = split_rows[split][:n_samples]
-            samples = [dataset[int(i)] for i in idx]
+            idx = [int(i) for i in split_rows[split][:n_samples]]
             real, cplx = count_params(model)
             mapping = checkpoint["metadata"]["mapping"]
-            r = time_model(model, samples, warmup, iters)
+            sampling = checkpoint["metadata"].get("sampling", {"mode": "full"})
+            if sampling.get("mode", "full") != "full":
+                from dataset.los_windows import LOSWindowConfig
+                r = time_native(model, dataset, idx, LOSWindowConfig(**sampling),
+                                warmup, iters)
+                r["timing_mode"] = f"native whole-cone ({sampling['mode']})"
+            else:
+                samples = [dataset[i] for i in idx]
+                r = time_model(model, samples, warmup, iters)
+                r["timing_mode"] = "full-grid forward"
             r.update(name=name, checkpoint=str(path), params_real=real,
                      params_complex=cplx,
                      inputs=",".join(mapping["inputs"]),
                      targets=",".join(mapping["targets"]),
-                     n_cones_timed=len(samples))
+                     n_cones_timed=len(idx))
             rows.append(r)
             print(f"{name:18s} {r['ms_per_cone']:8.1f} ms/cone  "
                   f"{r['cones_per_s']:7.3f} cones/s  "

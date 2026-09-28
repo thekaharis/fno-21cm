@@ -21,6 +21,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from dataset.fields import FOUR_FIELDS, FieldMapping, FieldRegistry
+from dataset.global_history import HistoryEmulator
 from dataset.lightcone_params import PARAM_NAMES
 from dataset.multifield import MultiFieldDataset
 from dataset.los_windows import (LOSWindowConfig, LOSWindowDataset, NativeLightconeDataset,
@@ -194,6 +195,52 @@ def save_checkpoint(path, model, metadata, epoch):
     temporary.replace(path)
 
 
+def cone_means(dataset, rows, target):
+    """Mean of ``target`` over each whole cone (one full-field read per cone)."""
+    means = []
+    for r in rows:
+        if isinstance(dataset, NativeLightconeDataset):
+            value = dataset.read_fields(r, names=[target])[target]
+        else:
+            value = dataset.read_fields(r)[target]
+        means.append(float(np.mean(value)))
+    return means
+
+
+def stratified_pick(means, n):
+    """Positions of n items at evenly spaced quantiles of ``means``."""
+    order = np.argsort(means, kind="stable")
+    return [int(order[i]) for i in
+            np.unique(np.linspace(0, len(means) - 1, n).round().astype(int))]
+
+
+def validation_subset(dataset, val_rows, n, target):
+    """Fixed, representative subset of validation rows for per-epoch monitoring.
+
+    Full native-cone validation walks every cone through overlapping windows
+    and is I/O-bound on the raw gzip lightcones; at 200 cones it cost ~60% of
+    each epoch. A fixed subset keeps monitoring and checkpoint selection honest
+    at a fraction of the cost.
+
+    Cones are ranked by the mean of ``target`` and taken at evenly spaced
+    quantiles -- a proportional stratified sample. That spans the ionization
+    histories present while keeping the subset's composition matched to the
+    full split, so its score is a lower-variance proxy for the full validation
+    score rather than one tilted toward any reionization stage. Selection is
+    deterministic and does not depend on the model.
+    """
+    rows = [int(r) for r in val_rows]
+    if n <= 0 or n >= len(rows):
+        return rows, None
+    means = cone_means(dataset, rows, target)
+    chosen = sorted(rows[i] for i in stratified_pick(means, n))
+    info = {"target": target, "requested": n, "selected": len(chosen),
+            "of": len(rows),
+            "cone_ids": [int(dataset.cone_ids[r]) for r in chosen],
+            "cone_means": [round(means[rows.index(r)], 6) for r in chosen]}
+    return chosen, info
+
+
 def train(args):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("multi-field runs currently use one process/GPU; schedule mappings independently")
@@ -205,6 +252,14 @@ def train(args):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(args.inputs, args.targets, preparation["conditioning"], registry)
     dataset, rows, registry = prepared_dataset(preparation, mapping)
+    histories = []
+    if getattr(args, "history_emulator", None):
+        if not isinstance(dataset, NativeLightconeDataset):
+            raise ValueError("--history-emulator is implemented for native LOS windows")
+        for path in args.history_emulator.replace(":", ",").split(","):
+            if path:
+                histories.append(HistoryEmulator(path))
+                dataset.install_history(histories[-1])
     window_config = window_configuration(args, dataset)
     config = ModelConfig.from_dict(json.loads(args.model_settings))
     if config.ndim != 3:
@@ -224,7 +279,8 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
     torch.use_deterministic_algorithms(args.deterministic)
     device = choose_device(args.device)
-    model = MultiFieldModel(config, dataset.in_channels, mapping, registry, window_config).to(device)
+    model = MultiFieldModel(config, dataset.in_channels, mapping, registry, window_config,
+                            dataset.normalization, dataset.parameter_normalization).to(device)
     weights_tensor = torch.tensor(weights, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -241,6 +297,8 @@ def train(args):
         "training": {"epochs": args.epochs, "seed": args.seed, "batch_size": args.batch_size,
                      "learning_rate": args.lr, "weight_decay": args.weight_decay,
                      "grad_clip": args.grad_clip, "deterministic": args.deterministic,
+                     "augment": getattr(args, "augment", "none"),
+                     "history_emulator": [h.describe() for h in histories] or None,
                      "loss": "weighted mean of per-field normalized MSE",
                      "loss_weights": dict(zip(mapping.targets, weights)), "monitor": args.monitor,
                      "backbone_training": "from_scratch", "device": str(device)},
@@ -254,8 +312,19 @@ def train(args):
         started = True
         print(f"Mapping: {mapping.slug}; device={device}; parameters={metadata['parameter_count']:,}; "
               f"train/val/test={len(rows['train'])}/{len(rows['val'])}/{len(rows['test'])}", flush=True)
+        val_rows, val_info = validation_subset(dataset, rows["val"], args.val_cones,
+                                               mapping.targets[0])
+        metadata["training"]["validation"] = (
+            {"mode": "full", "cones": len(val_rows)} if val_info is None
+            else {"mode": "stratified_subset", **val_info})
+        write_json(out / "run_metadata.json", metadata)
+        if val_info is not None:
+            print(f"Per-epoch validation on {len(val_rows)}/{len(rows['val'])} cones "
+                  f"(stratified on {val_info['target']}); full split evaluated at the end",
+                  flush=True)
         if window_config:
-            train_windows = LOSWindowDataset(dataset, rows["train"], window_config, args.seed)
+            train_windows = LOSWindowDataset(dataset, rows["train"], window_config, args.seed,
+                                             augment=args.augment)
             train_loader = DataLoader(train_windows, batch_size=args.batch_size, shuffle=True,
                 num_workers=args.workers, generator=torch.Generator().manual_seed(args.seed))
         else:
@@ -285,7 +354,7 @@ def train(args):
                 if (batch_index + 1) % 25 == 0:
                     print(f"Epoch {epoch+1}, batch {batch_index+1}/{len(train_loader)}: "
                           f"loss={total/samples:.6g}", flush=True)
-            validation = evaluate_rows(model, dataset, rows["val"], device, args.batch_size,
+            validation = evaluate_rows(model, dataset, val_rows, device, args.batch_size,
                                        args.workers, window_config=window_config)
             score = (sum(validation[n]["normalized_mse"] * w for n, w in zip(mapping.targets, weights))
                      / sum(weights) if args.monitor == "mean"
@@ -294,6 +363,7 @@ def train(args):
                 best = score
                 save_checkpoint(out / "best.pt", model, metadata, epoch)
             record = {"epoch": epoch, "train_loss": total/samples, "val_score": score,
+                      "val_cones": len(val_rows),
                       "validation": validation, "learning_rate": optimizer.param_groups[0]["lr"],
                       "elapsed_seconds": time.monotonic()-start}
             with (out / "metrics.jsonl").open("a") as f:
@@ -308,6 +378,14 @@ def train(args):
                              args.spectral_bins, window_config)
         write_json(out / "test_metrics.json", {"checkpoint": "best.pt", "epoch": checkpoint["epoch"],
                     "split": "test", "fields": test})
+        if val_info is not None:
+            # The subset only steered monitoring and checkpoint choice; report the
+            # full split too, so the proxy's fidelity is on record.
+            full_val = evaluate_rows(model, dataset, rows["val"], device, args.batch_size,
+                                     args.workers, args.spectral_bins, window_config)
+            write_json(out / "val_full_metrics.json", {
+                "checkpoint": "best.pt", "epoch": checkpoint["epoch"], "split": "val",
+                "cones": len(rows["val"]), "fields": full_val})
         metadata.update(status="complete", best_epoch=checkpoint["epoch"],
                         elapsed_seconds=time.monotonic()-start)
         write_json(out / "run_metadata.json", metadata)
@@ -331,10 +409,17 @@ def restore(path, device):
     registry = FieldRegistry.from_dict(preparation["registry"])
     mapping = FieldMapping.create(**metadata["mapping"], registry=registry)
     dataset, rows, _ = prepared_dataset(preparation, mapping)
+    history = metadata.get("training", {}).get("history_emulator")
+    if history:
+        for entry in (history if isinstance(history, list) else [history]):
+            dataset.install_history(HistoryEmulator(entry["path"], entry["sha256"]))
+        if list(dataset.channel_names) != list(metadata["input_channels"]):
+            raise ValueError("restored input channels differ from the trained model's")
     sampling = metadata.get("sampling", {"mode": "full"})
     window_config = None if sampling["mode"] == "full" else LOSWindowConfig(**sampling)
     model = MultiFieldModel(ModelConfig.from_dict(metadata["model_config"]),
-                            dataset.in_channels, mapping, registry, window_config).to(device)
+                            dataset.in_channels, mapping, registry, window_config,
+                            dataset.normalization, dataset.parameter_normalization).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     return checkpoint, model, dataset, rows
@@ -447,9 +532,20 @@ def main():
     p.add_argument("--window-size", type=int, default=256, help="native slices including both halos")
     p.add_argument("--window-halo", type=int, default=32, help="context slices excluded from loss on each side")
     p.add_argument("--windows-per-cone", type=int, default=8, help="random draws per training cone per epoch")
+    p.add_argument("--history-emulator", default=None,
+                   help="frozen global-history emulator file(s) (dataset.global_history), "
+                        "separated by ':' or ','; each appends one input channel, in order")
+    p.add_argument("--augment", choices=("none", "transverse"), default="none",
+                   help="training-window augmentation: random transverse periodic shift, "
+                        "rotation and reflection (exact symmetries of the box faces)")
     p.add_argument("--context-factor", type=int, default=4, help="surrounding LOS extent and LOS pooling factor")
     p.add_argument("--context-xy", type=int, default=4, help="transverse box-pooling factor; must divide native X/Y")
     p.add_argument("--context-features", type=int, default=8, help="features per coarse encoder branch")
+    p.add_argument("--val-cones", type=int, default=0,
+                   help="validate on this many fixed validation cones each epoch (0 = all). "
+                        "Chosen as a stratified sample over the first target's cone mean; "
+                        "the full validation split and test split are still evaluated once "
+                        "at the end on the best checkpoint")
     p.set_defaults(function=train)
     p = commands.add_parser("evaluate")
     p.add_argument("--checkpoint", required=True)

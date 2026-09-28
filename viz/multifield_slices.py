@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import TwoSlopeNorm
 
+from viz._zaxis import edges, transverse_edges
+
 BOX_MPC = 200.0
 CMAPS = {"neutral_fraction": "magma", "brightness_temp": "inferno",
          "density": "viridis", "los_velocity": "coolwarm"}
@@ -69,7 +71,7 @@ def los_figure(field, truth, pred, z, cone, units, n_slices, out_path, full_z=Fa
     if n == 1:
         axes = axes[:, None]
     cmap = CMAPS.get(field, "viridis")
-    ext = [0, BOX_MPC, zc[0], zc[-1]]
+    xe, ze = transverse_edges(truth.shape[0], BOX_MPC), edges(zc)
     if field in BOUNDS:
         v0, v1 = BOUNDS[field]
     else:
@@ -82,8 +84,8 @@ def los_figure(field, truth, pred, z, cone, units, n_slices, out_path, full_z=Fa
         last = None
         for row, (label, data) in enumerate((("truth", tt), ("prediction", pp))):
             ax = axes[row, col]
-            last = ax.imshow(data.T, origin="lower", aspect="auto", cmap=cmap,
-                             vmin=v0, vmax=v1, extent=ext)
+            last = ax.pcolormesh(xe, ze, data.T, cmap=cmap, vmin=v0, vmax=v1,
+                                 shading="flat", rasterized=True)
             ax.set_xticks([])
             if col == 0:
                 ax.set_ylabel(f"{label}\nredshift", fontsize=11)
@@ -97,8 +99,9 @@ def los_figure(field, truth, pred, z, cone, units, n_slices, out_path, full_z=Fa
         ax = axes[2, col]
         err = pp - tt
         lim = np.percentile(np.abs(err), 99) or 1.0
-        im = ax.imshow(err.T, origin="lower", aspect="auto", cmap="RdBu_r",
-                       norm=TwoSlopeNorm(0.0, -lim, lim), extent=ext)
+        im = ax.pcolormesh(xe, ze, err.T, cmap="RdBu_r",
+                           norm=TwoSlopeNorm(0.0, -lim, lim), shading="flat",
+                           rasterized=True)
         if col == 0:
             ax.set_ylabel("pred - truth\nredshift", fontsize=11)
         else:
