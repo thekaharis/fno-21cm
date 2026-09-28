@@ -62,6 +62,15 @@ with ``z_grid`` and optional per-cone ``omega_m``)::
     python -m viz.physical_evaluation --manifest cubes/manifest.json \
       --out figures/3d_xhi/eval/physical_out
 
+Native-window multi-field checkpoints (fno_multifield.py; predictions are
+stitched native cones sampled on a common redshift grid by nearest native
+slice, truth read from the first model's dataset for every model)::
+
+    python -m viz.physical_evaluation --multifield-checkpoints \
+      mf=checkpoints/3d_xhi/mf_los_windows/RUN/best.pt --dtb-from-model \
+      --stage-edges 0.02 0.2 0.4 0.6 0.8 0.98 1.001 \
+      --split test --n-cones 200 --out figures/3d_xhi/mf_los_windows/physical_eval/RUN
+
 Synthetic verification::
 
     python -m viz.physical_evaluation --selftest
@@ -116,6 +125,7 @@ class PhysicalConfig:
     # "saturated": dT_b recomputed from x_HI and density (T_S >> T_CMB, no
     # velocities) -- isolates the x_HI error. "npz": a model's own predicted
     # dT_b and its target, read from the manifest npz (tb_pred / tb_truth).
+    # "model": the same, predicted live by --multifield-checkpoints.
     dtb_source: str = "saturated"
     xbar_bins: int = 20
     k_targets: tuple[float, ...] = (0.1, 0.2, 0.5)
@@ -1159,12 +1169,128 @@ def _parse_kv(items: list[str]) -> dict[str, str]:
     return parsed
 
 
+def _sample_id(path) -> int:
+    return int(Path(path).stem.rsplit("sample", 1)[1])
+
+
+def run_from_multifield_checkpoints(checkpoints: dict[str, str], cfg: PhysicalConfig,
+                                    out_dir: Path, n_cones: int, split: str,
+                                    n_z: int = 512, z_range=(5.001, 24.97),
+                                    save_cubes: Path | None = None):
+    """Native-window checkpoints from fno_multifield.py.
+
+    Each model is restored with its own inputs (history channels, excursion-set
+    layer, normalization) and predicts full native cones, which are sampled on
+    one common redshift grid by taking the NEAREST native slice per grid
+    redshift -- never interpolated; a grid fine enough to repeat slices is
+    refused. Truth (x_HI, density and, with dtb_source="model", dT_b) is read
+    from the FIRST model's dataset for every model, so all models are scored
+    against one truth; models must share its split and cone order.
+    """
+    import torch
+    import fno_multifield as fm
+    from dataset.lightcone_params import PARAM_NAMES
+    from dataset.los_windows import LOSWindowConfig, predict_native_cone
+
+    names = list(checkpoints)
+    metas = {n: torch.load(checkpoints[n], map_location="cpu", weights_only=False)["metadata"]
+             for n in names}
+    ref_meta = metas[names[0]]
+    ref_prep = ref_meta["preparation"]
+    ref_files = [_sample_id(f["path"]) for f in ref_prep["source"]["files"]]
+    for n in names[1:]:
+        prep = metas[n]["preparation"]
+        if prep["split"] != ref_prep["split"] or \
+                [_sample_id(f["path"]) for f in prep["source"]["files"]] != ref_files:
+            raise ValueError(f"multifield checkpoint {n!r} has a different split or cone order")
+    want_dtb = cfg.dtb_source == "model"
+    for n in names:
+        targets = metas[n]["mapping"]["targets"]
+        if "neutral_fraction" not in targets:
+            raise ValueError(f"{n!r} does not predict neutral_fraction")
+        if want_dtb and "brightness_temp" not in targets:
+            raise ValueError(f"{n!r} does not predict brightness_temp (--dtb-from-model)")
+    from dataset.fields import FieldMapping, FieldRegistry
+    registry = FieldRegistry.from_dict(ref_prep["registry"])
+    truth_fields = ["neutral_fraction", "density"] + (["brightness_temp"] if want_dtb else [])
+    ref_mapping = FieldMapping.create(["density"], [f for f in truth_fields if f != "density"],
+                                      ref_prep["conditioning"], registry)
+    reference, ref_rows, _ = fm.prepared_dataset(ref_prep, ref_mapping)
+    rows = ref_rows[split][:n_cones]
+    z_grid = np.linspace(float(z_range[0]), float(z_range[1]), int(n_z))
+    omega_index = PARAM_NAMES.index("OMm")
+    cone_ids = [_sample_id(reference.file_paths[r]) for r in rows]
+    omega_m = [float(reference.params[r][omega_index]) for r in rows]
+    picks = []
+    for r in rows:
+        z = np.asarray(reference.redshifts[r])
+        if z[0] > z_grid[0] + 1e-3 or z[-1] < z_grid[-1] - 1e-3:
+            raise ValueError(f"cone row {r} does not cover the redshift grid")
+        pick = np.abs(z[None, :] - z_grid[:, None]).argmin(axis=1)
+        if len(np.unique(pick)) != len(pick):
+            raise ValueError("redshift grid finer than the native spacing (repeated slices)")
+        picks.append(pick)
+    print(f"[multifield] {split} split: using {len(rows)} cones on {n_z} redshifts")
+
+    def make_source(name):
+        def generate():
+            device = fm.choose_device("auto")
+            checkpoint, model, dataset, _ = fm.restore(checkpoints[name], device)
+            window = LOSWindowConfig(**checkpoint["metadata"]["sampling"])
+            targets = list(dataset.mapping.targets)
+            norm = dataset.normalization
+            try:
+                for r, cone_id, om, pick in zip(rows, cone_ids, omega_m, picks):
+                    raw = predict_native_cone(model, dataset, r, window, device)[..., pick].numpy()
+                    phys = {t: raw[i]*norm[t]["scale"] + norm[t]["offset"] for i, t in enumerate(targets)}
+                    truth = reference.read_fields(r, names=truth_fields)
+                    pred = phys["neutral_fraction"]
+                    xhi_truth = truth["neutral_fraction"][..., pick]
+                    density = truth["density"][..., pick]
+                    extra = {}
+                    if want_dtb:
+                        extra = {"dtb_pred": phys["brightness_temp"],
+                                 "dtb_truth": truth["brightness_temp"][..., pick]}
+                    if save_cubes is not None:
+                        save_cubes.mkdir(parents=True, exist_ok=True)
+                        np.savez(save_cubes/f"{name}_cone{cone_id}.npz",
+                                 pred=pred.astype(np.float32), truth=xhi_truth.astype(np.float32),
+                                 density=density.astype(np.float32),
+                                 **({"tb_pred": extra["dtb_pred"].astype(np.float32),
+                                     "tb_truth": extra["dtb_truth"].astype(np.float32)} if want_dtb else {}))
+                    yield cone_id, pred, xhi_truth, density, om, extra
+            finally:
+                dataset.close()
+                del model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        return generate
+
+    try:
+        results = run_from_cubes({n: make_source(n) for n in names}, cfg, z_grid, out_dir)
+    finally:
+        reference.close()
+    if save_cubes is not None:
+        manifest = {"z_grid": z_grid.tolist(),
+                    "models": {n: [{"cone_id": c, "npz": str(save_cubes/f"{n}_cone{c}.npz"), "omega_m": om}
+                                   for c, om in zip(cone_ids, omega_m)] for n in names}}
+        (save_cubes/"manifest.json").write_text(json.dumps(manifest, indent=1))
+    return results
+
+
 def _dtb_settings(args) -> dict:
     if args.dtb_from_npz and not args.manifest:
         raise SystemExit("--dtb-from-npz needs --manifest")
-    lo, hi = args.dtb_range or ((-250.0, 100.0) if args.dtb_from_npz else (-5.0, 100.0))
-    return {"dtb_source": "npz" if args.dtb_from_npz else "saturated",
-            "dtb_range_mk": (float(lo), float(hi)), "dtb_bins": int(round(hi - lo))}
+    if args.dtb_from_model and not args.multifield_checkpoints:
+        raise SystemExit("--dtb-from-model needs --multifield-checkpoints")
+    own = args.dtb_from_npz or args.dtb_from_model
+    lo, hi = args.dtb_range or ((-250.0, 100.0) if own else (-5.0, 100.0))
+    source = "npz" if args.dtb_from_npz else "model" if args.dtb_from_model else "saturated"
+    settings = {"dtb_source": source, "dtb_range_mk": (float(lo), float(hi)),
+                "dtb_bins": int(round(hi - lo))}
+    if args.stage_edges:
+        settings["stage_edges"] = tuple(args.stage_edges)
+    return settings
 
 
 def main(argv=None):
@@ -1175,6 +1301,8 @@ def main(argv=None):
     source.add_argument("--selftest", action="store_true")
     source.add_argument("--manifest", type=Path)
     source.add_argument("--checkpoints", nargs="+", metavar="name=path")
+    source.add_argument("--multifield-checkpoints", nargs="+", metavar="name=path",
+                        help="native-window checkpoints from fno_multifield.py")
     parser.add_argument("--out", type=Path, default=Path("figures/3d_xhi/eval/physical_out"))
     parser.add_argument("--n-cones", type=int, default=200)
     parser.add_argument("--split", choices=["train", "val", "test"], default="test")
@@ -1187,6 +1315,15 @@ def main(argv=None):
     parser.add_argument("--dtb-from-npz", action="store_true",
                         help="manifest only: evaluate the model's own dT_b (npz tb_pred/tb_truth) "
                              "instead of recomputing it from x_HI in the saturated limit")
+    parser.add_argument("--dtb-from-model", action="store_true",
+                        help="multifield checkpoints: evaluate the models' own dT_b against the "
+                             "first model's dT_b target")
+    parser.add_argument("--n-z", type=int, default=512,
+                        help="multifield checkpoints: common redshift grid size (nearest native slices)")
+    parser.add_argument("--z-range", type=float, nargs=2, default=(5.001, 24.97), metavar=("ZMIN", "ZMAX"))
+    parser.add_argument("--stage-edges", type=float, nargs="+", default=None,
+                        help="x_HI stage edges (default 0.02 0.2 0.4 0.6 0.8 0.98); e.g. append 1.001 "
+                             "for a pre-reionization stage that covers the absorption trough")
     parser.add_argument("--dtb-range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="dT_b PDF range in mK (1 mK bins); default -5 100, or -250 100 "
                              "with --dtb-from-npz (absorption)")
@@ -1205,6 +1342,10 @@ def main(argv=None):
     )
     if args.manifest:
         run_from_manifest(args.manifest, cfg, args.out)
+    elif args.multifield_checkpoints:
+        run_from_multifield_checkpoints(
+            _parse_kv(args.multifield_checkpoints), cfg, args.out, n_cones=args.n_cones,
+            split=args.split, n_z=args.n_z, z_range=tuple(args.z_range), save_cubes=args.save_cubes)
     else:
         run_from_checkpoints(
             _parse_kv(args.checkpoints), cfg, args.out,
