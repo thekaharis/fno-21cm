@@ -279,7 +279,8 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
     torch.use_deterministic_algorithms(args.deterministic)
     device = choose_device(args.device)
-    model = MultiFieldModel(config, dataset.in_channels, mapping, registry, window_config).to(device)
+    model = MultiFieldModel(config, dataset.in_channels, mapping, registry, window_config,
+                            dataset.normalization, dataset.parameter_normalization).to(device)
     weights_tensor = torch.tensor(weights, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -417,7 +418,8 @@ def restore(path, device):
     sampling = metadata.get("sampling", {"mode": "full"})
     window_config = None if sampling["mode"] == "full" else LOSWindowConfig(**sampling)
     model = MultiFieldModel(ModelConfig.from_dict(metadata["model_config"]),
-                            dataset.in_channels, mapping, registry, window_config).to(device)
+                            dataset.in_channels, mapping, registry, window_config,
+                            dataset.normalization, dataset.parameter_normalization).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     return checkpoint, model, dataset, rows

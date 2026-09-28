@@ -213,6 +213,10 @@ class ModelConfig:
     excursion_set_rmax: float = 20.0
     excursion_set_los_pad: int = 64
     excursion_set_hidden: int = 64
+    # brightness_temp output head (multifield_model.StructuredBrightness):
+    # "direct" predicts T_b freely; "structured" predicts the spin factor and
+    # forms T_b = A(z) x_HI (1+delta) S V from inputs and the x_HI output.
+    tb_head: str = "direct"
 
     def __post_init__(self) -> None:
         if self.kind not in {
@@ -318,6 +322,8 @@ class ModelConfig:
             raise ValueError("cnn_kernel_size must be a positive odd integer")
         if not 0.0 <= self.cnn_dropout < 1.0:
             raise ValueError("cnn_dropout must be in [0, 1)")
+        if self.tb_head not in {"direct", "structured"}:
+            raise ValueError(f"tb_head must be direct or structured, got {self.tb_head!r}")
         if self.excursion_set not in {"none", "es", "bank"}:
             raise ValueError(f"excursion_set must be none, es or bank, got {self.excursion_set!r}")
         if (self.excursion_set_radii < 2 or not 0 < self.excursion_set_rmin < self.excursion_set_rmax
@@ -558,6 +564,7 @@ class ModelConfig:
             "excursion_set_rmax": self.excursion_set_rmax,
             "excursion_set_los_pad": self.excursion_set_los_pad,
             "excursion_set_hidden": self.excursion_set_hidden,
+            "tb_head": self.tb_head,
         }
 
     @property

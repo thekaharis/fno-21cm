@@ -42,8 +42,13 @@ def limits(field, truth):
     return (float(lo), float(hi)) if hi > lo else (float(truth.min()), float(truth.max()) + 1e-6)
 
 
-def animate(path, out_dir, max_frames, fps, dpi, runs=None, suffix=""):
-    """``runs``: optional [(label, path)] for a side-by-side comparison."""
+def animate(path, out_dir, max_frames, fps, dpi, runs=None, suffix="", truth_from_first=False):
+    """``runs``: optional [(label, path)] for a side-by-side comparison.
+
+    ``truth_from_first`` shows the first run's truth even if later runs stored
+    a different one (e.g. raw vs dv/dr-clipped brightness_temp); cone and
+    redshift grid must still agree.
+    """
     runs = runs or [("prediction", path)]
     with h5py.File(runs[0][1], "r") as f:
         cone = int(f.attrs["cone_id"])
@@ -58,7 +63,9 @@ def animate(path, out_dir, max_frames, fps, dpi, runs=None, suffix=""):
                 raise ValueError(f"{run_path} is not the same cone/grid as {runs[0][1]}")
             for k in fields:
                 if not np.array_equal(f[f"target/{k}"][:, :, ::97], truth[k][:, :, ::97]):
-                    raise ValueError(f"{run_path}: truth differs from {runs[0][1]}")
+                    if not truth_from_first:
+                        raise ValueError(f"{run_path}: truth differs from {runs[0][1]}")
+                    print(f"note: {run_path} stored a different {k} truth; showing {runs[0][1]}'s")
             preds.append((label, {k: f[f"prediction/{k}"][:].astype(np.float32) for k in fields}))
 
     n = len(z)
@@ -109,6 +116,8 @@ def main():
     ap.add_argument("--runs", nargs="+", metavar="LABEL=DIR",
                     help="prediction directories (cone_<id>.h5) shown side by side")
     ap.add_argument("--cones", nargs="+", type=int, help="cone ids for --runs")
+    ap.add_argument("--truth-from-first", action="store_true",
+                    help="allow runs whose stored truth differs; show the first run's truth")
     ap.add_argument("--out-dir", required=True, type=Path)
     ap.add_argument("--max-frames", type=int, default=320,
                     help="native cones have ~2400 slices; frames are strided down to this")
@@ -124,7 +133,7 @@ def main():
         for cone in args.cones:
             animate(None, args.out_dir, args.max_frames, args.fps, args.dpi,
                     runs=[(label, Path(d) / f"cone_{cone}.h5") for label, d in runs],
-                    suffix="_compare")
+                    suffix="_compare", truth_from_first=args.truth_from_first)
     else:
         for p in args.prediction:
             animate(p, args.out_dir, args.max_frames, args.fps, args.dpi)

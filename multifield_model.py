@@ -20,7 +20,8 @@ class MultiFieldModel(nn.Module):
     one-channel heads on the projection's shared hidden features, without an
     extra bottleneck or architecture-specific feature-extraction hooks.
     """
-    def __init__(self, config, in_channels, mapping: FieldMapping, registry=None, window_config=None):
+    def __init__(self, config, in_channels, mapping: FieldMapping, registry=None, window_config=None,
+                 normalization=None, parameter_normalization=None):
         super().__init__()
         registry = registry or FieldRegistry()
         mapping = FieldMapping.create(mapping.inputs, mapping.targets, mapping.conditioning, registry)
@@ -39,8 +40,13 @@ class MultiFieldModel(nn.Module):
             es_channels = self.excursion_set.out_channels
         self.backbone = build_model(config, in_channels + context_channels + es_channels,
                                     out_channels=len(mapping.targets), output_sigmoid=False)
+        self.structured = None
+        if config.tb_head == "structured":
+            self.structured = StructuredBrightness.for_native_windows(
+                mapping, window_config, normalization, parameter_normalization)
 
     def forward(self, x, context=None):
+        inputs = x
         if self.excursion_set is not None:
             x = torch.cat((x, self.excursion_set(x)), dim=1)
         if self.context_encoder is not None:
@@ -50,8 +56,12 @@ class MultiFieldModel(nn.Module):
         elif context is not None:
             raise ValueError("this model was configured without coarse context")
         raw = self.backbone(x)
-        return torch.cat([torch.sigmoid(raw[:, i:i+1]) if bounded else raw[:, i:i+1]
-                          for i, bounded in enumerate(self.bounded)], dim=1)
+        out = [torch.sigmoid(raw[:, i:i+1]) if bounded else raw[:, i:i+1]
+               for i, bounded in enumerate(self.bounded)]
+        if self.structured is not None:
+            ix, it = self.structured.xhi_index, self.structured.tb_index
+            out[it] = self.structured(inputs, out[ix], raw[:, it:it+1])
+        return torch.cat(out, dim=1)
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         # NeuralOperator's FNO inserts constructor metadata as a literal root
@@ -165,6 +175,88 @@ class ExcursionSetFeatures(nn.Module):
             margin = (smoothed + b*s[:, i, None, None, None] - a)/temperature
             score = margin if score is None else torch.logaddexp(score, margin)
         return torch.stack((torch.sigmoid(score), torch.tanh(score/8)), dim=1).to(x.dtype)
+
+
+class StructuredBrightness(nn.Module):
+    """brightness_temp from its physical structure; only the spin factor is learned.
+
+        T_b = A(z) * x_HI * (1 + delta) * S * V
+        A(z) = 27 mK (Ob h^2/0.023) sqrt(0.15/(Om h^2) (1+z)/10)
+        S    = 1 - T_CMB/T_S = 1 - exp(u)      (u from the backbone; S <= 1)
+        V    = 1/(1 + clip((dv/dr)/H, +-0.2))  (optically thin velocity factor)
+
+    x_HI is the model's own (sigmoid) output; delta, the LOS velocity, z, OMm
+    and the cell size come from the input channels, de-normalized with the
+    preparation's statistics. The same h and dv/dr clip as the cleaned target
+    (tools_clean_brightness_temp.py) keep the velocity factor consistent with
+    it; on clean data the implied S tends to 0.997 in fully heated gas.
+
+    The result is renormalized to the brightness_temp target statistics, so
+    loss and metrics are unchanged. Density and velocity contrast therefore
+    enter T_b exactly instead of being regressed.
+    """
+    HUBBLE_H = 0.6766
+    OMEGA_B_H2 = 0.02242
+    MAX_DVDR = 0.2
+    U_MAX = 5.0                      # S >= 1 - e^5 ~ -147
+
+    def __init__(self, indices, stats):
+        super().__init__()
+        self.density_index, self.velocity_index, self.z_index, self.omm_index, \
+            self.relative_index, self.xhi_index, self.tb_index = indices
+        self.stats = {k: float(v) for k, v in stats.items()}
+
+    @classmethod
+    def for_native_windows(cls, mapping, window_config, normalization, parameter_normalization):
+        if window_config is None:
+            raise ValueError("the structured T_b head needs native LOS windows")
+        for name in ("density", "los_velocity"):
+            if name not in mapping.inputs:
+                raise ValueError(f"the structured T_b head needs {name} as an input")
+        if set(mapping.targets) != {"neutral_fraction", "brightness_temp"}:
+            raise ValueError("the structured T_b head needs neutral_fraction and brightness_temp targets")
+        if not mapping.use_params or normalization is None or parameter_normalization is None:
+            raise ValueError("the structured T_b head needs parameter conditioning and normalization")
+        n_in = len(mapping.inputs)
+        names = list(parameter_normalization.names)
+        omm = names.index("OMm")
+        indices = (mapping.inputs.index("density"), mapping.inputs.index("los_velocity"), n_in,
+                   n_in + 1 + PARAM_NAMES.index("OMm"), n_in + 1 + len(PARAM_NAMES),
+                   mapping.targets.index("neutral_fraction"), mapping.targets.index("brightness_temp"))
+        if names != list(PARAM_NAMES):
+            raise ValueError("parameter normalization order differs from the input channels")
+        stats = {"density_offset": normalization["density"]["offset"],
+                 "density_scale": normalization["density"]["scale"],
+                 "velocity_offset": normalization["los_velocity"]["offset"],
+                 "velocity_scale": normalization["los_velocity"]["scale"],
+                 "tb_offset": normalization["brightness_temp"]["offset"],
+                 "tb_scale": normalization["brightness_temp"]["scale"],
+                 "omm_mean": parameter_normalization.mean[omm],
+                 "omm_std": parameter_normalization.std[omm]}
+        return cls(indices, stats)
+
+    def physical_tb(self, x, xhi, u):
+        st = self.stats
+        f = x.float()
+        delta = f[:, self.density_index]*st["density_scale"] + st["density_offset"]
+        velocity = f[:, self.velocity_index].double()*st["velocity_scale"] + st["velocity_offset"]
+        z = 1.0/f[:, self.z_index] - 1.0
+        omm = f[:, self.omm_index]*st["omm_std"] + st["omm_mean"]
+        rel = f[0, self.relative_index, 0, 0, :2]
+        cell = float(rel[1]-rel[0])*1000.0
+        h0 = 100.0*self.HUBBLE_H/3.0856775814913673e19          # 1/s
+        hubble = h0*torch.sqrt(omm.double()*(1+z.double())**3 + 1 - omm.double())
+        grad = torch.gradient(velocity, spacing=cell, dim=-1)[0]
+        ratio = (grad/hubble).float()
+        v_factor = 1.0/(1.0 + ratio.clamp(-self.MAX_DVDR, self.MAX_DVDR))
+        amplitude = 27.0*(self.OMEGA_B_H2/0.023)*torch.sqrt(
+            0.15/(omm*self.HUBBLE_H**2)*(1+z)/10.0)
+        spin = 1.0 - torch.exp(u[:, 0].float().clamp(max=self.U_MAX))
+        return amplitude*xhi[:, 0].float()*(1+delta)*spin*v_factor
+
+    def forward(self, x, xhi, u):
+        tb = self.physical_tb(x, xhi, u)
+        return ((tb - self.stats["tb_offset"])/self.stats["tb_scale"])[:, None].to(x.dtype)
 
 
 class SurroundingEncoder(nn.Module):
