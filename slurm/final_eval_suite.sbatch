@@ -9,7 +9,7 @@
 # rather than N models resident at once.
 #
 #   SPECS_FILE  file with one `name=path` per line (blank lines/# ignored)
-#   SUITE       bsd | ps | edge3d | edgeslice | parity | rmse | speed
+#   SUITE       bsd | ps | edge3d | edgeslice | parity | rmse | phys | speed
 #
 #   sbatch --export=ALL,SUITE=bsd,SPECS_FILE=figures/shared/eval/final_eval/specs.txt \
 #     slurm/final_eval_suite.sbatch
@@ -49,7 +49,7 @@ export LIGHTCONE_DIR="${LIGHTCONE_DIR:-/pfs/10/work/hd_id260-fno_training/data/d
 export CUBES_CACHE="${CUBES_CACHE:-/pfs/10/work/hd_id260-fno_training/data/compressed/cubes_3d.h5}"
 export LOCALFNO_PATCH_CHUNK_SIZE="${LOCALFNO_PATCH_CHUNK_SIZE:-64}"
 
-SUITE="${SUITE:?set SUITE to bsd|ps|edge3d|edgeslice|parity|rmse|speed}"
+SUITE="${SUITE:?set SUITE to bsd|ps|edge3d|edgeslice|parity|rmse|phys|speed}"
 SPECS_FILE="${SPECS_FILE:?set SPECS_FILE}"
 [ -f "$SPECS_FILE" ] || { echo "no such SPECS_FILE: $SPECS_FILE" >&2; exit 2; }
 
@@ -96,6 +96,13 @@ case "$SUITE" in
   rmse)
     python -m viz.rmse_r2_eval --checkpoints "${SPECS[@]}" \
         --split "$SPLIT" --n-cones "$N_CONES" --out "$OUT" ;;
+  phys)
+    # Reionization history / tau_e, x_HI and dT_b PDFs, 21-cm power and EFT
+    # bias fits. SAVE_CUBES=yes keeps pred/truth/density npz for re-runs.
+    extra=()
+    if [ "${SAVE_CUBES:-no}" = "yes" ]; then extra=(--save-cubes "$OUT/cubes"); fi
+    python -m viz.physical_evaluation --checkpoints "${SPECS[@]}" \
+        --split "$SPLIT" --n-cones "$N_CONES" --out "$OUT" "${extra[@]}" ;;
   speed)
     # Timing, not accuracy, so N_CONES is irrelevant -- N_SAMPLES cubes are
     # cycled through WARMUP + ITERS passes. The --gres allocation is one whole
